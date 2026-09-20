@@ -13,12 +13,14 @@
 ## 🏗️ 技术栈
 
 ### 后端
+
 - **框架**: HelloAgents (基于SimpleAgent)
 - **API**: FastAPI
 - **MCP工具**: amap-mcp-server (高德地图)
 - **LLM**: 支持多种LLM提供商(OpenAI, DeepSeek等)
 
 ### 前端
+
 - **框架**: Vue 3 + TypeScript
 - **构建工具**: Vite
 - **UI组件库**: Ant Design Vue
@@ -70,28 +72,33 @@ helloagents-trip-planner/
 ### 后端安装
 
 1. 进入后端目录
+
 ```bash
 cd backend
 ```
 
 2. 创建虚拟环境
+
 ```bash
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 ```
 
 3. 安装依赖
+
 ```bash
 pip install -r requirements.txt
 ```
 
 4. 配置环境变量
+
 ```bash
 cp .env.example .env
 # 编辑.env文件,填入你的API密钥
 ```
 
 5. 启动后端服务
+
 ```bash
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
@@ -99,22 +106,26 @@ uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ### 前端安装
 
 1. 进入前端目录
+
 ```bash
 cd frontend
 ```
 
 2. 安装依赖
+
 ```bash
 npm install
 ```
 
 3. 配置环境变量
+
 ```bash
 # 创建.env文件, 填入高德地图Web API Key 和 Web端JS API Key
 cp .env.example .env
 ```
 
 4. 启动开发服务器
+
 ```bash
 npm run dev
 ```
@@ -175,6 +186,7 @@ agent.add_tool(amap_tool)
 ### MCP工具调用
 
 Agent可以自动调用以下高德地图MCP工具:
+
 - `maps_text_search`: 搜索景点POI
 - `maps_weather`: 查询天气
 - `maps_direction_walking_by_address`: 步行路线规划
@@ -186,6 +198,7 @@ Agent可以自动调用以下高德地图MCP工具:
 启动后端服务后,访问 `http://localhost:8000/docs` 查看完整的API文档。
 
 主要端点:
+
 - `POST /api/trip/plan` - 生成旅行计划
 - `GET /api/map/poi` - 搜索POI
 - `GET /api/map/weather` - 查询天气
@@ -210,3 +223,6 @@ CC BY-NC-SA 4.0
 
 **HelloAgents智能旅行助手** - 让旅行计划变得简单而智能 🌈
 
+## Deployment
+
+Production deployment test.
