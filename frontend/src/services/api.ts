@@ -40,7 +40,11 @@ apiClient.interceptors.response.use(
  */
 export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
   try {
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)
+    // 行程生成包含多轮 LLM 与 MCP 调用，耗时可能超过全局的 2 分钟。
+    // timeout: 0 仅取消这个长任务的 axios 客户端超时；其他 API 仍保留全局超时。
+    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData, {
+      timeout: 0
+    })
     return response.data
   } catch (error: any) {
     console.error('生成旅行计划失败:', error)
@@ -62,4 +66,3 @@ export async function healthCheck(): Promise<any> {
 }
 
 export default apiClient
-
