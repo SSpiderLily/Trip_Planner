@@ -786,54 +786,29 @@ const exportAsPDF = async () => {
   }
 }
 
-// 截取地图图片
-const captureMapImage = async () => {
-  if (!map) return
-
-  try {
-    // 获取地图容器
-    const mapContainer = document.getElementById('amap-container')
-    if (!mapContainer) return
-
-    // 使用高德地图的截图功能
-    const mapCanvas = mapContainer.querySelector('canvas')
-    if (mapCanvas) {
-      // 创建一个img元素替换地图容器
-      const img = document.createElement('img')
-      img.src = mapCanvas.toDataURL('image/png')
-      img.style.width = '100%'
-      img.style.height = '500px'
-      img.style.objectFit = 'cover'
-      img.id = 'map-snapshot'
-
-      // 隐藏原地图,显示截图
-      mapContainer.style.display = 'none'
-      mapContainer.parentElement?.appendChild(img)
-    }
-  } catch (error) {
-    console.error('截取地图失败:', error)
-  }
-}
-
-// 恢复地图
-const restoreMap = () => {
-  const mapContainer = document.getElementById('amap-container')
-  const snapshot = document.getElementById('map-snapshot')
-
-  if (mapContainer) {
-    mapContainer.style.display = 'block'
-  }
-
-  if (snapshot) {
-    snapshot.remove()
-  }
-}
-
 // 初始化地图
 const initMap = async () => {
+  const amapWebJsKey = import.meta.env.VITE_AMAP_WEB_JS_KEY?.trim()
+  const amapSecurityCode = import.meta.env.VITE_AMAP_WEB_JS_SECURITY_CODE?.trim()
+
+  if (!amapWebJsKey || amapWebJsKey.startsWith('your_')) {
+    message.error('地图服务未配置：请在 frontend/.env 中设置 VITE_AMAP_WEB_JS_KEY 后重启前端服务')
+    return
+  }
+
+  if (!amapSecurityCode || amapSecurityCode.startsWith('your_')) {
+    message.error('地图安全密钥未配置：请在 frontend/.env 中设置 VITE_AMAP_WEB_JS_SECURITY_CODE 后重启前端服务')
+    return
+  }
+
+  // 高德要求在加载 JS API 前设置安全密钥。
+  window._AMapSecurityConfig = {
+    securityJsCode: amapSecurityCode
+  }
+
   try {
     const AMap = await AMapLoader.load({
-      key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
+      key: amapWebJsKey,  // 高德地图Web端(JS API) Key
       version: '2.0',
       plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
     })
@@ -851,7 +826,7 @@ const initMap = async () => {
     message.success('地图加载成功')
   } catch (error) {
     console.error('地图加载失败:', error)
-    message.error('地图加载失败')
+    message.error('地图加载失败，请检查高德 Key、安全密钥和域名白名单')
   }
 }
 
@@ -1431,4 +1406,3 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   }
 }
 </style>
-

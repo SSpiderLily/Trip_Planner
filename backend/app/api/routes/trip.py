@@ -1,6 +1,7 @@
 """旅行规划API路由"""
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest,
     TripPlanResponse,
@@ -41,7 +42,9 @@ async def plan_trip(request: TripRequest):
 
         # 生成旅行计划
         print("🚀 开始生成旅行计划...")
-        trip_plan = agent.plan_trip(request)
+        # HelloAgents 的 run() 是同步阻塞调用。放入线程池，避免长时间的
+        # LLM/MCP 调用阻塞 FastAPI 事件循环和其他请求。
+        trip_plan = await run_in_threadpool(agent.plan_trip, request)
 
         print("✅ 旅行计划生成成功,准备返回响应\n")
 
@@ -83,4 +86,3 @@ async def health_check():
             status_code=503,
             detail=f"服务不可用: {str(e)}"
         )
-

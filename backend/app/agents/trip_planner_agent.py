@@ -172,6 +172,9 @@ class MultiAgentTripPlanner:
                 env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
                 auto_expand=True
             )
+            self.amap_tools = self.amap_tool.get_expanded_tools()
+            if not self.amap_tools:
+                raise RuntimeError("未能发现高德 MCP 工具，请检查 uvx 和 AMAP_API_KEY 配置")
 
             # 创建景点搜索Agent
             print("  - 创建景点搜索Agent...")
@@ -180,7 +183,7 @@ class MultiAgentTripPlanner:
                 llm=self.llm,
                 system_prompt=ATTRACTION_AGENT_PROMPT
             )
-            self.attraction_agent.add_tool(self.amap_tool)
+            self._register_amap_tools(self.attraction_agent)
 
             # 创建天气查询Agent
             print("  - 创建天气查询Agent...")
@@ -189,7 +192,7 @@ class MultiAgentTripPlanner:
                 llm=self.llm,
                 system_prompt=WEATHER_AGENT_PROMPT
             )
-            self.weather_agent.add_tool(self.amap_tool)
+            self._register_amap_tools(self.weather_agent)
 
             # 创建酒店推荐Agent
             print("  - 创建酒店推荐Agent...")
@@ -198,7 +201,7 @@ class MultiAgentTripPlanner:
                 llm=self.llm,
                 system_prompt=HOTEL_AGENT_PROMPT
             )
-            self.hotel_agent.add_tool(self.amap_tool)
+            self._register_amap_tools(self.hotel_agent)
 
             # 创建行程规划Agent(不需要工具)
             print("  - 创建行程规划Agent...")
@@ -218,6 +221,11 @@ class MultiAgentTripPlanner:
             import traceback
             traceback.print_exc()
             raise
+
+    def _register_amap_tools(self, agent: SimpleAgent) -> None:
+        """将发现到的高德 MCP 子工具显式注册到指定 Agent。"""
+        for tool in self.amap_tools:
+            agent.add_tool(tool, auto_expand=False)
     
     def plan_trip(self, request: TripRequest) -> TripPlan:
         """
@@ -426,4 +434,3 @@ def get_trip_planner_agent() -> MultiAgentTripPlanner:
         _multi_agent_planner = MultiAgentTripPlanner()
 
     return _multi_agent_planner
-
