@@ -1,0 +1,138 @@
+# HelloAgents 智能旅行助手学习日志
+
+本文档记录项目改造过程中遇到的问题、分析过程、解决方案和验证结果。
+
+## 记录原则
+
+- 一次只记录并解决一个问题。
+- 先稳定复现问题，再分析和修改代码。
+- 保留能够说明问题的关键报错，省略无关日志。
+- 记录尝试失败的方案以及没有采用它们的原因。
+- 每次修改后写明验证命令和实际结果。
+- 不记录 API Key、Token、`.env` 内容或完整的敏感模型响应。
+
+## 问题索引
+
+| 编号 | 问题 | 状态 | 相关技术 |
+| --- | --- | --- | --- |
+| 001 | Vite 类型环境缺失 | 已解决 | Vue、Vite、TypeScript |
+
+## 问题 001：Vite 类型环境缺失
+
+### 1. 目标
+
+让 TypeScript 正确识别 Vite 提供的客户端类型，并减少当前前端构建错误。
+
+### 2. 错误现象
+
+执行：
+
+```bash
+cd frontend
+npm run build
+```
+
+关键报错包括：
+
+```text
+Cannot find module 'ant-design-vue/dist/reset.css' or its corresponding type declarations.
+Property 'env' does not exist on type 'ImportMeta'.
+```
+
+同一次构建还暴露了日期字段类型冲突和未使用函数；它们不属于 Vite 类型环境问题，已在对应组件中一并修复。
+
+### 3. 原因分析
+
+`tsconfig.json` 只包含项目源码，并不会自动让 TypeScript 加载 Vite 的客户端全局声明。
+
+Vite 的 `vite/client` 声明文件提供两类项目需要的环境类型：
+
+- `declare module '*.css'`，使 `import 'ant-design-vue/dist/reset.css'` 成为合法的副作用导入；
+- `ImportMeta` 与 `ImportMetaEnv`，使 `import.meta.env.VITE_*` 可以通过类型检查。
+
+项目启用了 `noUncheckedSideEffectImports`，因此缺少 CSS 声明时会直接报 `TS2307`；缺少 `ImportMeta` 扩展时会报 `TS2339`。
+
+### 4. 尝试过的方案
+
+未采用在每个组件中手写 `declare module '*.css'` 或把 `import.meta` 强制转换为 `any` 的方式。前者会重复维护声明，后者会失去环境变量的自动补全和类型检查。
+
+### 5. 最终解决方案
+
+新增 `frontend/src/vite-env.d.ts`：
+
+```ts
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE_URL?: string
+  readonly VITE_AMAP_WEB_JS_KEY: string
+}
+```
+
+三斜线指令会让 TypeScript 加载 Vite 的客户端声明；同名接口会通过声明合并补充本项目的 `VITE_*` 变量。`ImportMeta` 中的 `env` 字段由 `vite/client` 提供，本项目的声明只约束具体变量。
+
+### 6. 验证方法
+
+在 `frontend` 目录执行：
+
+```bash
+npm run build
+```
+
+实际结果：`vue-tsc && vite build` 通过，CSS 导入和 `import.meta.env` 的类型错误均已消除。
+
+附带修复：日期选择器使用 `Dayjs | null`，API 请求使用 `YYYY-MM-DD` 字符串。表单状态通过 `Omit<TripFormData, 'start_date' | 'end_date'>` 替换日期字段类型，并在提交时调用 `format()` 转换，避免交叉类型产生错误的 `string & Dayjs`。
+
+### 7. 注意事项
+
+`VITE_*` 变量在 Vite 构建时注入前端代码，不应放置任何服务器端密钥。`VITE_AMAP_WEB_JS_KEY` 是浏览器使用的高德 Web 端 JS Key，与后端的 `AMAP_API_KEY` 不同。
+
+类型声明只能帮助开发阶段发现拼写和使用错误，不能证明变量在运行时已配置。因此地图初始化额外检查空值和 `your_` 占位符，并提示用户在 `frontend/.env` 中配置后重启前端服务。
+
+### 8. 学习总结
+
+遇到 `import.meta.env` 或 CSS 导入的类型错误时，先检查项目是否存在并被 `tsconfig.json` 包含的 `vite-env.d.ts`，再确认其中包含 `/// <reference types="vite/client" />`。随后只为项目实际使用的 `VITE_*` 变量补充类型，并在依赖配置的功能入口增加运行时校验。
+
+---
+
+## 新问题记录模板
+
+复制以下内容，在问题索引中增加对应条目，然后开始记录。
+
+```md
+## 问题 XXX：问题名称
+
+### 1. 目标
+
+本次希望完成什么。
+
+### 2. 错误现象
+
+- 执行的命令
+- 关键报错
+- 稳定复现步骤
+
+### 3. 原因分析
+
+问题为什么发生，涉及哪些技术概念。
+
+### 4. 尝试过的方案
+
+尝试了什么、结果如何、为什么没有采用。
+
+### 5. 最终解决方案
+
+修改了哪些代码，以及选择该方案的理由。
+
+### 6. 验证方法
+
+执行了哪些命令，预期结果和实际结果是什么。
+
+### 7. 注意事项
+
+边界情况、常见误区、安全问题和后续影响。
+
+### 8. 学习总结
+
+本次掌握了什么，以及以后遇到类似问题时如何排查。
+```

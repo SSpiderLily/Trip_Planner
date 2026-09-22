@@ -2,6 +2,11 @@
 
 基于HelloAgents框架构建的智能旅行规划助手,集成高德地图MCP服务,提供个性化的旅行计划生成。
 
+## 学习文档
+
+- [学习目标与阶段计划](docs/learning-plan.md)：以后端和 Agent 开发为重点，包含实践任务、验收标准与当前进度。
+- [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
+
 ## ✨ 功能特点
 
 - 🤖 **AI驱动的旅行规划**: 基于HelloAgents框架的SimpleAgent,智能生成详细的多日旅程
