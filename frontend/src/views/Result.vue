@@ -789,9 +789,21 @@ const exportAsPDF = async () => {
 // 初始化地图
 const initMap = async () => {
   const amapWebJsKey = import.meta.env.VITE_AMAP_WEB_JS_KEY?.trim()
+  const amapSecurityCode = import.meta.env.VITE_AMAP_WEB_JS_SECURITY_CODE?.trim()
+
   if (!amapWebJsKey || amapWebJsKey.startsWith('your_')) {
     message.error('地图服务未配置：请在 frontend/.env 中设置 VITE_AMAP_WEB_JS_KEY 后重启前端服务')
     return
+  }
+
+  if (!amapSecurityCode || amapSecurityCode.startsWith('your_')) {
+    message.error('地图安全密钥未配置：请在 frontend/.env 中设置 VITE_AMAP_WEB_JS_SECURITY_CODE 后重启前端服务')
+    return
+  }
+
+  // 高德要求在加载 JS API 前设置安全密钥。
+  window._AMapSecurityConfig = {
+    securityJsCode: amapSecurityCode
   }
 
   try {
@@ -814,7 +826,7 @@ const initMap = async () => {
     message.success('地图加载成功')
   } catch (error) {
     console.error('地图加载失败:', error)
-    message.error('地图加载失败')
+    message.error('地图加载失败，请检查高德 Key、安全密钥和域名白名单')
   }
 }
 
