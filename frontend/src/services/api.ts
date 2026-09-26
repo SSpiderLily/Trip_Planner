@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse } from '@/types'
+import type { TripFormData, TripPlanResponse, TaskStatus, SpanSummary, SpanDetail } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -35,22 +35,36 @@ apiClient.interceptors.response.use(
   }
 )
 
-/**
- * 生成旅行计划
- */
-export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
-  try {
-    // 行程生成包含多轮 LLM 与 MCP 调用，耗时可能超过全局的 2 分钟。
-    // timeout: 0 仅取消这个长任务的 axios 客户端超时；其他 API 仍保留全局超时。
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData, {
-      timeout: 0
-    })
-    return response.data
-  } catch (error: any) {
-    console.error('生成旅行计划失败:', error)
-    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
-  }
+export async function submitTask(data: TripFormData): Promise<{ task_id: string; status: string }> {
+  return (await apiClient.post('/api/trip/tasks', data)).data
 }
+export async function getTask(id: string): Promise<TaskStatus> {
+  return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}`)).data
+}
+export async function getTaskResult(id: string): Promise<TripPlanResponse> {
+  return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/result`)).data
+}
+export async function listTasks(status = '', offset = 0): Promise<TaskStatus[]> {
+  return (await apiClient.get('/api/trip/tasks', { params: { status: status || undefined, limit: 50, offset } })).data
+}
+export async function getSpans(id: string): Promise<SpanSummary[]> {
+  return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/spans`)).data
+}
+export async function getSpan(id: string, spanId: string): Promise<SpanDetail> {
+  return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/spans/${encodeURIComponent(spanId)}`)).data
+}
+export function errorText(error: any): string {
+  const detail = error.response?.data?.detail
+  if (Array.isArray(detail)) return detail.map((item: any) => item.msg).join('；')
+  return detail?.message || (typeof detail === 'string' ? detail : error.message) || '请求失败'
+}
+export const stepName = (name: string) => ({
+  planning: '规划执行', 'planning.initialize': '初始化规划器', 'agent.attraction': '搜索景点',
+  'agent.weather': '查询天气', 'agent.hotel': '搜索酒店', 'agent.planner': '整合行程',
+  'llm.invoke': '模型调用', 'validation.itinerary': '校验行程',
+  'tool.amap_maps_text_search': '高德地点搜索', 'tool.amap_maps_weather': '高德天气查询'
+} as Record<string, string>)[name] || name
+export const stateName = (state: string) => ({ accepted: '已接收', running: '执行中', succeeded: '成功', failed: '失败', interrupted: '已中断' } as Record<string, string>)[state] || state
 
 /**
  * 健康检查

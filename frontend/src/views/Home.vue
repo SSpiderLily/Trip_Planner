@@ -184,36 +184,32 @@
         <!-- 加载进度条 -->
         <a-form-item v-if="loading">
           <div class="loading-container">
-            <a-progress
-              :percent="loadingProgress"
-              status="active"
-              :stroke-color="{
-                '0%': '#667eea',
-                '100%': '#764ba2',
-              }"
-              :stroke-width="10"
-            />
+            <a-spin />
             <p class="loading-status">
               {{ loadingStatus }}
             </p>
           </div>
         </a-form-item>
+        <p v-if="activeTaskId">任务：{{ activeTaskId }}</p>
+        <router-link :to="{ path: '/observability', query: activeTaskId ? { task: activeTaskId } : {} }">查看任务与调用记录 →</router-link>
       </a-form>
     </a-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
+import { submitTask, getTask, getTaskResult, errorText, stepName } from '@/services/api'
 import type { TripFormData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
 const loading = ref(false)
-const loadingProgress = ref(0)
+const activeTaskId = ref(localStorage.getItem('activeTripTask') || '')
+let timer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const loadingStatus = ref('')
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
@@ -248,76 +244,71 @@ watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
   }
 })
 
+const poll = async () => {
+  if (disposed || !activeTaskId.value) return
+  try {
+    const task = await getTask(activeTaskId.value)
+    if (disposed) return
+    const current = task.current_step
+    const elapsed = current ? Math.max(0, Math.floor((Date.now() - Date.parse(current.started_at)) / 1000)) : null
+    loadingStatus.value = current ? `${stepName(current.name)} · 已等待 ${elapsed} 秒` : '任务已接收，正在读取执行状态…'
+    if (task.observation_incomplete) loadingStatus.value += '（观测记录不完整）'
+    if (task.status === 'succeeded') {
+      const response = await getTaskResult(task.task_id)
+      if (disposed) return
+      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
+      localStorage.removeItem('activeTripTask')
+      loading.value = false
+      await router.push('/result')
+      return
+    }
+    if (task.status === 'failed' || task.status === 'interrupted') {
+      loadingStatus.value = task.persistence_error?.message || task.error_message || '任务未完成'
+      message.error(loadingStatus.value)
+      localStorage.removeItem('activeTripTask')
+      loading.value = false
+      return
+    }
+  } catch (error: any) {
+    if (disposed) return
+    loadingStatus.value = `状态查询失败：${errorText(error)}；不代表规划失败。`
+    if (error.response?.status === 404) {
+      localStorage.removeItem('activeTripTask')
+      activeTaskId.value = ''
+      loading.value = false
+      message.warning('任务不存在或已清理，请重新提交')
+      return
+    }
+  }
+  if (!disposed) timer = setTimeout(poll, 2000)
+}
+
 const handleSubmit = async () => {
+  if (loading.value) return
   if (!formData.start_date || !formData.end_date) {
     message.error('请选择日期')
     return
   }
-
   loading.value = true
-  loadingProgress.value = 0
-  loadingStatus.value = '正在初始化...'
-
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
-
+  loadingStatus.value = '正在提交需求…'
   try {
-    const requestData: TripFormData = {
-      city: formData.city,
-      start_date: formData.start_date.format('YYYY-MM-DD'),
-      end_date: formData.end_date.format('YYYY-MM-DD'),
-      travel_days: formData.travel_days,
-      transportation: formData.transportation,
-      accommodation: formData.accommodation,
-      preferences: formData.preferences,
-      free_text_input: formData.free_text_input
-    }
-
-    const response = await generateTripPlan(requestData)
-
-    clearInterval(progressInterval)
-    loadingProgress.value = 100
-    loadingStatus.value = '✅ 完成!'
-
-    if (response.success && response.data) {
-      // 保存到sessionStorage
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-
-      message.success('旅行计划生成成功!')
-
-      // 短暂延迟后跳转
-      setTimeout(() => {
-        router.push('/result')
-      }, 500)
-    } else {
-      message.error(response.message || '生成失败')
-    }
+    const response = await submitTask({ ...formData,
+      start_date: formData.start_date.format('YYYY-MM-DD'), end_date: formData.end_date.format('YYYY-MM-DD') })
+    activeTaskId.value = response.task_id
+    localStorage.setItem('activeTripTask', response.task_id)
+    await poll()
   } catch (error: any) {
-    clearInterval(progressInterval)
-    message.error(error.message || '生成旅行计划失败,请稍后重试')
-  } finally {
-    setTimeout(() => {
-      loading.value = false
-      loadingProgress.value = 0
-      loadingStatus.value = ''
-    }, 1000)
+    loading.value = false
+    message.error(errorText(error))
   }
 }
+onMounted(() => {
+  if (activeTaskId.value) {
+    loading.value = true
+    void poll()
+  }
+})
+onUnmounted(() => { disposed = true; clearTimeout(timer) })
 </script>
 
 <style scoped>

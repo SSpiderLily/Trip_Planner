@@ -5,10 +5,12 @@ import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
 import Home from './views/Home.vue'
 import Result from './views/Result.vue'
+import Observability from './views/Observability.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/observability', name: 'Observability', component: Observability },
     {
       path: '/',
       name: 'Home',
