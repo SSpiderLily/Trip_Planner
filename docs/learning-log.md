@@ -16,6 +16,7 @@
 | 编号 | 问题 | 状态 | 相关技术 |
 | --- | --- | --- | --- |
 | 001 | Vite 类型环境缺失 | 已解决 | Vue、Vite、TypeScript |
+| 002 | 旅行规划健康检查读取不存在的 Agent 属性 | 已解决 | FastAPI、线程池、多智能体 |
 
 ## 问题 001：Vite 类型环境缺失
 
@@ -92,6 +93,50 @@ npm run build
 ### 8. 学习总结
 
 遇到 `import.meta.env` 或 CSS 导入的类型错误时，先检查项目是否存在并被 `tsconfig.json` 包含的 `vite-env.d.ts`，再确认其中包含 `/// <reference types="vite/client" />`。随后只为项目实际使用的 `VITE_*` 变量补充类型，并在依赖配置的功能入口增加运行时校验。
+
+---
+
+## 问题 002：旅行规划健康检查读取不存在的 Agent 属性
+
+### 1. 目标
+
+让 `/api/trip/health` 按当前四 Agent 规划器结构返回健康信息，并避免首次初始化阻塞 FastAPI 事件循环。
+
+### 2. 错误现象
+
+健康检查把 `get_trip_planner_agent()` 的返回值当作单 Agent 包装对象，读取 `agent.agent.name` 和 `agent.agent.list_tools()`。实际返回的是 `MultiAgentTripPlanner`，它没有 `agent` 属性，因此成功初始化的规划器也会让健康检查进入异常分支并返回 503。
+
+### 3. 原因分析
+
+当前规划器分别持有景点、天气、酒店和行程规划四个 `SimpleAgent`，并把 `get_expanded_tools()` 得到的高德工具列表保存在 `amap_tools`。健康路由仍沿用旧的单 Agent 对象结构。
+
+此外，首次调用 `get_trip_planner_agent()` 会同步创建 LLM 与 MCP 工具；如果直接在异步路由中调用，会占用事件循环线程。
+
+### 4. 尝试过的方案
+
+没有给规划器添加兼容用的 `agent` 属性，因为这会掩盖实际的多 Agent 结构，也无法准确代表工具数。
+
+### 5. 最终解决方案
+
+健康路由在线程池中调用 `get_trip_planner_agent()`，保留原有初始化异常到 HTTP 503 的映射。健康响应保留 `status`、`service`、`agent_name` 和 `tools_count`：`agent_name` 明确标为“多智能体旅行规划系统”，`tools_count` 使用 `len(planner.amap_tools)`；新增 `agents` 列表返回四个 `SimpleAgent.name`。
+
+### 6. 验证方法
+
+在 `backend` 目录执行：
+
+```bash
+venv/bin/python -m unittest tests/test_trip_health.py tests/test_trip_planner_agent.py
+```
+
+实际结果：3 个测试通过。使用不含 `agent` 属性的替代规划器验证健康响应结构和工具数，并模拟初始化异常验证 503 响应；同时现有的 MCP 工具注册测试通过。
+
+### 7. 注意事项
+
+该端点报告规划器初始化和已发现工具的数量，不代表每个 LLM 或高德 MCP 请求都能成功完成。
+
+### 8. 学习总结
+
+健康检查应读取当前服务对象的真实结构；多 Agent 系统应分别报告系统名称、成员 Agent 和共享/发现工具数量。异步路由调用可能阻塞的同步初始化函数时，应把初始化放入线程池。
 
 ---
 

@@ -72,14 +72,20 @@ async def plan_trip(request: TripRequest):
 async def health_check():
     """健康检查"""
     try:
-        # 检查Agent是否可用
-        agent = get_trip_planner_agent()
-        
+        # 规划器首次初始化会同步创建 LLM 和 MCP 工具，放入线程池避免阻塞事件循环。
+        planner = await run_in_threadpool(get_trip_planner_agent)
+
         return {
             "status": "healthy",
             "service": "trip-planner",
-            "agent_name": agent.agent.name,
-            "tools_count": len(agent.agent.list_tools())
+            "agent_name": "多智能体旅行规划系统",
+            "tools_count": len(planner.amap_tools),
+            "agents": [
+                planner.attraction_agent.name,
+                planner.weather_agent.name,
+                planner.hotel_agent.name,
+                planner.planner_agent.name,
+            ],
         }
     except Exception as e:
         raise HTTPException(
