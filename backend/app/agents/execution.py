@@ -90,7 +90,13 @@ class PlanningAgent(SimpleAgent):
         evidence = self.tool_evidence.get(name, [])
         if not evidence:
             raise PlanningError('REQUIRED_TOOL_NOT_CALLED', '必要工具未实际执行')
-        items = [item for payload in evidence for item in (find_items(payload, key) or [])]
+        items = []
+        for payload in evidence:
+            values = find_items(payload, key)
+            # 当前 amap MCP 将 casts 展平为 forecasts；同时兼容原始高德结构。
+            if values is None and key == 'casts':
+                values = find_items(payload, 'forecasts')
+            items.extend(values or [])
         if not items:
             raise PlanningError('INSUFFICIENT_INFORMATION', '必要查询没有有效结果')
         return items

@@ -240,3 +240,7 @@ README 增加一键启动说明。脚本只提示 `.env` 是否存在，不打�
 - 修改：应用持有单活动任务，SQLite 保存任务/结果/Span；线程池执行规划，ContextVar 关联父子步骤；实际 invoke 和工具执行入口采集，脱敏限长。业务结果事务与观测写入错误隔离，重启标记中断。
 - 验证：25 项 unittest 通过；实际 SimpleAgent 循环配合替代 LLM/MCP 验证 7 次模型、3 次工具及消息反馈；覆盖互斥、存储失败、容量和级联清理。真实外部 API 与浏览器验收仍待最终检查。
 - 位置：`backend/app/services/{task_service,task_repository,observation_service}.py`；`backend/tests/test_task_runtime.py`。
+
+## 真实验收修复：MCP天气返回结构
+
+真实北京一日游调用发现工具成功但天气步骤判定信息不足：当前 MCP 将原始 casts 展平为 forecasts 列表。执行适配同时支持这两种结构，不放宽有效预报和日期匹配规则。新增回归测试，26项unittest通过；该次失败的调用树与实际工具输出成功保留并可在页面定位。

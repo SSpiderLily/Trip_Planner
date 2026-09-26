@@ -79,3 +79,10 @@ class PlanningContractTest(unittest.TestCase):
         self.assertNotIn('2026-09-26', forecasts)
         with self.assertRaises(PlanningError):
             forecast_by_date([])
+
+    def test_current_mcp_flat_weather_shape(self):
+        agent, _, _ = self.agent('', ['天气'])
+        agent.run('需求')
+        agent.tool_evidence = {'amap_maps_weather': [{'forecasts': [{'date':'2026-09-26', 'dayweather':'晴', 'nightweather':'晴'}]}]}
+        forecasts = forecast_by_date(agent.require('amap_maps_weather', 'casts'))
+        self.assertIn('2026-09-26', forecasts)
