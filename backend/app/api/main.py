@@ -1,6 +1,11 @@
 """FastAPI主应用"""
 
+import asyncio
 from fastapi import FastAPI
+from ..services.task_repository import TaskRepository
+from ..services.task_service import TaskService
+from ..services.observation_service import ObservationService
+from ..agents.trip_planner_agent import get_trip_planner_agent
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes
@@ -51,6 +56,12 @@ async def startup_event():
         print("\n请检查.env文件并确保所有必要的配置项都已设置")
         raise
     
+    if settings.observation_retention_days < 1 or settings.observation_content_limit < 256 or settings.observation_max_bytes < 4096:
+        raise ValueError("观测存储配置必须为有效正数（内容上限至少256字节）")
+    repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
+    await asyncio.to_thread(repository.initialize)
+    app.state.task_service = TaskService(repository, ObservationService(repository, settings.observation_content_limit), get_trip_planner_agent)
+
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")
     print("📖 ReDoc文档: http://localhost:8000/redoc")
@@ -62,6 +73,8 @@ async def shutdown_event():
     """应用关闭事件"""
     print("\n" + "="*60)
     print("👋 应用正在关闭...")
+    if hasattr(app.state, "task_service"):
+        await app.state.task_service.close()
     print("="*60 + "\n")
 
 

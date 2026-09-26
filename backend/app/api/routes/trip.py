@@ -1,67 +1,70 @@
 """旅行规划API路由"""
 
-from fastapi import APIRouter, HTTPException
+import asyncio
+from fastapi import APIRouter, HTTPException, Request, Query
+from ...services.task_service import TaskError
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
-    TripRequest,
-    TripPlanResponse,
-    ErrorResponse
+    TripRequest
 )
 from ...agents.trip_planner_agent import get_trip_planner_agent
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
 
-@router.post(
-    "/plan",
-    response_model=TripPlanResponse,
-    summary="生成旅行计划",
-    description="根据用户输入的旅行需求,生成详细的旅行计划"
-)
-async def plan_trip(request: TripRequest):
-    """
-    生成旅行计划
+def service(request: Request):
+    return request.app.state.task_service
 
-    Args:
-        request: 旅行请求参数
 
-    Returns:
-        旅行计划响应
-    """
+def task_http(exc):
+    return HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)})
+
+
+@router.post("/tasks", status_code=202)
+async def create_task(body: TripRequest, request: Request):
     try:
-        print(f"\n{'='*60}")
-        print(f"📥 收到旅行规划请求:")
-        print(f"   城市: {request.city}")
-        print(f"   日期: {request.start_date} - {request.end_date}")
-        print(f"   天数: {request.travel_days}")
-        print(f"{'='*60}\n")
+        return await service(request).submit(body)
+    except TaskError as exc:
+        raise task_http(exc)
 
-        # 获取Agent实例
-        print("🔄 获取多智能体系统实例...")
-        agent = get_trip_planner_agent()
 
-        # 生成旅行计划
-        print("🚀 开始生成旅行计划...")
-        # HelloAgents 的 run() 是同步阻塞调用。放入线程池，避免长时间的
-        # LLM/MCP 调用阻塞 FastAPI 事件循环和其他请求。
-        trip_plan = await run_in_threadpool(agent.plan_trip, request)
+@router.get("/tasks")
+async def list_tasks(request: Request, status: str | None = Query(None, pattern="^(accepted|running|succeeded|failed|interrupted)$"),
+                     limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+    return await asyncio.to_thread(service(request).repository.list_tasks, status, limit, offset)
 
-        print("✅ 旅行计划生成成功,准备返回响应\n")
 
-        return TripPlanResponse(
-            success=True,
-            message="旅行计划生成成功",
-            data=trip_plan
-        )
+@router.get("/tasks/{task_id}")
+async def task_status(task_id: str, request: Request):
+    try:
+        return await service(request).status(task_id)
+    except TaskError as exc:
+        raise task_http(exc)
 
-    except Exception as e:
-        print(f"❌ 生成旅行计划失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"生成旅行计划失败: {str(e)}"
-        )
+
+@router.get("/tasks/{task_id}/result")
+async def task_result(task_id: str, request: Request):
+    try:
+        return {"success": True, "data": await service(request).result(task_id)}
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.get("/tasks/{task_id}/spans")
+async def task_spans(task_id: str, request: Request):
+    try:
+        await service(request).status(task_id)
+        return await asyncio.to_thread(service(request).repository.spans, task_id)
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.get("/tasks/{task_id}/spans/{span_id}")
+async def span_detail(task_id: str, span_id: str, request: Request):
+    row = await asyncio.to_thread(service(request).repository.span, task_id, span_id)
+    if row is None:
+        raise HTTPException(404, detail={"code":"SPAN_NOT_FOUND", "message":"步骤记录不存在"})
+    return row
 
 
 @router.get(

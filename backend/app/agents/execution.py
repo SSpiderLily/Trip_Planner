@@ -4,6 +4,7 @@ import json
 from datetime import date
 
 from hello_agents import SimpleAgent
+from ..services.observation_service import span
 
 
 class PlanningError(RuntimeError):
@@ -74,14 +75,16 @@ class PlanningAgent(SimpleAgent):
         if tool is None:
             raise PlanningError('TOOL_NOT_FOUND', '模型请求了不存在的工具')
         args = self._parse_tool_parameters(tool_name, parameters)
-        try:
-            result = tool.run(args)
-        except Exception as exc:
-            raise PlanningError('TOOL_FAILED', '工具执行失败') from exc
-        data = decode_result(result)
-        check_tool_result(data)
-        self.tool_evidence.setdefault(tool_name, []).append(data)
-        return f'🔧 工具 {tool_name} 执行结果：\n{result}'
+        with span('tool.' + tool_name, 'tool', args) as record:
+            try:
+                result = tool.run(args)
+            except Exception as exc:
+                raise PlanningError('TOOL_FAILED', '工具执行失败') from exc
+            record.output = result
+            data = decode_result(result)
+            check_tool_result(data)
+            self.tool_evidence.setdefault(tool_name, []).append(data)
+            return f'🔧 工具 {tool_name} 执行结果：\n{result}'
 
     def require(self, name, key):
         evidence = self.tool_evidence.get(name, [])

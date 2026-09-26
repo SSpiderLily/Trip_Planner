@@ -233,3 +233,10 @@ README 增加一键启动说明。脚本只提示 `.env` 是否存在，不打�
 - 修改：项目内 PlanningAgent 保留框架消息循环但显式传播工具错误，独立维护实际调用证据，每次执行清空对话；去掉备用行程，校验日期完整性，天气只取真实预报且未知温度为空。
 - 验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`，14 项通过，覆盖未调用、错误、空结果、两次历史隔离和日期冲突。测试替代外部依赖，尚不作为真实 API 验收。
 - 代码：`backend/app/agents/execution.py`、`trip_planner_agent.py`、`models/schemas.py`；测试：`backend/tests/test_planning_contract.py`。
+
+## 第一版后端：独立任务与增量观测
+
+- 原因：HTTP 长连接不能承担任务生命周期，只在结束保存无法定位中断。
+- 修改：应用持有单活动任务，SQLite 保存任务/结果/Span；线程池执行规划，ContextVar 关联父子步骤；实际 invoke 和工具执行入口采集，脱敏限长。业务结果事务与观测写入错误隔离，重启标记中断。
+- 验证：25 项 unittest 通过；实际 SimpleAgent 循环配合替代 LLM/MCP 验证 7 次模型、3 次工具及消息反馈；覆盖互斥、存储失败、容量和级联清理。真实外部 API 与浏览器验收仍待最终检查。
+- 位置：`backend/app/services/{task_service,task_repository,observation_service}.py`；`backend/tests/test_task_runtime.py`。

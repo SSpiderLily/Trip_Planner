@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4"
 
+    # 本地任务与观测存储
+    task_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "tasks.sqlite3")
+    observation_retention_days: int = 7
+    observation_max_bytes: int = 200 * 1024 * 1024
+    observation_content_limit: int = 64 * 1024
+
     # 日志配置
     log_level: str = "INFO"
 
