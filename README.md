@@ -6,8 +6,7 @@
 
 - [学习目标与阶段计划](docs/learning-plan.md)：以后端和 Agent 开发为重点，包含实践任务、验收标准与当前进度。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
-- [智能体观测实施计划](docs/observability-plan.md)：本地运行与观测建设的六个阶段、实施步骤和验收标准。
-- [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言；目标规则与当前实现的差异见观测计划。
+- [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言与规划规则。
 
 ## ✨ 功能特点
 
@@ -181,7 +180,7 @@ npm run dev
 
 `backend/app/agents/trip_planner_agent.py` 中的 `MultiAgentTripPlanner` 顺序运行景点、天气、酒店和行程规划四个 Agent。前三个注册通过 `get_expanded_tools()` 发现的高德工具，最终规划 Agent 整合文本结果，不注册工具。注册时使用 `agent.add_tool(tool, auto_expand=False)`。
 
-API 路由在线程池中执行 `plan_trip()`，但规划器的首次初始化仍在线程池外。必要工具未调用、返回错误或空结果均使规划失败，不再返回占位备用行程；不同规划的 Agent 对话历史隔离。详见[观测计划中的代码基线](docs/observability-plan.md)。
+任务服务独立于 HTTP 连接运行，初始化及规划均在线程池执行。必要工具未调用、返回错误或空结果均使规划失败，不返回占位备用行程；不同规划的 Agent 对话历史隔离。天气只使用实际查询中日期匹配的预报，其余日期显示天气未知。
 
 ### HelloAgents 基础集成示意
 
@@ -227,10 +226,36 @@ Agent可以自动调用以下高德地图MCP工具:
 
 主要端点:
 
-- `POST /api/trip/plan` - 生成旅行计划
+- `POST /api/trip/tasks` - 接收任务（202）；忙时返回 409 / TASK_BUSY，不排队
+- `GET /api/trip/tasks` - 任务列表；支持 status、limit、offset
+- `GET /api/trip/tasks/{task_id}` - 轻量状态与当前步骤；任务失败时查询仍返回 200
+- `GET /api/trip/tasks/{task_id}/result` - 成功行程；运行中/失败/中断分别返回 409 及对应错误码
+- `GET /api/trip/tasks/{task_id}/spans` - 调用树摘要
+- `GET /api/trip/tasks/{task_id}/spans/{span_id}` - 单步骤输入输出与错误详情
 - `GET /api/map/poi` - 搜索POI
 - `GET /api/map/weather` - 查询天气
 - `POST /api/map/route` - 规划路线
+
+## 本地任务观测
+
+启动 `python3 dev.py` 后，从首页的“查看任务与调用记录”进入 `/observability`。提交需求后，首页每 2 秒读取真实步骤；刷新会恢复当前任务查询。观测页可筛选历史、展开 Agent → 模型/工具调用树、点击查看脱敏输入输出，并打开成功行程。终态停止自动轮询；需要查看新提交的任务时点击刷新。
+
+第一版使用单后端进程、一个活动规划任务，子 Agent 顺序执行；请勿用多个 worker 共享此数据库。关闭浏览器不会取消任务；后端正常退出等待正在执行的任务，强制退出后下次启动标记中断，不自动重跑。旧 `/api/trip/plan` 已移除。
+
+配置写入 `backend/.env`，经 `app/config.py` 读取：
+
+| 配置 | 默认值 |
+| --- | --- |
+| `TASK_DB_PATH` | `backend/data/tasks.sqlite3`（默认解析为绝对路径） |
+| `OBSERVATION_RETENTION_DAYS` | 7 天 |
+| `OBSERVATION_MAX_BYTES` | 209715200（200 MiB 治理目标，包含 WAL/SHM） |
+| `OBSERVATION_CONTENT_LIMIT` | 65536（单步骤输入、输出各 64 KiB） |
+
+启动及接收新任务前清理过期/超容量的已结束任务，连同行程和步骤一起删除；活动任务保留。无法腾出空间时停止保存观测详情并提示不完整。内容先脱敏后限长；截断有标记，未知温度与未知用量不填零。数据库及辅助文件不入 Git。
+
+观测写入失败不改变业务判定；任务结果保存失败不能显示为成功。数据库无法写入时，当前进程仅保留有界错误摘要，重启后无法还原未落盘内容。输入校验拒绝仍返回 422，拒绝记录展示后置；第一版不提供自动重试、取消、重放和 Token 用量统计。观测成功不等于行程质量或所有价格信息都经过核验。
+
+验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`；`cd frontend && npm run build`。替代依赖测试与真实调用验收结论见[学习日志](docs/learning-log.md)。
 
 ## 🤝 贡献指南
 
