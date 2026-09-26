@@ -406,12 +406,13 @@ _multi_agent_planner = None
 _planner_lock = threading.Lock()
 
 
-def get_trip_planner_agent() -> MultiAgentTripPlanner:
+def get_trip_planner_agent():
     """获取多智能体旅行规划系统实例(单例模式)"""
     global _multi_agent_planner
 
     with _planner_lock:
         if _multi_agent_planner is None:
-            _multi_agent_planner = MultiAgentTripPlanner()
+            from .route_planner import RouteTripPlanner
+            _multi_agent_planner = RouteTripPlanner()
 
     return _multi_agent_planner

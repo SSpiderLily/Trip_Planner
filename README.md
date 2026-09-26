@@ -7,6 +7,7 @@
 - [学习目标与阶段计划](docs/learning-plan.md)：以后端和 Agent 开发为重点，包含实践任务、验收标准与当前进度。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
 - [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言与规划规则。
+- [旅行规划体验优化需求](docs/trip-planning-requirements.md)：本轮输入简化与每日路线展示的已确认需求、后续待办及验收方向（最小闭环已接入，完整目标分步落实）。
 
 ## ✨ 功能特点
 
@@ -152,73 +153,27 @@ npm run dev
 
 ## 📝 使用指南
 
-1. 在首页填写旅行信息:
-   - 目的地城市
-   - 旅行日期和天数
-   - 交通方式偏好
-   - 住宿偏好
-   - 旅行风格标签
+1. 必填目的地与起止日期；天数自动计算。“更多偏好”可填写已定住处、偏好和完整备注。
+2. 提交后可查看真实执行步骤；完成后按天切换活动、餐饮、交通及地图位置。
+3. 地图虚线仅表示游览顺序，具体交通耗时以路线查询为准；地图加载失败时显示坐标位置示意。
+4. 结果顶部汇总需调整和待确认事项。未知耗时、费用不按零计算；费用小计不含住宿及往返目的地的大交通。
+5. 历史旧格式结果保留原始数据查看；需要新版页面时重新生成。
 
-2. 点击"生成旅行计划"按钮
+## 🔧 当前规划流程
 
-3. 系统将:
-   - 调用HelloAgents Agent生成初步计划
-   - Agent自动调用高德地图MCP工具搜索景点
-   - Agent获取天气信息和路线规划
-   - 整合所有信息生成完整行程
+默认入口使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色：候选搜集、行程安排、行程修改。程序按阶段推进，先理解需求与搜集景点，再安排游玩分布、搜集住宿和用餐区域、生成完整日程，最后查询交通并检查；有已知安排问题时最多调整两轮。
 
-4. 查看结果:
-   - 每日详细行程
-   - 景点信息与地图标记
-   - 交通路线规划
-   - 天气预报
-   - 餐饮推荐
+开放备注完全由模型理解，禁止关键词、正则或硬编码意图分类。模型提出结构化搜索动作，程序调用高德 MCP 并保留地点事实；模型返回的地点名称与坐标按来源 ID 核实、修正。三个角色上下文独立，通过条件、候选、草稿及问题交接。
 
-## 🔧 核心实现
+任务服务仍独立于 HTTP 连接在线程池执行。局部地点查询失败可在额度内继续，天气或交通缺失可带提示交付；没有已核实景点、日期不合法等不能交付。结构修复最多一次，修改无效或引入新冲突时保留上一份有效结果。
 
-### 当前 Agent 编排
+新版结果使用 `schema_version: 2`，沿用 SQLite 的任务、结果和 Span 三张表。旧四角色类暂留作旧行为回归参考，默认入口已切换。
 
-`backend/app/agents/trip_planner_agent.py` 中的 `MultiAgentTripPlanner` 顺序运行景点、天气、酒店和行程规划四个 Agent。前三个注册通过 `get_expanded_tools()` 发现的高德工具，最终规划 Agent 整合文本结果，不注册工具。注册时使用 `agent.add_tool(tool, auto_expand=False)`。
+可配置 `PLANNER_PLACE_QUERY_LIMIT`（默认36，含地点详情，失败调用也计数）与 `PLANNER_ROUTE_QUERY_LIMIT`（默认80）。地点搜集为后续住宿餐饮预留额度，每阶段最多两次模型决策；同任务相同路线复用查询结果。公共交通模式下，直线距离不超过1.2公里时查询步行路线。
 
-任务服务独立于 HTTP 连接运行，初始化及规划均在线程池执行。必要工具未调用、返回错误或空结果均使规划失败，不返回占位备用行程；不同规划的 Agent 对话历史隔离。天气只使用实际查询中日期匹配的预报，其余日期显示天气未知。
+`PLANNER_TOOL_TIMEOUT_SECONDS` 控制每次地图工具调用超时（默认25秒）；超时结束 MCP 会话并记录失败，避免查询长期阻塞任务。整体生成仍可能需要数分钟，可在观测页查看实际进度。
 
-### HelloAgents 基础集成示意
-
-下面是单 Agent 示例，不代表完整的四 Agent 运行流程：
-
-```python
-from hello_agents import SimpleAgent, HelloAgentsLLM
-from hello_agents.tools import MCPTool
-
-# 创建高德地图MCP工具
-amap_tool = MCPTool(
-    name="amap",
-    server_command=["uvx", "amap-mcp-server"],
-    env={"AMAP_MAPS_API_KEY": "your_api_key"},
-    auto_expand=True
-)
-
-# 创建旅行规划Agent
-agent = SimpleAgent(
-    name="旅行规划助手",
-    llm=HelloAgentsLLM(),
-    system_prompt="你是一个专业的旅行规划助手..."
-)
-
-# 显式注册发现的子工具，与当前项目注册方式一致
-for tool in amap_tool.get_expanded_tools():
-    agent.add_tool(tool, auto_expand=False)
-```
-
-### MCP工具调用
-
-Agent可以自动调用以下高德地图MCP工具:
-
-- `maps_text_search`: 搜索景点POI
-- `maps_weather`: 查询天气
-- `maps_direction_walking_by_address`: 步行路线规划
-- `maps_direction_driving_by_address`: 驾车路线规划
-- `maps_direction_transit_integrated_by_address`: 公共交通路线规划
+当前最小版本尚未实现可选夜游替代路线、营业/预约数据自动核实、住宿价格参考、完整道路轨迹绘制和地点输入联想。开放与预约信息统一提示待确认；这些目标保留在需求文档，不视为已完成。
 
 ## 📄 API文档
 

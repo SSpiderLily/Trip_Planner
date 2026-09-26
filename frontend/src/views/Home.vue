@@ -13,7 +13,7 @@
         <span class="icon">✈️</span>
       </div>
       <h1 class="page-title">智能旅行助手</h1>
-      <p class="page-subtitle">基于AI的个性化旅行规划,让每一次出行都完美无忧</p>
+      <p class="page-subtitle">去哪玩、吃什么、怎么走，一次安排清楚</p>
     </div>
 
     <a-card class="form-card" :bordered="false">
@@ -89,77 +89,21 @@
           </a-row>
         </div>
 
-        <!-- 第二步:偏好设置 -->
-        <div class="form-section">
-          <div class="section-header">
-            <span class="section-icon">⚙️</span>
-            <span class="section-title">偏好设置</span>
-          </div>
-
-          <a-row :gutter="24">
-            <a-col :span="8">
-              <a-form-item name="transportation">
-                <template #label>
-                  <span class="form-label">交通方式</span>
-                </template>
-                <a-select v-model:value="formData.transportation" size="large" class="custom-select">
-                  <a-select-option value="公共交通">🚇 公共交通</a-select-option>
-                  <a-select-option value="自驾">🚗 自驾</a-select-option>
-                  <a-select-option value="步行">🚶 步行</a-select-option>
-                  <a-select-option value="混合">🔀 混合</a-select-option>
-                </a-select>
-              </a-form-item>
-            </a-col>
-            <a-col :span="8">
-              <a-form-item name="accommodation">
-                <template #label>
-                  <span class="form-label">住宿偏好</span>
-                </template>
-                <a-select v-model:value="formData.accommodation" size="large" class="custom-select">
-                  <a-select-option value="经济型酒店">💰 经济型酒店</a-select-option>
-                  <a-select-option value="舒适型酒店">🏨 舒适型酒店</a-select-option>
-                  <a-select-option value="豪华酒店">⭐ 豪华酒店</a-select-option>
-                  <a-select-option value="民宿">🏡 民宿</a-select-option>
-                </a-select>
-              </a-form-item>
-            </a-col>
-            <a-col :span="8">
-              <a-form-item name="preferences">
-                <template #label>
-                  <span class="form-label">旅行偏好</span>
-                </template>
-                <div class="preference-tags">
-                  <a-checkbox-group v-model:value="formData.preferences" class="custom-checkbox-group">
-                    <a-checkbox value="历史文化" class="preference-tag">🏛️ 历史文化</a-checkbox>
-                    <a-checkbox value="自然风光" class="preference-tag">🏞️ 自然风光</a-checkbox>
-                    <a-checkbox value="美食" class="preference-tag">🍜 美食</a-checkbox>
-                    <a-checkbox value="购物" class="preference-tag">🛍️ 购物</a-checkbox>
-                    <a-checkbox value="艺术" class="preference-tag">🎨 艺术</a-checkbox>
-                    <a-checkbox value="休闲" class="preference-tag">☕ 休闲</a-checkbox>
-                  </a-checkbox-group>
-                </div>
-              </a-form-item>
-            </a-col>
-          </a-row>
-        </div>
-
-        <!-- 第三步:额外要求 -->
-        <div class="form-section">
-          <div class="section-header">
-            <span class="section-icon">💬</span>
-            <span class="section-title">额外要求</span>
-          </div>
-
-          <a-form-item name="free_text_input">
-            <a-textarea
-              v-model:value="formData.free_text_input"
-              placeholder="请输入您的额外要求,例如:想去看升旗、需要无障碍设施、对海鲜过敏等..."
-              :rows="3"
-              size="large"
-              class="custom-textarea"
-            />
-          </a-form-item>
-        </div>
+        <p class="defaults">默认适中节奏、公共交通结合步行；未填写住处时推荐住宿区域。</p>
+        <a-collapse ghost style="margin-bottom: 24px">
+          <a-collapse-panel key="preferences" header="更多偏好（选填）">
+            <a-form-item label="已定住处" name="lodging">
+              <a-input v-model:value="formData.lodging" placeholder="酒店或具体地址；未确定可留空" :maxlength="300" />
+            </a-form-item>
+            <a-form-item label="游玩偏好" name="preferences">
+              <a-checkbox-group v-model:value="formData.preferences" :options="['历史文化', '自然风光', '美食', '城市漫步', '艺术', '休闲']" />
+            </a-form-item>
+            <a-form-item label="其他要求" name="free_text_input">
+              <a-textarea v-model:value="formData.free_text_input" placeholder="例如必去地点、预算或自驾要求。备注由模型理解。" :rows="3" />
+              <small>带老人、孩子、少走路等当前只提供提醒，尚不自动调整路线。</small>
+            </a-form-item>
+          </a-collapse-panel>
+        </a-collapse>
 
         <!-- 提交按钮 -->
         <a-form-item>
@@ -223,7 +167,8 @@ const formData = reactive<TripFormState>({
   end_date: null,
   travel_days: 1,
   transportation: '公共交通',
-  accommodation: '经济型酒店',
+  accommodation: '',
+  lodging: '',
   preferences: [],
   free_text_input: ''
 })
@@ -292,7 +237,7 @@ const handleSubmit = async () => {
   loading.value = true
   loadingStatus.value = '正在提交需求…'
   try {
-    const response = await submitTask({ ...formData,
+    const response = await submitTask({ city: formData.city, lodging: formData.lodging, preferences: formData.preferences, free_text_input: formData.free_text_input,
       start_date: formData.start_date.format('YYYY-MM-DD'), end_date: formData.end_date.format('YYYY-MM-DD') })
     activeTaskId.value = response.task_id
     localStorage.setItem('activeTripTask', response.task_id)

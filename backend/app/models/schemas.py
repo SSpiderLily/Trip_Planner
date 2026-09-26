@@ -12,9 +12,10 @@ class TripRequest(BaseModel):
     city: str = Field(..., description="目的地城市", example="北京")
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
-    travel_days: int = Field(..., description="旅行天数", ge=1, le=30, example=3)
-    transportation: str = Field(..., description="交通方式", example="公共交通")
-    accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
+    travel_days: Optional[int] = Field(default=None, description="按日期自动计算；兼容旧客户端", ge=1, le=30)
+    transportation: str = Field(default="公共交通", description="旧客户端交通选项")
+    accommodation: str = Field(default="", description="旧客户端住宿偏好")
+    lodging: str = Field(default="", max_length=300, description="已定住处，可留空")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
     
@@ -23,6 +24,13 @@ class TripRequest(BaseModel):
         start, end = date.fromisoformat(self.start_date), date.fromisoformat(self.end_date)
         if start.isoformat() != self.start_date or end.isoformat() != self.end_date:
             raise ValueError("日期必须采用 YYYY-MM-DD")
+        days = (end - start).days + 1
+        if not 1 <= days <= 30:
+            raise ValueError("旅行天数须在1至30天之间")
+        if not self.city.strip():
+            raise ValueError("目的地不能为空")
+        if self.travel_days is None:
+            self.travel_days = days
         if (end - start).days + 1 != self.travel_days:
             raise ValueError("旅行天数必须与起止日期范围（含首尾）一致")
         return self
@@ -212,4 +220,3 @@ class ErrorResponse(BaseModel):
     success: bool = Field(default=False, description="是否成功")
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
-

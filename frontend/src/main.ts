@@ -4,7 +4,7 @@ import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
 import Home from './views/Home.vue'
-import Result from './views/Result.vue'
+import Result from './views/RouteResult.vue'
 import Observability from './views/Observability.vue'
 
 const router = createRouter({

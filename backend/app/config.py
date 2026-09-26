@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import List
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -48,6 +49,9 @@ class Settings(BaseSettings):
     observation_retention_days: int = 7
     observation_max_bytes: int = 200 * 1024 * 1024
     observation_content_limit: int = 64 * 1024
+    planner_place_query_limit: int = Field(default=36, ge=4, le=200)
+    planner_route_query_limit: int = Field(default=80, ge=1, le=500)
+    planner_tool_timeout_seconds: float = Field(default=25, gt=0, le=120)
 
     # 日志配置
     log_level: str = "INFO"
@@ -114,4 +118,3 @@ def print_config():
     print(f"LLM Base URL: {llm_base_url}")
     print(f"LLM Model: {llm_model}")
     print(f"日志级别: {settings.log_level}")
-

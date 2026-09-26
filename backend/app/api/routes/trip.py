@@ -86,12 +86,7 @@ async def health_check():
             "service": "trip-planner",
             "agent_name": "多智能体旅行规划系统",
             "tools_count": len(planner.amap_tools),
-            "agents": [
-                planner.attraction_agent.name,
-                planner.weather_agent.name,
-                planner.hotel_agent.name,
-                planner.planner_agent.name,
-            ],
+            "agents": [agent.name for agent in planner.agents],
         }
     except Exception as e:
         raise HTTPException(
