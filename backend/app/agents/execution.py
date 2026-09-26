@@ -84,7 +84,12 @@ class PlanningAgent(SimpleAgent):
             data = decode_result(result)
             check_tool_result(data)
             self.tool_evidence.setdefault(tool_name, []).append(data)
-            return f'🔧 工具 {tool_name} 执行结果：\n{result}'
+        # 工具正常空返回仍是成功 Span，但业务必须立即终止，不能再让模型改词重查。
+        if tool_name == 'amap_maps_text_search':
+            self.require(tool_name, 'pois')
+        elif tool_name == 'amap_maps_weather':
+            forecast_by_date(self.require(tool_name, 'casts'))
+        return f'🔧 工具 {tool_name} 执行结果：\n{result}'
 
     def require(self, name, key):
         evidence = self.tool_evidence.get(name, [])

@@ -117,6 +117,46 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             pass
         self.assertTrue(self.repo.status('active')['observation_incomplete'])
 
+    async def test_result_transaction_rolls_back_on_insert_error(self):
+        self.repo.create('rollback', {})
+        self.repo.start('rollback')
+        with self.repo.connection() as conn:
+            conn.execute("CREATE TRIGGER reject_result BEFORE INSERT ON task_results BEGIN SELECT RAISE(ABORT, 'test'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repo.succeed('rollback', {})
+        self.assertEqual(self.repo.status('rollback')['status'], 'running')
+        self.assertIsNone(self.repo.result('rollback'))
+
+    async def test_cancelled_submitter_does_not_cancel_execution(self):
+        started, release = threading.Event(), threading.Event()
+        original = self.repo.create
+        def delayed_create(*args):
+            started.set()
+            release.wait(3)
+            original(*args)
+        with patch.object(self.repo, 'create', side_effect=delayed_create):
+            caller = asyncio.create_task(self.service.submit(request()))
+            await asyncio.to_thread(started.wait, 3)
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            release.set()
+            await self.service.close()
+        self.assertEqual(self.repo.list_tasks()[0]['status'], 'succeeded')
+
+    async def test_total_write_failure_visible_without_backup_result(self):
+        with patch.object(self.repo,'succeed',side_effect=sqlite3.OperationalError()), patch.object(self.repo,'fail',side_effect=sqlite3.OperationalError()):
+            accepted = await self.service.submit(request())
+            await self.service.close()
+        status = await self.service.status(accepted['task_id'])
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['persisted_status'], 'running')
+        self.assertEqual(status['persistence_error']['code'], 'RESULT_SAVE_FAILED')
+        self.assertEqual((await self.service.list_tasks('failed'))[0]['status'], 'failed')
+        self.assertEqual(await self.service.list_tasks('running'), [])
+        with patch.object(self.repo,'status',side_effect=sqlite3.OperationalError()):
+            self.assertEqual((await self.service.status(accepted['task_id']))['status'], 'failed')
+
     async def test_redaction_and_utf8_truncation(self):
         with patch.dict(os.environ,{'LLM_API_KEY':'test-secret-value'}):
             data,cut=bounded({'token':'abc','message':'test-secret-value '+'旅'*500},256)
@@ -124,6 +164,8 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(data.encode()),256)
         self.assertNotIn('test-secret-value',data);self.assertNotIn('abc',data)
         json.loads(data)
+        quoted, _ = bounded('响应包含 {"api_key":"example-private-value"}', 1024)
+        self.assertNotIn('example-private-value', quoted)
 
 
 class ApiTest(unittest.TestCase):
@@ -164,3 +206,43 @@ class FullChainTest(unittest.TestCase):
             second=repo.span('chain',model_spans[1]['span_id'])
             self.assertIn('工具执行结果',json.dumps(second['input_data'],ensure_ascii=False))
             self.assertEqual(len({s['parent_span_id'] for s in model_spans}),4)
+
+class HttpLifecycleTest(unittest.TestCase):
+    def test_accept_busy_live_query_success_and_terminal_error(self):
+        from contextlib import asynccontextmanager
+        import time
+        gate = threading.Event()
+        class SlowPlanner:
+            def plan_trip(self, req):
+                with span('agent.wait', 'agent'):
+                    gate.wait(5)
+                return result(req)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = TaskRepository(Path(directory)/'db')
+            @asynccontextmanager
+            async def lifespan(app):
+                repo.initialize()
+                app.state.task_service = TaskService(repo,ObservationService(repo),SlowPlanner)
+                yield
+                gate.set()
+                await app.state.task_service.close()
+            app=FastAPI(lifespan=lifespan); app.include_router(router,prefix='/api')
+            with TestClient(app) as client:
+                accepted=client.post('/api/trip/tasks',json=request().model_dump())
+                self.assertEqual(accepted.status_code,202)
+                tid=accepted.json()['task_id']; url='/api/trip/tasks/'+tid
+                self.assertEqual(client.post('/api/trip/tasks',json=request().model_dump()).status_code,409)
+                self.assertEqual(client.get(url).status_code,200)
+                self.assertEqual(client.get(url+'/result').json()['detail']['code'],'RESULT_NOT_READY')
+                self.assertEqual(client.get('/api/trip/tasks/missing').status_code,404)
+                gate.set()
+                for _ in range(100):
+                    status=client.get(url).json()
+                    if status['status']=='succeeded': break
+                    time.sleep(.01)
+                self.assertEqual(status['status'],'succeeded')
+                self.assertEqual(client.get(url+'/result').json()['data']['city'],'北京')
+                self.assertTrue(client.get(url+'/spans').json())
+                repo.create('failed',{});repo.fail('failed','TEST_FAILURE','测试失败')
+                self.assertEqual(client.get('/api/trip/tasks/failed').status_code,200)
+                self.assertEqual(client.get('/api/trip/tasks/failed/result').json()['detail']['code'],'TASK_FAILED')

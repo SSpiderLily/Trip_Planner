@@ -124,9 +124,16 @@ class TaskRepository:
             row = conn.execute('SELECT result_data FROM task_results WHERE task_id=?', (task_id,)).fetchone()
             return json.loads(row[0]) if row else None
 
-    def list_tasks(self, status=None, limit=50, offset=0):
+    def list_tasks(self, status=None, limit=50, offset=0, failed_ids=()):
         with self.connection() as conn:
             where, params = ('WHERE status=?', [status]) if status else ('', [])
+            if status and failed_ids:
+                placeholders = ','.join('?' for _ in failed_ids)
+                if status == 'failed':
+                    where = f'WHERE (status=? OR task_id IN ({placeholders}))'
+                else:
+                    where = f'WHERE status=? AND task_id NOT IN ({placeholders})'
+                params.extend(failed_ids)
             return [dict(row) for row in conn.execute(f'SELECT {SUMMARY} FROM tasks {where} ORDER BY created_at DESC LIMIT ? OFFSET ?', (*params, limit, offset))]
 
     def begin_span(self, record):

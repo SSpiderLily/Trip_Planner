@@ -45,11 +45,11 @@ class PlanningContractTest(unittest.TestCase):
             agent.require('amap_maps_text_search', 'pois')
 
     def test_empty_result_is_business_failure(self):
-        agent, _, _ = self.agent('{"pois":[]}')
-        agent.run('需求')
-        self.assertIn('amap_maps_text_search', agent.tool_evidence)
+        agent, llm, _ = self.agent('{"pois":[]}')
         with self.assertRaises(PlanningError):
-            agent.require('amap_maps_text_search', 'pois')
+            agent.run('需求')
+        self.assertIn('amap_maps_text_search', agent.tool_evidence)
+        self.assertEqual(llm.invoke.call_count, 1)
 
     def test_two_runs_no_history_leak(self):
         agent, llm, _ = self.agent('{"pois":[{"name":"公园"}]}', ['第一次回复', '第二次回复'])

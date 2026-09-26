@@ -9,6 +9,7 @@ class TaskError(RuntimeError):
     def __init__(self, code, message, status=409):
         super().__init__(message)
         self.code, self.status = code, status
+        self.details = {}
 
 
 class TaskService:
@@ -47,6 +48,10 @@ class TaskService:
                 await asyncio.to_thread(self.repository.create, task_id, sanitize(request.model_dump()))
                 self.hold(self._execute(task_id, request))
             except Exception as exc:
+                try:
+                    await asyncio.to_thread(self.repository.fail, task_id, 'TASK_START_FAILED', '任务启动失败')
+                except Exception:
+                    pass
                 self.active_id = None
                 raise TaskError('TASK_REGISTRATION_FAILED', '任务登记失败，未启动规划', 503) from exc
             return {'task_id':task_id, 'status':'accepted'}
@@ -65,11 +70,16 @@ class TaskService:
             await asyncio.to_thread(self.repository.start, task_id)
             result = await run_in_threadpool(self._plan, task_id, request)
             try:
-                await asyncio.to_thread(self.repository.succeed, task_id, result, task_id in self.observation.incomplete)
+                await asyncio.to_thread(self.repository.succeed, task_id, sanitize(result), task_id in self.observation.incomplete)
             except Exception:
                 await self._fail(task_id, 'RESULT_SAVE_FAILED', '结果保存失败')
         except Exception as exc:
-            await self._fail(task_id, getattr(exc,'code','PLANNING_FAILED'), '规划失败，请查看执行记录', getattr(exc,'step',None))
+            code = getattr(exc, 'code', 'PLANNING_FAILED')
+            messages = {'INSUFFICIENT_INFORMATION':'必要查询没有有效结果',
+                        'REQUIRED_TOOL_NOT_CALLED':'模型未实际调用必要工具',
+                        'TOOL_FAILED':'工具调用失败', 'TOOL_RESPONSE_INVALID':'工具返回内容无法验证',
+                        'INVALID_ITINERARY':'行程日期与需求不一致'}
+            await self._fail(task_id, code, messages.get(code, '规划失败，请查看执行记录'), getattr(exc,'step',None))
         finally:
             self.active_id = None
             if task_id not in self.save_failures:
@@ -82,7 +92,9 @@ class TaskService:
             self.save_failures[task_id] = {'code':code, 'message':message, 'step':step}
             # 错误摘要有界；完整结果不驻留。
             while len(self.save_failures) > 100:
-                self.save_failures.pop(next(iter(self.save_failures)))
+                expired = next(iter(self.save_failures))
+                self.save_failures.pop(expired)
+                self.observation.incomplete.discard(expired)
 
     async def status(self, task_id):
         failure = self.save_failures.get(task_id)
@@ -104,11 +116,26 @@ class TaskService:
             record['current_step'] = None
         return record
 
+    async def list_tasks(self, status=None, limit=50, offset=0):
+        try:
+            rows = await asyncio.to_thread(self.repository.list_tasks, status, limit, offset, tuple(self.save_failures))
+        except Exception as exc:
+            raise TaskError('STORAGE_UNAVAILABLE', '存储暂不可用，无法查询任务列表', 503) from exc
+        for row in rows:
+            row['observation_incomplete'] = bool(row['observation_incomplete'] or row['task_id'] in self.observation.incomplete)
+            row['persistence_error'] = self.save_failures.get(row['task_id'])
+            if row['persistence_error']:
+                row['persisted_status'] = row['status']
+                row['status'] = 'failed'
+        return rows
+
     async def result(self, task_id):
         record = await self.status(task_id)
         if record['status'] != 'succeeded':
             code = {'failed':'TASK_FAILED', 'interrupted':'TASK_INTERRUPTED'}.get(record['status'], 'RESULT_NOT_READY')
-            raise TaskError(code, record['error_message'] or '任务未成功完成')
+            error = TaskError(code, record['error_message'] or '任务未成功完成')
+            error.details = {'task_status': record['status'], 'error_code': record['error_code']}
+            raise error
         result = await asyncio.to_thread(self.repository.result, task_id)
         if result is None:
             raise TaskError('RESULT_UNAVAILABLE', '结果不可用', 503)

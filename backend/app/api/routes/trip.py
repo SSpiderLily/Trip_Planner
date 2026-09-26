@@ -17,7 +17,7 @@ def service(request: Request):
 
 
 def task_http(exc):
-    return HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)})
+    return HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc), **exc.details})
 
 
 @router.post("/tasks", status_code=202)
@@ -31,7 +31,10 @@ async def create_task(body: TripRequest, request: Request):
 @router.get("/tasks")
 async def list_tasks(request: Request, status: str | None = Query(None, pattern="^(accepted|running|succeeded|failed|interrupted)$"),
                      limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    return await asyncio.to_thread(service(request).repository.list_tasks, status, limit, offset)
+    try:
+        return await service(request).list_tasks(status, limit, offset)
+    except TaskError as exc:
+        raise task_http(exc)
 
 
 @router.get("/tasks/{task_id}")

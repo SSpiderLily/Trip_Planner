@@ -20,7 +20,7 @@ def sanitize(value):
             if _sensitive.search(key) and len(secret) >= 6:
                 value = value.replace(secret, '[REDACTED]')
         value = re.sub(r'(?i)(bearer\s+)[^\s"\']+', r'\1[REDACTED]', value)
-        value = re.sub(r'(?i)((?:api[_-]?key|token|secret|password|authorization|key)\s*[=:]\s*)[^\s,;&"\']+', r'\1[REDACTED]', value)
+        value = re.sub(r'(?i)((?:api[ _-]?key|token|secret|password|authorization|key)[\"\']?\s*[=:]\s*[\"\']?)[^\s,;&"\']+', r'\1[REDACTED]', value)
         return value
     return value
 
