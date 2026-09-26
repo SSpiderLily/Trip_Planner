@@ -6,6 +6,8 @@
 
 - [学习目标与阶段计划](docs/learning-plan.md)：以后端和 Agent 开发为重点，包含实践任务、验收标准与当前进度。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
+- [智能体观测实施计划](docs/observability-plan.md)：本地运行与观测建设的六个阶段、实施步骤和验收标准。
+- [观测实现现状与目标结构](docs/observability.md)：当前调用链、错误与降级行为、待实施的记录结构。观测框架尚未实现。
 
 ## ✨ 功能特点
 
@@ -175,7 +177,15 @@ npm run dev
 
 ## 🔧 核心实现
 
-### HelloAgents Agent集成
+### 当前 Agent 编排
+
+`backend/app/agents/trip_planner_agent.py` 中的 `MultiAgentTripPlanner` 顺序运行景点、天气、酒店和行程规划四个 Agent。前三个注册通过 `get_expanded_tools()` 发现的高德工具，最终规划 Agent 整合文本结果，不注册工具。注册时使用 `agent.add_tool(tool, auto_expand=False)`。
+
+API 路由在线程池中执行 `plan_trip()`，但规划器的首次初始化仍在线程池外。规划或解析异常可能生成备用行程，路由仍返回 `success=True`，因此页面显示行程不代表所有外部调用成功。详见[当前调用链与限制](docs/observability.md)。
+
+### HelloAgents 基础集成示意
+
+下面是单 Agent 示例，不代表完整的四 Agent 运行流程：
 
 ```python
 from hello_agents import SimpleAgent, HelloAgentsLLM
@@ -196,8 +206,9 @@ agent = SimpleAgent(
     system_prompt="你是一个专业的旅行规划助手..."
 )
 
-# 添加工具
-agent.add_tool(amap_tool)
+# 显式注册发现的子工具，与当前项目注册方式一致
+for tool in amap_tool.get_expanded_tools():
+    agent.add_tool(tool, auto_expand=False)
 ```
 
 ### MCP工具调用
