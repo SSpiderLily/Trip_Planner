@@ -226,3 +226,10 @@ README 增加一键启动说明。脚本只提示 `.env` 是否存在，不打�
 
 本次掌握了什么，以及以后遇到类似问题时如何排查。
 ```
+
+## 观测前置修复：失败传播与历史隔离
+
+- 原因：规划器返回占位备用行程，框架把工具异常转成文本继续执行；共享 Agent 历史可能串入下一次需求。
+- 修改：项目内 PlanningAgent 保留框架消息循环但显式传播工具错误，独立维护实际调用证据，每次执行清空对话；去掉备用行程，校验日期完整性，天气只取真实预报且未知温度为空。
+- 验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`，14 项通过，覆盖未调用、错误、空结果、两次历史隔离和日期冲突。测试替代外部依赖，尚不作为真实 API 验收。
+- 代码：`backend/app/agents/execution.py`、`trip_planner_agent.py`、`models/schemas.py`；测试：`backend/tests/test_planning_contract.py`。

@@ -1,7 +1,7 @@
 """数据模型定义"""
 
 from typing import List, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import date
 
 
@@ -18,6 +18,15 @@ class TripRequest(BaseModel):
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
     
+    @model_validator(mode="after")
+    def validate_dates(self):
+        start, end = date.fromisoformat(self.start_date), date.fromisoformat(self.end_date)
+        if start.isoformat() != self.start_date or end.isoformat() != self.end_date:
+            raise ValueError("日期必须采用 YYYY-MM-DD")
+        if (end - start).days + 1 != self.travel_days:
+            raise ValueError("旅行天数必须与起止日期范围（含首尾）一致")
+        return self
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -111,8 +120,8 @@ class WeatherInfo(BaseModel):
     date: str = Field(..., description="日期 YYYY-MM-DD")
     day_weather: str = Field(default="", description="白天天气")
     night_weather: str = Field(default="", description="夜间天气")
-    day_temp: Union[int, str] = Field(default=0, description="白天温度")
-    night_temp: Union[int, str] = Field(default=0, description="夜间温度")
+    day_temp: Optional[int] = Field(default=None, description="白天温度")
+    night_temp: Optional[int] = Field(default=None, description="夜间温度")
     wind_direction: str = Field(default="", description="风向")
     wind_power: str = Field(default="", description="风力")
 
@@ -126,7 +135,7 @@ class WeatherInfo(BaseModel):
             try:
                 return int(v)
             except ValueError:
-                return 0
+                return None
         return v
 
 
