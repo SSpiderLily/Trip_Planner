@@ -86,3 +86,11 @@ class PlanningContractTest(unittest.TestCase):
         agent.tool_evidence = {'amap_maps_weather': [{'forecasts': [{'date':'2026-09-26', 'dayweather':'晴', 'nightweather':'晴'}]}]}
         forecasts = forecast_by_date(agent.require('amap_maps_weather', 'casts'))
         self.assertIn('2026-09-26', forecasts)
+
+    def test_later_empty_query_not_hidden_by_previous_success(self):
+        agent, llm, tool = self.agent('', ['[TOOL_CALL:amap_maps_text_search:keywords=景点,city=北京] [TOOL_CALL:amap_maps_text_search:keywords=酒店,city=北京]'])
+        tool.run.side_effect = ['{"pois":[{"name":"公园"}]}', '{"pois":[]}']
+        with self.assertRaises(PlanningError):
+            agent.run('需求')
+        self.assertEqual(tool.run.call_count, 2)
+        self.assertEqual(llm.invoke.call_count, 1)

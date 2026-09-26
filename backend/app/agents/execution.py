@@ -86,9 +86,13 @@ class PlanningAgent(SimpleAgent):
             self.tool_evidence.setdefault(tool_name, []).append(data)
         # 工具正常空返回仍是成功 Span，但业务必须立即终止，不能再让模型改词重查。
         if tool_name == 'amap_maps_text_search':
-            self.require(tool_name, 'pois')
+            if not find_items(data, 'pois'):
+                raise PlanningError('INSUFFICIENT_INFORMATION', '必要查询没有有效结果')
         elif tool_name == 'amap_maps_weather':
-            forecast_by_date(self.require(tool_name, 'casts'))
+            casts = find_items(data, 'casts')
+            if casts is None:
+                casts = find_items(data, 'forecasts')
+            forecast_by_date(casts or [])
         return f'🔧 工具 {tool_name} 执行结果：\n{result}'
 
     def require(self, name, key):
