@@ -135,7 +135,7 @@
           </div>
         </a-form-item>
         <p v-if="activeTaskId">任务：{{ activeTaskId }}</p>
-        <router-link :to="{ path: '/observability', query: activeTaskId ? { task: activeTaskId } : {} }">查看任务与调用记录 →</router-link>
+        <router-link :to="{ path: '/observability', query: activeTaskId ? { task: activeTaskId } : {} }">查看任务、工程指标与调用记录 →</router-link>
       </a-form>
     </a-card>
   </div>

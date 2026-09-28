@@ -3,6 +3,7 @@ import asyncio
 from uuid import uuid4
 from starlette.concurrency import run_in_threadpool
 from .observation_service import span, sanitize
+from .metrics_service import build_metrics
 
 
 class TaskError(RuntimeError):
@@ -140,6 +141,18 @@ class TaskService:
         if result is None:
             raise TaskError('RESULT_UNAVAILABLE', '结果不可用', 503)
         return result
+
+    async def metrics(self, task_id):
+        task = await self.status(task_id)
+        if task['status'] in ('accepted', 'running'):
+            raise TaskError('METRICS_NOT_READY', '任务结束后可查看工程指标')
+        try:
+            spans = await asyncio.to_thread(self.repository.metric_spans, task_id)
+        except Exception as exc:
+            raise TaskError('METRICS_UNAVAILABLE', '工程指标暂不可用', 503) from exc
+        if spans is None:
+            raise TaskError('TASK_NOT_FOUND', '任务不存在或已被清理', 404)
+        return build_metrics(task, spans)
 
     async def close(self):
         self.accepting = False

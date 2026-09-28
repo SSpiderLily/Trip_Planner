@@ -59,6 +59,19 @@ class ObservationService:
 class Span:
     def __init__(self):
         self.output = None
+        self.usage = None
+
+
+def token_usage(value):
+    """仅接受供应商给出的非负整数，缺失字段保留未知。"""
+    if value is None:
+        return None
+    def field(name):
+        item = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+        return item if type(item) is int and item >= 0 else None
+    usage = {'input_tokens': field('prompt_tokens'), 'output_tokens': field('completion_tokens'),
+             'total_tokens': field('total_tokens')}
+    return usage if any(item is not None for item in usage.values()) else None
 
 
 @contextmanager
@@ -98,7 +111,7 @@ def span(name, kind, input_data=None):
                 output, truncated = bounded(item.output, recorder.content_limit)
                 # 不保存第三方异常文本，避免凭据、HTTP请求体或完整模型响应外泄。
                 error = {'code':getattr(failure,'code','EXECUTION_FAILED'), 'message':'操作失败', 'type':type(failure).__name__} if failure else None
-                recorder.repository.end_span(span_id, 'failed' if failure else 'succeeded', output, truncated, error)
+                recorder.repository.end_span(span_id, 'failed' if failure else 'succeeded', output, truncated, error, item.usage)
             except Exception:
                 recorder.missing(task_id)
 
@@ -113,6 +126,10 @@ class ObservedLLM:
 
     def invoke(self, messages, **kwargs):
         with span('llm.invoke', 'llm', {'messages':messages, 'model':getattr(self.llm,'model',None), 'options':kwargs}) as record:
-            result = self.llm.invoke(messages, **kwargs)
+            if callable(getattr(type(self.llm), 'invoke_with_usage', None)):
+                result, usage = self.llm.invoke_with_usage(messages, **kwargs)
+                record.usage = token_usage(usage)
+            else:
+                result = self.llm.invoke(messages, **kwargs)
             record.output = result
             return result

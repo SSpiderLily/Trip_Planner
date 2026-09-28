@@ -53,6 +53,14 @@ async def task_result(task_id: str, request: Request):
         raise task_http(exc)
 
 
+@router.get("/tasks/{task_id}/metrics")
+async def task_metrics(task_id: str, request: Request):
+    try:
+        return await service(request).metrics(task_id)
+    except TaskError as exc:
+        raise task_http(exc)
+
+
 @router.get("/tasks/{task_id}/spans")
 async def task_spans(task_id: str, request: Request):
     try:

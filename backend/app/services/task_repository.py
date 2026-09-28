@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS spans (
  started_at TEXT NOT NULL, finished_at TEXT, input_data TEXT, output_data TEXT, error TEXT,
  input_truncated INTEGER NOT NULL DEFAULT 0 CHECK(input_truncated IN (0,1)),
  output_truncated INTEGER NOT NULL DEFAULT 0 CHECK(output_truncated IN (0,1)),
+ input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
  UNIQUE(task_id,span_id), CHECK(parent_span_id IS NULL OR parent_span_id <> span_id),
  FOREIGN KEY(task_id,parent_span_id) REFERENCES spans(task_id,span_id) DEFERRABLE INITIALLY DEFERRED
 );
@@ -66,6 +67,10 @@ class TaskRepository:
         with self.connection() as conn:
             conn.execute('PRAGMA journal_mode=WAL')
             conn.executescript(SCHEMA)
+            existing = {row['name'] for row in conn.execute('PRAGMA table_info(spans)')}
+            for field in ('input_tokens', 'output_tokens', 'total_tokens'):
+                if field not in existing:
+                    conn.execute(f'ALTER TABLE spans ADD COLUMN {field} INTEGER')
         self.recover()
         self.cleanup()
 
@@ -141,14 +146,26 @@ class TaskRepository:
             conn.execute('''INSERT INTO spans(span_id,task_id,parent_span_id,name,operation_type,status,started_at,input_data,input_truncated)
                 VALUES (?,?,?,?,?,'running',?,?,?)''', record)
 
-    def end_span(self, span_id, status, output, truncated, error):
+    def end_span(self, span_id, status, output, truncated, error, usage=None):
         with self.connection() as conn:
-            conn.execute("UPDATE spans SET status=?,finished_at=?,output_data=?,output_truncated=?,error=? WHERE span_id=? AND status='running'",
-                         (status, now(), output, int(truncated), dumps(error) if error else None, span_id))
+            usage = usage or {}
+            conn.execute("""UPDATE spans SET status=?,finished_at=?,output_data=?,output_truncated=?,error=?,
+                input_tokens=?,output_tokens=?,total_tokens=? WHERE span_id=? AND status='running'""",
+                (status, now(), output, int(truncated), dumps(error) if error else None,
+                 usage.get('input_tokens'), usage.get('output_tokens'), usage.get('total_tokens'), span_id))
 
     def spans(self, task_id):
         with self.connection() as conn:
             return [dict(row) for row in conn.execute(f'SELECT {SPAN_SUMMARY} FROM spans WHERE task_id=? ORDER BY started_at', (task_id,))]
+
+    def metric_spans(self, task_id):
+        """指标查询不读取完整输入、输出或异常内容。"""
+        with self.connection() as conn:
+            if conn.execute('SELECT 1 FROM tasks WHERE task_id=?', (task_id,)).fetchone() is None:
+                return None
+            return [dict(row) for row in conn.execute('''SELECT span_id,parent_span_id,name,operation_type,status,
+                started_at,finished_at,input_tokens,output_tokens,total_tokens
+                FROM spans WHERE task_id=? ORDER BY started_at''', (task_id,))]
 
     def span(self, task_id, span_id):
         with self.connection() as conn:

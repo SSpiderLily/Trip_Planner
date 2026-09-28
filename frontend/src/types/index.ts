@@ -127,3 +127,40 @@ export interface SpanDetail extends SpanSummary {
   output_data: unknown
   error: unknown
 }
+
+export interface CallMetrics {
+  total: number
+  succeeded: number
+  failed: number
+  interrupted: number
+  unknown: number
+  success_rate: number | null
+  duration_ms: number | null
+  duration_complete: boolean
+}
+
+export interface TokenMetrics {
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  covered_calls: number
+  total_calls: number
+  complete: boolean
+}
+
+export interface TaskMetrics {
+  task: {
+    status: TaskState
+    duration_ms: number | null
+    observation_incomplete: boolean
+    error_code: string | null
+    error_message: string | null
+    error_step: string | null
+    persistence_error?: { code: string; message: string } | null
+  }
+  model: CallMetrics
+  tool: CallMetrics
+  tokens: TokenMetrics
+  model_details: (CallMetrics & { name: string; tokens: TokenMetrics })[]
+  tool_details: (CallMetrics & { name: string })[]
+}

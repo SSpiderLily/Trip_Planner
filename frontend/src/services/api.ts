@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse, TaskStatus, SpanSummary, SpanDetail } from '@/types'
+import type { TripFormData, TripPlanResponse, TaskStatus, SpanSummary, SpanDetail, TaskMetrics } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -52,6 +52,9 @@ export async function getSpans(id: string): Promise<SpanSummary[]> {
 }
 export async function getSpan(id: string, spanId: string): Promise<SpanDetail> {
   return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/spans/${encodeURIComponent(spanId)}`)).data
+}
+export async function getTaskMetrics(id: string): Promise<TaskMetrics> {
+  return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/metrics`)).data
 }
 export function errorText(error: any): string {
   const detail = error.response?.data?.detail
