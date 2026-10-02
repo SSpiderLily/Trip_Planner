@@ -1,16 +1,16 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
-import Antd from 'ant-design-vue'
+import { Alert, AutoComplete, Button, ConfigProvider, DatePicker, Empty, Form, Input, InputNumber, Select, Space, Spin, Tree } from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
 import App from './App.vue'
 import Home from './views/Home.vue'
-import Result from './views/RouteResult.vue'
-import Observability from './views/Observability.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/observability', name: 'Observability', component: Observability },
+    { path: '/observability', name: 'Observability', component: () => import('./views/Observability.vue') },
     {
       path: '/',
       name: 'Home',
@@ -19,15 +19,21 @@ const router = createRouter({
     {
       path: '/result',
       name: 'Result',
-      component: Result
+      component: () => import('./views/RouteResult.vue')
     }
-  ]
+  ],
+  scrollBehavior(to) {
+    if (to.hash) return { el: to.hash, behavior: 'smooth' }
+    return { top: 0 }
+  }
 })
 
+dayjs.locale('zh-cn')
 const app = createApp(App)
 
 app.use(router)
-app.use(Antd)
+for (const component of [Alert, AutoComplete, Button, ConfigProvider, DatePicker, Empty, Form, Input, InputNumber, Select, Space, Spin, Tree]) {
+  app.use(component)
+}
 
 app.mount('#app')
-

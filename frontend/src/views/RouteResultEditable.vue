@@ -556,4 +556,65 @@ a{color:#147d6b}.hero{display:flex;justify-content:space-between;align-items:cen
 .leg-card{display:grid;gap:8px;border-left:2px dashed #b1c5bd;margin:4px 0 12px 22px;padding:12px 14px;color:#477b6e;font-size:13px}.leg-heading{display:flex;justify-content:space-between;gap:12px}.leg-heading small{color:#9a6633}.mode-options{display:flex;flex-wrap:wrap;gap:7px}.mode-options button{display:grid;gap:3px;min-width:92px;padding:8px 10px;text-align:left;border:1px solid #d8e4de;border-radius:8px;background:white;color:#36544b;cursor:pointer}.mode-options button.selected{border-color:#16775f;background:#eff7f2}.mode-options button.fastest{box-shadow:inset 0 0 0 1px #d5a54b}.mode-options button:disabled{cursor:not-allowed;opacity:.65}.mode-options small{font-size:10px;color:#7b8a84}
 .map-panel{align-self:start;position:sticky;top:16px;background:#f5f8f5;border-radius:16px;padding:20px}.live-map{height:330px;border-radius:12px;margin:12px 0}.route-sketch{width:100%;background:#eef4f1;border-radius:12px;margin:10px 0}.search-status{padding:12px}.search-error{padding:10px;color:#a34f36;font-size:13px}.search-results{list-style:none;padding:0;margin:8px 0;max-height:210px;overflow:auto;border:1px solid #e2ebe5;border-radius:8px}.search-results li+li{border-top:1px solid #edf1ee}.search-hit{display:grid;gap:4px;width:100%;border:0;background:white;text-align:left;padding:10px;cursor:pointer;color:#28483e}.search-hit:hover{background:#f2f7f3}.search-hit small{color:#667c75}.poi-detail{margin-top:14px;padding:14px;border:1px solid #dce8e1;border-radius:10px;background:white}.poi-detail p{font-size:13px;line-height:1.5}.duplicate{color:#16775f;font-weight:600}.map-panel>.muted{margin:8px 0}
 @media(max-width:900px){.result-shell{padding:18px}.result-nav{align-items:flex-start}.hero,.base{display:block}.budget{text-align:left;margin-top:18px}.global-conditions{min-width:0;margin-top:16px}.day-layout{grid-template-columns:1fr}.map-panel{position:static;grid-row:1}.issue-list{grid-template-columns:1fr}h1{font-size:30px}}
+
+/* 漫游视觉系统：保留路线编辑、搜索和导出组件的现有行为。 */
+.result-shell { max-width: 1460px; padding: 44px clamp(24px, 5vw, 82px) 120px; color: #1b322c; font-family: 'DM Sans', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+.result-nav { margin-bottom: 42px; padding-bottom: 20px; border-bottom: 1px solid #d7ded2; font-size: 12px; letter-spacing: .035em; }
+.result-nav a { color: #3f6350; text-decoration: none; transition: color .2s; }
+.result-nav a:hover { color: #b96545; }
+.hero { align-items: end; padding: 26px 0 44px; margin-bottom: 0; border-bottom: 1px solid #cbd7c6; }
+.eyebrow { color: #a65c40; font-size: 10px; letter-spacing: .2em; font-weight: 700; }
+.hero h1 { font-family: 'Noto Serif SC', 'Songti SC', serif; font-size: clamp(42px, 5vw, 72px); line-height: 1.2; letter-spacing: -.055em; font-weight: 600; margin: 18px 0 12px; }
+.hero p { margin: 0; color: #708172; font-size: 13px; letter-spacing: .04em; }
+.budget { min-width: 220px; padding: 20px 26px; background: #e4edcd; text-align: left; }
+.budget strong { font-family: 'Noto Serif SC', 'Songti SC', serif; font-size: 36px; color: #1b392e; line-height: 1.1; }
+.budget small { color: #62735f; line-height: 1.5; }
+.base { align-items: start; padding: 30px 36px; border-radius: 0; background: #eff3e8; margin: 24px 0 28px; }
+.base strong { font-size: 11px; letter-spacing: .15em; color: #a65c40; }
+.base h3 { font-family: 'Noto Serif SC', 'Songti SC', serif; font-size: 22px; font-weight: 600; margin: 11px 0; }
+.base p, .global-conditions { color: #61746a; font-size: 13px; line-height: 1.7; }
+.issues { border: 1px solid #e4d9bf; border-radius: 0; background: #fcf8ed; }
+.issues summary { color: #5d513e; }
+.day-tabs { gap: 0; margin: 42px 0 34px; border-bottom: 1px solid #d9e1d4; }
+.day-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: #718274; padding: 13px 22px 17px; transition: color .2s, border-color .2s, background .2s; }
+.day-tabs button:hover { color: #224638; background: #eef3e8; }
+.day-tabs .active { border-color: #bb704f; color: #1b392e; background: #e5edcf; }
+.day-layout { gap: clamp(25px, 4vw, 65px); }
+.day-heading h2, .map-panel h2 { font-family: 'Noto Serif SC', 'Songti SC', serif; font-size: 27px; font-weight: 600; letter-spacing: -.035em; }
+.daily-summary { border-radius: 0; background: #edf2e4; padding: 14px 17px; color: #45624f; }
+.activity { border: 1px solid #d9dfd3; border-radius: 0; background: #fffdfa; padding: 22px 26px; box-shadow: 7px 7px 0 #f0f2e9; transition: transform .2s, box-shadow .2s, border-color .2s; }
+.activity:hover { border-color: #a9bba5; transform: translateY(-2px); box-shadow: 8px 10px 0 #e8eee1; }
+.activity-title h3, .activity-name { font-family: 'Noto Serif SC', 'Songti SC', serif; font-size: 21px; font-weight: 600; }
+.activity-name:hover { color: #a65c40; }
+.activity-top { color: #7a8d7d; }
+.period { color: #a75b3f; }
+.activity-actions button { border-radius: 2px; }
+.leg-card { border-left-color: #b2c7a6; color: #526e57; }
+.mode-options button { border-radius: 2px; }
+.mode-options button.selected { border-color: #345f46; background: #eaf1df; }
+.map-panel { top: 22px; padding: 25px; border: 1px solid #d8e0d2; border-radius: 0; background: #f4f6ee; box-shadow: 9px 9px 0 #e8eee1; }
+.live-map, .route-sketch { border-radius: 0; }
+.search-results, .poi-detail { border-radius: 2px; }
+.search-hit:hover { background: #eef3e6; }
+.photo-strip img, .photo-failed { border-radius: 2px; }
+@media (max-width: 900px) {
+  .result-shell { padding: 28px 26px 90px; }
+  .hero { display: block; }
+  .budget { width: fit-content; margin-top: 26px; }
+  .base { display: block; }
+  .day-layout { grid-template-columns: 1fr; }
+  .map-panel { position: static; grid-row: 1; }
+}
+@media (max-width: 600px) {
+  .result-shell { padding: 20px 20px 80px; }
+  .result-nav, .nav-actions { align-items: flex-start; flex-wrap: wrap; }
+  .hero h1 { font-size: 43px; }
+  .budget { width: 100%; }
+  .base { padding: 23px; }
+  .day-tabs button { padding: 12px 15px; }
+  .day-heading { display: block; }
+  .activity { padding: 18px; }
+  .activity-title { align-items: flex-start; }
+  .map-panel { padding: 18px; box-shadow: 6px 6px 0 #e8eee1; }
+}
 </style>
