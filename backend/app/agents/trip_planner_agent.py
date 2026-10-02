@@ -1,11 +1,13 @@
 """多智能体旅行规划系统"""
 
 import json
-from typing import Dict, Any, List
-from hello_agents import SimpleAgent
+import threading
+from datetime import date, timedelta
+from .execution import PlanningAgent as SimpleAgent, PlanningError, forecast_by_date
 from hello_agents.tools import MCPTool
 from ..services.llm_service import get_llm
-from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel
+from ..services.observation_service import span, ObservedLLM
+from ..models.schemas import TripRequest, TripPlan, WeatherInfo
 from ..config import get_settings
 
 # ============ Agent提示词 ============
@@ -161,7 +163,7 @@ class MultiAgentTripPlanner:
 
         try:
             settings = get_settings()
-            self.llm = get_llm()
+            self.llm = ObservedLLM(get_llm())
 
             # 创建共享的MCP工具(只创建一次)
             print("  - 创建共享MCP工具...")
@@ -226,7 +228,16 @@ class MultiAgentTripPlanner:
         """将发现到的高德 MCP 子工具显式注册到指定 Agent。"""
         for tool in self.amap_tools:
             agent.add_tool(tool, auto_expand=False)
-    
+
+    def _run_agent(self, name, agent, query, required=None):
+        with span('agent.' + name, 'agent', query) as record:
+            response = agent.run(query)
+            record.output = response
+            evidence = agent.require(*required) if required else None
+            if name == 'weather':
+                evidence = forecast_by_date(evidence)
+            return response, evidence
+
     def plan_trip(self, request: TripRequest) -> TripPlan:
         """
         使用多智能体协作生成旅行计划
@@ -249,29 +260,38 @@ class MultiAgentTripPlanner:
             # 步骤1: 景点搜索Agent搜索景点
             print("📍 步骤1: 搜索景点...")
             attraction_query = self._build_attraction_query(request)
-            attraction_response = self.attraction_agent.run(attraction_query)
-            print(f"景点搜索结果: {attraction_response[:200]}...\n")
+            attraction_response, _ = self._run_agent("attraction", self.attraction_agent, attraction_query, ("amap_maps_text_search", "pois"))
 
             # 步骤2: 天气查询Agent查询天气
             print("🌤️  步骤2: 查询天气...")
             weather_query = f"请查询{request.city}的天气信息"
-            weather_response = self.weather_agent.run(weather_query)
-            print(f"天气查询结果: {weather_response[:200]}...\n")
+            weather_response, forecasts = self._run_agent("weather", self.weather_agent, weather_query, ("amap_maps_weather", "casts"))
 
             # 步骤3: 酒店推荐Agent搜索酒店
             print("🏨 步骤3: 搜索酒店...")
             hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
-            hotel_response = self.hotel_agent.run(hotel_query)
-            print(f"酒店搜索结果: {hotel_response[:200]}...\n")
+            hotel_response, _ = self._run_agent("hotel", self.hotel_agent, hotel_query, ("amap_maps_text_search", "pois"))
 
             # 步骤4: 行程规划Agent整合信息生成计划
             print("📋 步骤4: 生成行程计划...")
             planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response)
-            planner_response = self.planner_agent.run(planner_query)
-            print(f"行程规划结果: {planner_response[:300]}...\n")
+            planner_response, _ = self._run_agent("planner", self.planner_agent, planner_query)
+
 
             # 解析最终计划
-            trip_plan = self._parse_response(planner_response, request)
+            with span("validation.itinerary", "validation", planner_response) as record:
+                trip_plan = self._parse_response(planner_response, request)
+                record.output = {"valid": True}
+            # 只交付实际工具返回、日期匹配的预报，模型不能重标日期或补造天气。
+            trip_plan.weather_info = [WeatherInfo(
+                date=day.date,
+                day_weather=forecasts.get(day.date, {}).get("dayweather", "天气未知"),
+                night_weather=forecasts.get(day.date, {}).get("nightweather", "天气未知"),
+                day_temp=forecasts.get(day.date, {}).get("daytemp"),
+                night_temp=forecasts.get(day.date, {}).get("nighttemp"),
+                wind_direction=forecasts.get(day.date, {}).get("daywind", ""),
+                wind_power=forecasts.get(day.date, {}).get("daypower", ""),
+            ) for day in trip_plan.days]
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
@@ -280,11 +300,9 @@ class MultiAgentTripPlanner:
             return trip_plan
 
         except Exception as e:
-            print(f"❌ 生成旅行计划失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return self._create_fallback_plan(request)
-    
+            print("❌ 生成旅行计划失败，请查看任务记录")
+            raise
+
     def _build_attraction_query(self, request: TripRequest) -> str:
         """构建景点搜索查询 - 直接包含工具调用"""
         keywords = []
@@ -326,20 +344,21 @@ class MultiAgentTripPlanner:
 3. 考虑景点之间的距离和交通方式
 4. 返回完整的JSON格式数据
 5. 景点的经纬度坐标要真实准确
+6. 天气只能使用查询返回且日期匹配的预报；其他日期标为天气未知，不编造温度
 """
         if request.free_text_input:
             query += f"\n**额外要求:** {request.free_text_input}"
 
         return query
-    
+
     def _parse_response(self, response: str, request: TripRequest) -> TripPlan:
         """
         解析Agent响应
-        
+
         Args:
             response: Agent响应文本
             request: 原始请求
-            
+
         Returns:
             旅行计划
         """
@@ -361,76 +380,39 @@ class MultiAgentTripPlanner:
                 json_str = response[json_start:json_end]
             else:
                 raise ValueError("响应中未找到JSON数据")
-            
+
             # 解析JSON
             data = json.loads(json_str)
-            
-            # 转换为TripPlan对象
-            trip_plan = TripPlan(**data)
-            
-            return trip_plan
-            
-        except Exception as e:
-            print(f"⚠️  解析响应失败: {str(e)}")
-            print(f"   将使用备用方案生成计划")
-            return self._create_fallback_plan(request)
-    
-    def _create_fallback_plan(self, request: TripRequest) -> TripPlan:
-        """创建备用计划(当Agent失败时)"""
-        from datetime import datetime, timedelta
-        
-        # 解析日期
-        start_date = datetime.strptime(request.start_date, "%Y-%m-%d")
-        
-        # 创建每日行程
-        days = []
-        for i in range(request.travel_days):
-            current_date = start_date + timedelta(days=i)
-            
-            day_plan = DayPlan(
-                date=current_date.strftime("%Y-%m-%d"),
-                day_index=i,
-                description=f"第{i+1}天行程",
-                transportation=request.transportation,
-                accommodation=request.accommodation,
-                attractions=[
-                    Attraction(
-                        name=f"{request.city}景点{j+1}",
-                        address=f"{request.city}市",
-                        location=Location(longitude=116.4 + i*0.01 + j*0.005, latitude=39.9 + i*0.01 + j*0.005),
-                        visit_duration=120,
-                        description=f"这是{request.city}的著名景点",
-                        category="景点"
-                    )
-                    for j in range(2)
-                ],
-                meals=[
-                    Meal(type="breakfast", name=f"第{i+1}天早餐", description="当地特色早餐"),
-                    Meal(type="lunch", name=f"第{i+1}天午餐", description="午餐推荐"),
-                    Meal(type="dinner", name=f"第{i+1}天晚餐", description="晚餐推荐")
-                ]
-            )
-            days.append(day_plan)
-        
-        return TripPlan(
-            city=request.city,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            days=days,
-            weather_info=[],
-            overall_suggestions=f"这是为您规划的{request.city}{request.travel_days}日游行程,建议提前查看各景点的开放时间。"
-        )
 
+            # 转换为TripPlan对象
+            # 模型输出中的天气不用作事实来源。
+            data["weather_info"] = []
+            trip_plan = TripPlan(**data)
+            expected = [(date.fromisoformat(request.start_date) + timedelta(days=i)).isoformat()
+                        for i in range(request.travel_days)]
+            if (trip_plan.start_date != request.start_date or trip_plan.end_date != request.end_date
+                    or [day.date for day in trip_plan.days] != expected):
+                raise PlanningError("INVALID_ITINERARY", "行程日期不完整或与输入不一致", "validation.itinerary")
+
+            return trip_plan
+
+        except Exception as e:
+            print("⚠️  行程解析或校验失败")
+
+            raise
 
 # 全局多智能体系统实例
 _multi_agent_planner = None
+_planner_lock = threading.Lock()
 
 
-def get_trip_planner_agent() -> MultiAgentTripPlanner:
+def get_trip_planner_agent():
     """获取多智能体旅行规划系统实例(单例模式)"""
     global _multi_agent_planner
 
-    if _multi_agent_planner is None:
-        _multi_agent_planner = MultiAgentTripPlanner()
+    with _planner_lock:
+        if _multi_agent_planner is None:
+            from .route_planner import RouteTripPlanner
+            _multi_agent_planner = RouteTripPlanner()
 
     return _multi_agent_planner

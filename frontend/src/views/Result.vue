@@ -267,14 +267,14 @@
                   <span class="weather-icon">☀️</span>
                   <div>
                     <div class="weather-label">白天</div>
-                    <div class="weather-value">{{ item.day_weather }} {{ item.day_temp }}°C</div>
+                    <div class="weather-value">{{ item.day_weather }} {{ item.day_temp == null ? '' : item.day_temp + '°C' }}</div>
                   </div>
                 </div>
                 <div class="weather-info-row">
                   <span class="weather-icon">🌙</span>
                   <div>
                     <div class="weather-label">夜间</div>
-                    <div class="weather-value">{{ item.night_weather }} {{ item.night_temp }}°C</div>
+                    <div class="weather-value">{{ item.night_weather }} {{ item.night_temp == null ? '' : item.night_temp + '°C' }}</div>
                   </div>
                 </div>
                 <div class="weather-wind">

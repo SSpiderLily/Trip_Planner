@@ -60,8 +60,8 @@ export interface WeatherInfo {
   date: string
   day_weather: string
   night_weather: string
-  day_temp: number
-  night_temp: number
+  day_temp: number | null
+  night_temp: number | null
   wind_direction: string
   wind_power: string
 }
@@ -80,9 +80,10 @@ export interface TripFormData {
   city: string
   start_date: string
   end_date: string
-  travel_days: number
-  transportation: string
-  accommodation: string
+  travel_days?: number
+  transportation?: string
+  accommodation?: string
+  lodging?: string
   preferences: string[]
   free_text_input: string
 }
@@ -93,3 +94,73 @@ export interface TripPlanResponse {
   data?: TripPlan
 }
 
+
+export type TaskState = 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'
+export interface TaskStatus {
+  task_id: string
+  status: TaskState
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  interruption_detected_at: string | null
+  error_code: string | null
+  error_message: string | null
+  error_step: string | null
+  observation_incomplete: boolean
+  persistence_error?: { code: string; message: string } | null
+  current_step?: { span_id: string; name: string; started_at: string } | null
+}
+export interface SpanSummary {
+  span_id: string
+  task_id: string
+  parent_span_id: string | null
+  name: string
+  operation_type: string
+  status: 'running' | 'succeeded' | 'failed' | 'interrupted'
+  started_at: string
+  finished_at: string | null
+  input_truncated: boolean
+  output_truncated: boolean
+}
+export interface SpanDetail extends SpanSummary {
+  input_data: unknown
+  output_data: unknown
+  error: unknown
+}
+
+export interface CallMetrics {
+  total: number
+  succeeded: number
+  failed: number
+  interrupted: number
+  unknown: number
+  success_rate: number | null
+  duration_ms: number | null
+  duration_complete: boolean
+}
+
+export interface TokenMetrics {
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  covered_calls: number
+  total_calls: number
+  complete: boolean
+}
+
+export interface TaskMetrics {
+  task: {
+    status: TaskState
+    duration_ms: number | null
+    observation_incomplete: boolean
+    error_code: string | null
+    error_message: string | null
+    error_step: string | null
+    persistence_error?: { code: string; message: string } | null
+  }
+  model: CallMetrics
+  tool: CallMetrics
+  tokens: TokenMetrics
+  model_details: (CallMetrics & { name: string; tokens: TokenMetrics })[]
+  tool_details: (CallMetrics & { name: string })[]
+}

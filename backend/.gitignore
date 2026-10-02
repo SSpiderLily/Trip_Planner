@@ -49,3 +49,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+
+# 本地任务数据及 SQLite sidecar
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

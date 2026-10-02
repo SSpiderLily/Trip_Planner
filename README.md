@@ -4,8 +4,11 @@
 
 ## 学习文档
 
-- [学习目标与阶段计划](docs/learning-plan.md)：以后端和 Agent 开发为重点，包含实践任务、验收标准与当前进度。
+- [单任务工程指标设计](docs/engineering-metrics-design.md)：观测页指标与 Token 采集的统计口径及验收依据。
+- [学习目标与阶段计划](docs/learning-plan.md)：以全栈技术为学习定位，覆盖前端、后端与数据、Agent、测试观测和部署，包含实践任务与验收标准。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
+- [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言与规划规则。
+- [旅行规划体验优化需求](docs/trip-planning-requirements.md)：本轮输入简化与每日路线展示的已确认需求、后续待办及验收方向（最小闭环已接入，完整目标分步落实）。
 
 ## ✨ 功能特点
 
@@ -67,6 +70,18 @@ helloagents-trip-planner/
 
 ## 🚀 快速开始
 
+### 本地一键启动（macOS / Linux）
+
+首次使用先按下文安装后端和前端依赖，并分别配置 `backend/.env` 与 `frontend/.env`。之后在项目根目录的 VS Code 终端执行：
+
+```bash
+python3 dev.py
+```
+
+脚本直接使用 `backend/venv/bin/python` 和前端已安装的 Vite，无需激活虚拟环境或打开两个终端。浏览器访问 `http://127.0.0.1:5173`；按 `Ctrl+C` 同时停止两个服务。后端仅监听本机 `127.0.0.1:8000`。若端口已被占用，脚本会停止另一服务并报告启动失败。前端支持热更新；修改后端代码后请按 `Ctrl+C` 停止并重新运行脚本。
+
+若 VS Code 终端不在项目根目录，请先 `cd` 到包含 `dev.py` 的目录，或直接运行脚本的绝对路径；虚拟环境仍位于 `backend/venv`，无需另建根目录虚拟环境。
+
 ### 前提条件
 
 - Python 3.10+
@@ -125,9 +140,11 @@ npm install
 3. 配置环境变量
 
 ```bash
-# 创建.env文件, 填入高德地图Web API Key 和 Web端JS API Key
+# 创建.env文件，按示例填写浏览器使用的高德 JS Key 与安全码占位项
 cp .env.example .env
 ```
+
+`frontend/.env.example` 仅保留占位值。`VITE_*` 变量会进入浏览器构建产物，不要在其中填写后端 `AMAP_API_KEY` 或其他服务端凭据；实际前端配置写入不提交的 `frontend/.env`。
 
 4. 启动开发服务器
 
@@ -139,64 +156,27 @@ npm run dev
 
 ## 📝 使用指南
 
-1. 在首页填写旅行信息:
-   - 目的地城市
-   - 旅行日期和天数
-   - 交通方式偏好
-   - 住宿偏好
-   - 旅行风格标签
+1. 必填目的地与起止日期；天数自动计算。“更多偏好”可填写已定住处、偏好和完整备注。
+2. 提交后可查看真实执行步骤；完成后按天切换活动、餐饮、交通及地图位置。
+3. 地图虚线仅表示游览顺序，具体交通耗时以路线查询为准；地图加载失败时显示坐标位置示意。
+4. 结果顶部汇总需调整和待确认事项。未知耗时、费用不按零计算；费用小计不含住宿及往返目的地的大交通。
+5. 历史旧格式结果保留原始数据查看；需要新版页面时重新生成。
 
-2. 点击"生成旅行计划"按钮
+## 🔧 当前规划流程
 
-3. 系统将:
-   - 调用HelloAgents Agent生成初步计划
-   - Agent自动调用高德地图MCP工具搜索景点
-   - Agent获取天气信息和路线规划
-   - 整合所有信息生成完整行程
+默认入口使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色：候选搜集、行程安排、行程修改。程序按阶段推进，先理解需求与搜集景点，再安排游玩分布、搜集住宿和用餐区域、生成完整日程，最后查询交通并检查；有已知安排问题时最多调整两轮。
 
-4. 查看结果:
-   - 每日详细行程
-   - 景点信息与地图标记
-   - 交通路线规划
-   - 天气预报
-   - 餐饮推荐
+开放备注完全由模型理解，禁止关键词、正则或硬编码意图分类。模型提出结构化搜索动作，程序调用高德 MCP 并保留地点事实；模型返回的地点名称与坐标按来源 ID 核实、修正。三个角色上下文独立，通过条件、候选、草稿及问题交接。
 
-## 🔧 核心实现
+任务服务仍独立于 HTTP 连接在线程池执行。局部地点查询失败可在额度内继续，天气或交通缺失可带提示交付；没有已核实景点、日期不合法等不能交付。结构修复最多一次，修改无效或引入新冲突时保留上一份有效结果。
 
-### HelloAgents Agent集成
+新版结果使用 `schema_version: 2`，沿用 SQLite 的任务、结果和 Span 三张表。旧四角色类暂留作旧行为回归参考，默认入口已切换。
 
-```python
-from hello_agents import SimpleAgent, HelloAgentsLLM
-from hello_agents.tools import MCPTool
+可配置 `PLANNER_PLACE_QUERY_LIMIT`（默认36，含地点详情，失败调用也计数）与 `PLANNER_ROUTE_QUERY_LIMIT`（默认80）。地点搜集为后续住宿餐饮预留额度，每阶段最多两次模型决策；同任务相同路线复用查询结果。公共交通模式下，直线距离不超过1.2公里时查询步行路线。
 
-# 创建高德地图MCP工具
-amap_tool = MCPTool(
-    name="amap",
-    server_command=["uvx", "amap-mcp-server"],
-    env={"AMAP_MAPS_API_KEY": "your_api_key"},
-    auto_expand=True
-)
+`PLANNER_TOOL_TIMEOUT_SECONDS` 控制每次地图工具调用超时（默认25秒）；超时结束 MCP 会话并记录失败，避免查询长期阻塞任务。整体生成仍可能需要数分钟，可在观测页查看实际进度。
 
-# 创建旅行规划Agent
-agent = SimpleAgent(
-    name="旅行规划助手",
-    llm=HelloAgentsLLM(),
-    system_prompt="你是一个专业的旅行规划助手..."
-)
-
-# 添加工具
-agent.add_tool(amap_tool)
-```
-
-### MCP工具调用
-
-Agent可以自动调用以下高德地图MCP工具:
-
-- `maps_text_search`: 搜索景点POI
-- `maps_weather`: 查询天气
-- `maps_direction_walking_by_address`: 步行路线规划
-- `maps_direction_driving_by_address`: 驾车路线规划
-- `maps_direction_transit_integrated_by_address`: 公共交通路线规划
+当前最小版本尚未实现可选夜游替代路线、营业/预约数据自动核实、住宿价格参考、完整道路轨迹绘制和地点输入联想。开放与预约信息统一提示待确认；这些目标保留在需求文档，不视为已完成。
 
 ## 📄 API文档
 
@@ -204,10 +184,37 @@ Agent可以自动调用以下高德地图MCP工具:
 
 主要端点:
 
-- `POST /api/trip/plan` - 生成旅行计划
+- `POST /api/trip/tasks` - 接收任务（202）；忙时返回 409 / TASK_BUSY，不排队
+- `GET /api/trip/tasks` - 任务列表；支持 status、limit、offset
+- `GET /api/trip/tasks/{task_id}` - 轻量状态与当前步骤；任务失败时查询仍返回 200
+- `GET /api/trip/tasks/{task_id}/result` - 成功行程；运行中/失败/中断分别返回 409 及对应错误码
+- `GET /api/trip/tasks/{task_id}/spans` - 调用树摘要
+- `GET /api/trip/tasks/{task_id}/spans/{span_id}` - 单步骤输入输出与错误详情
+- `GET /api/trip/tasks/{task_id}/metrics` - 已结束任务的单任务工程指标；运行中返回 409
 - `GET /api/map/poi` - 搜索POI
 - `GET /api/map/weather` - 查询天气
 - `POST /api/map/route` - 规划路线
+
+## 本地任务观测
+
+启动 `python3 dev.py` 后，从首页的“查看任务、工程指标与调用记录”进入 `/observability`。提交需求后，首页每 2 秒读取真实步骤；刷新会恢复当前任务查询。观测页可筛选历史，并在“工程指标”与“调用记录”之间切换。已结束任务默认展示状态、耗时、模型和工具调用统计、Token 用量覆盖及明细；运行中可点开指标视图查看等待提示。调用记录保留 Agent → 模型/工具调用树、按点击加载的脱敏输入输出和成功行程入口。所选任务及视图保存在 URL；任务结束时不会自动切走当前调用记录。终态停止自动轮询；需要查看新提交的任务时点击刷新。
+
+第一版使用单后端进程、一个活动规划任务，子 Agent 顺序执行；请勿用多个 worker 共享此数据库。关闭浏览器不会取消任务；后端正常退出等待正在执行的任务，强制退出后下次启动标记中断，不自动重跑。旧 `/api/trip/plan` 已移除。
+
+配置写入 `backend/.env`，经 `app/config.py` 读取：
+
+| 配置 | 默认值 |
+| --- | --- |
+| `TASK_DB_PATH` | `backend/data/tasks.sqlite3`（默认解析为绝对路径） |
+| `OBSERVATION_RETENTION_DAYS` | 7 天 |
+| `OBSERVATION_MAX_BYTES` | 209715200（200 MiB 治理目标，包含 WAL/SHM） |
+| `OBSERVATION_CONTENT_LIMIT` | 65536（单步骤输入、输出各 64 KiB） |
+
+启动及接收新任务前清理过期/超容量的已结束任务，连同行程和步骤一起删除；活动任务保留。无法腾出空间时停止保存观测详情并提示不完整。内容先脱敏后限长；截断有标记，未知温度与未知用量不填零。数据库及辅助文件不入 Git。
+
+观测写入失败不改变业务判定；任务结果保存失败不能显示为成功。数据库无法写入时，当前进程仅保留有界错误摘要，重启后无法还原未落盘内容。输入校验拒绝仍返回 422，拒绝记录展示后置；第一版不提供自动重试、取消或重放。Token 只统计供应商实际返回的用量，不估算、不计价；历史用量与供应商未返回的字段保持未知，缺失用量与步骤记录不完整分别提示。工程指标不代表行程质量或所有价格信息都经过核验。
+
+验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`；`cd frontend && npm run build`。替代依赖测试与真实调用验收结论见[学习日志](docs/learning-log.md)。
 
 ## 🤝 贡献指南
 
