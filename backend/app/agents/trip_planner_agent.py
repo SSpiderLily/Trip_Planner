@@ -1,8 +1,12 @@
 """多智能体旅行规划系统"""
 
 import json
+import os
+import shutil
+import sys
 import threading
 from datetime import date, timedelta
+from pathlib import Path
 from .execution import PlanningAgent as SimpleAgent, PlanningError, forecast_by_date
 from hello_agents.tools import MCPTool
 from ..services.llm_service import get_llm
@@ -167,10 +171,19 @@ class MultiAgentTripPlanner:
 
             # 创建共享的MCP工具(只创建一次)
             print("  - 创建共享MCP工具...")
+            # MCP 子进程只收到显式 env；用绝对路径启动 uvx，避免 PATH 丢失。
+            venv_uvx = Path(sys.executable).with_name("uvx")
+            local_uvx = Path.home() / ".local" / "bin" / "uvx"
+            uvx_command = next(
+                (str(path) for path in (venv_uvx, local_uvx) if path.is_file() and os.access(path, os.X_OK)),
+                None,
+            ) or shutil.which("uvx")
+            if not uvx_command:
+                raise RuntimeError("未找到 uvx，请安装 uv 并将 uvx 放在虚拟环境、~/.local/bin 或 PATH 中")
             self.amap_tool = MCPTool(
                 name="amap",
                 description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
+                server_command=[uvx_command, "amap-mcp-server"],
                 env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
                 auto_expand=True
             )
