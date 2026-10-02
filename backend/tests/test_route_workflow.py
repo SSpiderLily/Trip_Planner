@@ -78,23 +78,26 @@ class RouteWorkflowTest(unittest.TestCase):
     def setUp(self):
         self.llm, self.mcp = FakeLLM(), FakeMCP()
         self.planner = RouteTripPlanner(self.llm, self.mcp)
-        self.request = TripRequest(city='北京', start_date='2026-10-01', end_date='2026-10-01', free_text_input='不要去故宫；预算两千只是举例，请理解我的完整原文。')
+        self.request = TripRequest(city='北京', start_date='2026-10-01', end_date='2026-10-01',
+                                   arrival_at='2026-10-01T09:00:00+08:00', departure_at='2026-10-01T19:00:00+08:00',
+                                   free_text_input='不要去故宫；预算两千只是举例，请理解我的完整原文。')
     def run_plan(self): return self.planner.plan_trip(self.request).model_dump()
 
     def test_full_flow_grounding_and_unknowns(self):
         result = self.run_plan()
-        self.assertEqual(result['schema_version'], 2)
+        self.assertEqual(result['schema_version'], 3)
         self.assertEqual(result['planning_conditions']['city'], '北京')
         self.assertEqual(result['planning_conditions']['remarks'], self.request.free_text_input)
         self.assertIsNone(result['planning_conditions']['budget_per_adult'])  # 程序不能从“两千”提取预算
         day = result['days'][0]
         self.assertEqual(day['activities'][0]['place']['name'], '真实sight')
         self.assertAlmostEqual(day['activities'][0]['place']['longitude'], 116.41)
-        self.assertEqual(len(day['legs']), 4)  # 自由活动没有地图节点
-        self.assertEqual(day['legs'][-1]['to_activity_id'], 'lodging')
-        self.assertEqual(day['time_summary']['known_total'], 330)
+        self.assertEqual([(leg['from_activity_id'], leg['to_activity_id']) for leg in day['legs']], [('a1', 'a2'), ('a2', 'a4')])
+        self.assertEqual(day['time_summary']['known_minutes'], 340)  # 活动、路段与到离缓冲各只计一次
+        self.assertEqual(day['time_summary']['buffer_minutes'], 60)
         self.assertFalse(result['cost_summary']['complete'])
-        self.assertEqual(result['cost_summary']['known_total'], 90)
+        self.assertEqual(result['cost_summary']['known_total'], 0)  # 模型估价不能计入真实费用
+        self.assertEqual(result['cost_summary']['unknown_count'], 3)
         self.assertIn('WEATHER_FAILED', [p['code'] for p in result['issues']])
         self.assertNotIn('MUST_VISIT_MISSING', [p['code'] for p in result['issues']])
 
@@ -103,7 +106,7 @@ class RouteWorkflowTest(unittest.TestCase):
         day = self.run_plan()['days'][0]
         self.assertEqual(day['time_summary']['status'], 'incomplete')
         self.assertIsNone(day['legs'][0]['duration_minutes'])
-        self.assertEqual(day['legs'][2]['duration_minutes'], 0)  # 同一已核实地点无需转移
+        self.assertEqual(day['legs'][1]['duration_minutes'], 0)  # 同一已核实地点无需转移
 
     def test_empty_search_cannot_produce_fabricated_plan(self):
         self.mcp.empty = True
@@ -125,7 +128,7 @@ class RouteWorkflowTest(unittest.TestCase):
     def test_initial_structure_repair_once(self):
         self.llm.invalid_first = True
         result = self.run_plan()
-        self.assertEqual(result['schema_version'], 2)
+        self.assertEqual(result['schema_version'], 3)
         self.assertEqual(sum(bool(i.get('repair')) for i in self.llm.inputs), 1)
 
     def test_failed_tool_observation_and_result_are_independent(self):
@@ -136,7 +139,7 @@ class RouteWorkflowTest(unittest.TestCase):
                 result = self.run_plan()
             repository.succeed('test', result)
             self.assertEqual(repository.status('test')['status'], 'succeeded')
-            self.assertEqual(repository.result('test')['schema_version'], 2)
+            self.assertEqual(repository.result('test')['schema_version'], 3)
             self.assertTrue(any(s['status'] == 'failed' and s['name'] == 'tool.amap_maps_weather' for s in repository.spans('test')))
 
     def test_new_conflict_comparison(self):
@@ -173,7 +176,8 @@ class RouteWorkflowTest(unittest.TestCase):
         result = self.run_plan()
         self.assertEqual(result['lodging_base']['user_input'], self.request.lodging)
         self.assertIsNone(result['lodging_base']['place'])
-        self.assertEqual(result['days'][0]['time_summary']['status'], 'incomplete')
+        self.assertFalse(any(leg['from_activity_id'] == 'lodging' or leg['to_activity_id'] == 'lodging'
+                             for leg in result['days'][0]['legs']))
 
     def test_minimal_request_and_date_validation(self):
         self.assertEqual(self.request.travel_days, 1)

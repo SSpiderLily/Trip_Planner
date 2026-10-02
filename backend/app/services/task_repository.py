@@ -129,6 +129,12 @@ class TaskRepository:
             row = conn.execute('SELECT result_data FROM task_results WHERE task_id=?', (task_id,)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def request(self, task_id):
+        """读取创建任务时经脱敏保存的输入快照。"""
+        with self.connection() as conn:
+            row = conn.execute('SELECT request_data FROM tasks WHERE task_id=?', (task_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
     def list_tasks(self, status=None, limit=50, offset=0, failed_ids=()):
         with self.connection() as conn:
             where, params = ('WHERE status=?', [status]) if status else ('', [])

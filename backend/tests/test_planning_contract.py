@@ -11,6 +11,7 @@ from test_trip_planner_agent import FakeExpandedTool
 
 def request():
     return TripRequest(city='北京', start_date='2026-09-26', end_date='2026-09-26', travel_days=1,
+                       arrival_at='2026-09-26T09:00:00+08:00', departure_at='2026-09-26T18:00:00+08:00',
                        transportation='步行', accommodation='酒店')
 
 

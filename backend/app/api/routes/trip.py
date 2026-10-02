@@ -5,9 +5,11 @@ from fastapi import APIRouter, HTTPException, Request, Query
 from ...services.task_service import TaskError
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
-    TripRequest
+    TripRequest, RecalculateDayRequest
 )
 from ...agents.trip_planner_agent import get_trip_planner_agent
+from ...services.day_edit_service import DayEditError
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
@@ -22,6 +24,8 @@ def task_http(exc):
 
 @router.post("/tasks", status_code=202)
 async def create_task(body: TripRequest, request: Request):
+    if body.arrival_at is None or body.departure_at is None:
+        raise HTTPException(status_code=422, detail={"code": "TRAVEL_TIMES_REQUIRED", "message": "请选择到达和离开时间"})
     try:
         return await service(request).submit(body)
     except TaskError as exc:
@@ -48,9 +52,24 @@ async def task_status(task_id: str, request: Request):
 @router.get("/tasks/{task_id}/result")
 async def task_result(task_id: str, request: Request):
     try:
-        return {"success": True, "data": await service(request).result(task_id)}
+        result = await service(request).result(task_id)
+        editor = getattr(request.app.state, 'day_edit_service', None)
+        if editor is not None:
+            result = editor.attach_tokens(task_id, result)
+        return {"success": True, "data": result}
     except TaskError as exc:
         raise task_http(exc)
+
+
+@router.post("/recalculate-day")
+async def recalculate_day(body: RecalculateDayRequest, request: Request):
+    editor = getattr(request.app.state, 'day_edit_service', None)
+    if editor is None:
+        raise HTTPException(status_code=503, detail={"code": "EDIT_UNAVAILABLE", "message": "当天行程编辑暂不可用"})
+    try:
+        return await run_in_threadpool(editor.recalculate, body)
+    except DayEditError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @router.get("/tasks/{task_id}/metrics")

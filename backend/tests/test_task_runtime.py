@@ -172,7 +172,7 @@ class ApiTest(unittest.TestCase):
     def test_input_rejected_before_submission(self):
         app=FastAPI();app.include_router(router,prefix='/api')
         with TestClient(app) as client:
-            data=request().model_dump();data['travel_days']=2
+            data=request().model_dump(mode='json');data['travel_days']=2
             self.assertEqual(client.post('/api/trip/tasks',json=data).status_code,422)
 
 class FullChainTest(unittest.TestCase):
@@ -228,10 +228,10 @@ class HttpLifecycleTest(unittest.TestCase):
                 await app.state.task_service.close()
             app=FastAPI(lifespan=lifespan); app.include_router(router,prefix='/api')
             with TestClient(app) as client:
-                accepted=client.post('/api/trip/tasks',json=request().model_dump())
+                accepted=client.post('/api/trip/tasks',json=request().model_dump(mode='json'))
                 self.assertEqual(accepted.status_code,202)
                 tid=accepted.json()['task_id']; url='/api/trip/tasks/'+tid
-                self.assertEqual(client.post('/api/trip/tasks',json=request().model_dump()).status_code,409)
+                self.assertEqual(client.post('/api/trip/tasks',json=request().model_dump(mode='json')).status_code,409)
                 self.assertEqual(client.get(url).status_code,200)
                 self.assertEqual(client.get(url+'/result').json()['detail']['code'],'RESULT_NOT_READY')
                 self.assertEqual(client.get('/api/trip/tasks/missing').status_code,404)

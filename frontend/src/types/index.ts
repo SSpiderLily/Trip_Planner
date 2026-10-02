@@ -78,8 +78,11 @@ export interface TripPlan {
 
 export interface TripFormData {
   city: string
-  start_date: string
-  end_date: string
+  arrival_at: string
+  departure_at: string
+  arrival_place_id?: string | null
+  departure_place_id?: string | null
+  budget_per_person?: number | null
   travel_days?: number
   transportation?: string
   accommodation?: string
@@ -88,10 +91,12 @@ export interface TripFormData {
   free_text_input: string
 }
 
+import type { AnyRouteItinerary } from './itinerary'
+
 export interface TripPlanResponse {
   success: boolean
   message: string
-  data?: TripPlan
+  data?: AnyRouteItinerary | TripPlan
 }
 
 

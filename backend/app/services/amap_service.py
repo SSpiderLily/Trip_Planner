@@ -1,269 +1,212 @@
-"""高德地图MCP服务封装"""
+"""高德地图MCP适配：统一解析地点、天气与路线结果，不记录原始响应。"""
+from __future__ import annotations
 
-from typing import List, Dict, Any, Optional
+import re
+import shutil
+import threading
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 from hello_agents.tools import MCPTool
+
+from ..agents.execution import check_tool_result, decode_result, find_items
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, WeatherInfo
 
-# 全局MCP工具实例
+
 _amap_mcp_tool = None
+_amap_service = None
+_amap_lock = threading.RLock()
 
 
 def get_amap_mcp_tool() -> MCPTool:
-    """
-    获取高德地图MCP工具实例(单例模式)
-    
-    Returns:
-        MCPTool实例
-    """
     global _amap_mcp_tool
-    
-    if _amap_mcp_tool is None:
-        settings = get_settings()
-        
-        if not settings.amap_api_key:
-            raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
-        
-        # 创建MCP工具
-        _amap_mcp_tool = MCPTool(
-            name="amap",
-            description="高德地图服务,支持POI搜索、路线规划、天气查询等功能",
-            server_command=["uvx", "amap-mcp-server"],
-            env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-            auto_expand=True  # 自动展开为独立工具
-        )
-        
-        print(f"✅ 高德地图MCP工具初始化成功")
-        print(f"   工具数量: {len(_amap_mcp_tool._available_tools)}")
-        
-        # 打印可用工具列表
-        if _amap_mcp_tool._available_tools:
-            print("   可用工具:")
-            for tool in _amap_mcp_tool._available_tools[:5]:  # 只打印前5个
-                print(f"     - {tool.get('name', 'unknown')}")
-            if len(_amap_mcp_tool._available_tools) > 5:
-                print(f"     ... 还有 {len(_amap_mcp_tool._available_tools) - 5} 个工具")
-    
-    return _amap_mcp_tool
+    with _amap_lock:
+        if _amap_mcp_tool is None:
+            settings = get_settings()
+            if not settings.amap_api_key:
+                raise ValueError("高德地图API Key未配置")
+            uvx = shutil.which("uvx")
+            local_uvx = Path.home() / ".local" / "bin" / "uvx"
+            if not uvx and local_uvx.is_file() and os.access(local_uvx, os.X_OK):
+                uvx = str(local_uvx)
+            if not uvx:
+                raise RuntimeError("未找到 uvx，请安装 uv 并将 uvx 加入 PATH 或放在 ~/.local/bin/uvx")
+            try:
+                tool = MCPTool(name="amap", description="高德地图服务", server_command=[uvx, "amap-mcp-server"],
+                               env={"AMAP_MAPS_API_KEY": settings.amap_api_key}, auto_expand=True)
+            except Exception:
+                # MCPTool currently hides discovery exceptions; never expose exception text that may contain secrets.
+                raise RuntimeError("地图工具初始化失败，请检查 uvx、MCP缓存和网络配置") from None
+            if not tool._available_tools:
+                raise RuntimeError("地图工具初始化失败：未发现可用地图工具，请检查 uvx、MCP缓存和网络配置")
+            _amap_mcp_tool = tool
+            print(f"✅ 高德地图MCP工具初始化成功，工具数量: {len(_amap_mcp_tool._available_tools)}")
+        return _amap_mcp_tool
 
 
 class AmapService:
-    """高德地图服务封装类"""
-    
-    def __init__(self):
-        """初始化服务"""
-        self.mcp_tool = get_amap_mcp_tool()
-    
-    def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
-        """
-        搜索POI
-        
-        Args:
-            keywords: 搜索关键词
-            city: 城市
-            citylimit: 是否限制在城市范围内
-            
-        Returns:
-            POI信息列表
-        """
-        try:
-            # 调用MCP工具
-            result = self.mcp_tool.run({
-                "action": "call_tool",
-                "tool_name": "maps_text_search",
-                "arguments": {
-                    "keywords": keywords,
-                    "city": city,
-                    "citylimit": str(citylimit).lower()
-                }
-            })
-            
-            # 解析结果
-            # 注意: MCP工具返回的是字符串,需要解析
-            # 这里简化处理,实际应该解析JSON
-            print(f"POI搜索结果: {result[:200]}...")  # 打印前200字符
-            
-            # TODO: 解析实际的POI数据
-            return []
-            
-        except Exception as e:
-            print(f"❌ POI搜索失败: {str(e)}")
-            return []
-    
-    def get_weather(self, city: str) -> List[WeatherInfo]:
-        """
-        查询天气
-        
-        Args:
-            city: 城市名称
-            
-        Returns:
-            天气信息列表
-        """
-        try:
-            # 调用MCP工具
-            result = self.mcp_tool.run({
-                "action": "call_tool",
-                "tool_name": "maps_weather",
-                "arguments": {
-                    "city": city
-                }
-            })
-            
-            print(f"天气查询结果: {result[:200]}...")
-            
-            # TODO: 解析实际的天气数据
-            return []
-            
-        except Exception as e:
-            print(f"❌ 天气查询失败: {str(e)}")
-            return []
-    
-    def plan_route(
-        self,
-        origin_address: str,
-        destination_address: str,
-        origin_city: Optional[str] = None,
-        destination_city: Optional[str] = None,
-        route_type: str = "walking"
-    ) -> Dict[str, Any]:
-        """
-        规划路线
-        
-        Args:
-            origin_address: 起点地址
-            destination_address: 终点地址
-            origin_city: 起点城市
-            destination_city: 终点城市
-            route_type: 路线类型 (walking/driving/transit)
-            
-        Returns:
-            路线信息
-        """
-        try:
-            # 根据路线类型选择工具
-            tool_map = {
-                "walking": "maps_direction_walking_by_address",
-                "driving": "maps_direction_driving_by_address",
-                "transit": "maps_direction_transit_integrated_by_address"
-            }
-            
-            tool_name = tool_map.get(route_type, "maps_direction_walking_by_address")
-            
-            # 构建参数
-            arguments = {
-                "origin_address": origin_address,
-                "destination_address": destination_address
-            }
-            
-            # 公共交通需要城市参数
-            if route_type == "transit":
-                if origin_city:
-                    arguments["origin_city"] = origin_city
-                if destination_city:
-                    arguments["destination_city"] = destination_city
-            else:
-                # 其他路线类型也可以提供城市参数提高准确性
-                if origin_city:
-                    arguments["origin_city"] = origin_city
-                if destination_city:
-                    arguments["destination_city"] = destination_city
-            
-            # 调用MCP工具
-            result = self.mcp_tool.run({
-                "action": "call_tool",
-                "tool_name": tool_name,
-                "arguments": arguments
-            })
-            
-            print(f"路线规划结果: {result[:200]}...")
-            
-            # TODO: 解析实际的路线数据
-            return {}
-            
-        except Exception as e:
-            print(f"❌ 路线规划失败: {str(e)}")
-            return {}
-    
-    def geocode(self, address: str, city: Optional[str] = None) -> Optional[Location]:
-        """
-        地理编码(地址转坐标)
+    def __init__(self, mcp_tool=None):
+        self.mcp_tool = mcp_tool if mcp_tool is not None else get_amap_mcp_tool()
 
-        Args:
-            address: 地址
-            city: 城市
+    def _call(self, tool_name: str, arguments: dict) -> Any:
+        value = self.mcp_tool.run({"action": "call_tool", "tool_name": tool_name, "arguments": arguments})
+        data = decode_result(value)
+        check_tool_result(data)
+        return data
 
-        Returns:
-            经纬度坐标
-        """
-        try:
-            arguments = {"address": address}
-            if city:
-                arguments["city"] = city
+    @staticmethod
+    def _location(value):
+        if isinstance(value, dict):
+            try:
+                return float(value.get("longitude", value.get("lng"))), float(value.get("latitude", value.get("lat")))
+            except (ValueError, TypeError):
+                return None
+        if isinstance(value, str) and "," in value:
+            try:
+                lng, lat = value.split(",", 1)
+                return float(lng), float(lat)
+            except (ValueError, TypeError):
+                return None
+        return None
 
-            result = self.mcp_tool.run({
-                "action": "call_tool",
-                "tool_name": "maps_geo",
-                "arguments": arguments
-            })
+    @staticmethod
+    def _items(data, *keys):
+        for key in keys:
+            values = find_items(data, key)
+            if values is not None:
+                return values
+        return []
 
-            print(f"地理编码结果: {result[:200]}...")
-
-            # TODO: 解析实际的坐标数据
+    @classmethod
+    def _poi(cls, data: dict) -> POIInfo | None:
+        coordinates = cls._location(data.get("location"))
+        if not coordinates or not data.get("id") or not data.get("name"):
             return None
-
-        except Exception as e:
-            print(f"❌ 地理编码失败: {str(e)}")
-            return None
+        biz = data.get("biz_ext") if isinstance(data.get("biz_ext"), dict) else {}
+        cost = data.get("cost") if data.get("cost") is not None else biz.get("cost")
+        numeric_cost = None
+        if cost is not None:
+            match = re.fullmatch(r"\s*[¥￥]?\s*(\d+(?:\.\d+)?)\s*(?:元|人民币)?\s*(?:/人)?\s*", str(cost))
+            if match:
+                parsed = float(match.group(1))
+                if parsed >= 0 and parsed != float("inf"):
+                    numeric_cost = parsed
+        photos = data.get("photos") or []
+        if isinstance(photos, list):
+            normalized_photos = []
+            for photo in photos:
+                url = photo.get("url") if isinstance(photo, dict) else photo
+                if isinstance(url, str) and url.strip():
+                    normalized_photos.append(url.strip())
+            photos = normalized_photos
+        else:
+            photos = []
+        return POIInfo(
+            id=str(data["id"]), name=str(data["name"]), type=str(data.get("type") or data.get("typecode") or ""),
+            address=str(data.get("address") or ""), location=Location(longitude=coordinates[0], latitude=coordinates[1]),
+            tel=data.get("tel"), photos=photos,
+            opening_hours=data.get("opentime") or data.get("opentime_today"),
+            reference_cost=numeric_cost, cost_basis="reference" if numeric_cost is not None else None)
 
     def get_poi_detail(self, poi_id: str) -> Dict[str, Any]:
-        """
-        获取POI详情
+        data = self._call("maps_search_detail", {"id": poi_id})
+        if isinstance(data, dict):
+            for key in ("poi", "detail"):
+                if isinstance(data.get(key), dict):
+                    return data[key]
+            rows = self._items(data, "pois")
+            if rows and isinstance(rows[0], dict):
+                return rows[0]
+            nested = data.get("data")
+            if isinstance(nested, dict):
+                return nested
+            return data
+        return {}
 
-        Args:
-            poi_id: POI ID
+    def get_poi_info(self, poi_id: str) -> Dict[str, Any] | None:
+        detail = self.get_poi_detail(poi_id)
+        poi = self._poi(detail)
+        return poi.model_dump() if poi else None
 
-        Returns:
-            POI详情信息
-        """
-        try:
-            result = self.mcp_tool.run({
-                "action": "call_tool",
-                "tool_name": "maps_search_detail",
-                "arguments": {
-                    "id": poi_id
-                }
-            })
+    def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
+        result = self._call("maps_text_search", {"keywords": keywords, "city": city, "citylimit": str(citylimit).lower()})
+        output = []
+        for item in self._items(result, "pois")[:20]:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            detail = item
+            if not self._location(detail.get("location")):
+                try:
+                    detail = {**item, **self.get_poi_detail(str(item["id"]))}
+                except Exception:
+                    continue
+            poi = self._poi(detail)
+            if poi:
+                output.append(poi)
+        return output
 
-            print(f"POI详情结果: {result[:200]}...")
+    def get_weather(self, city: str) -> List[WeatherInfo]:
+        data = self._call("maps_weather", {"city": city})
+        result = []
+        for item in self._items(data, "casts", "forecasts"):
+            if not isinstance(item, dict) or not item.get("date"):
+                continue
+            try:
+                result.append(WeatherInfo(
+                    date=str(item["date"]), day_weather=str(item.get("dayweather") or item.get("day_weather") or ""),
+                    night_weather=str(item.get("nightweather") or item.get("night_weather") or ""),
+                    day_temp=item.get("daytemp", item.get("day_temp")), night_temp=item.get("nighttemp", item.get("night_temp")),
+                    wind_direction=str(item.get("daywind") or item.get("winddirection") or ""),
+                    wind_power=str(item.get("daypower") or item.get("windpower") or "")))
+            except (ValueError, TypeError):
+                continue
+        return result
 
-            # 解析结果并提取图片
-            import json
-            import re
-
-            # 尝试从结果中提取JSON
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                return data
-
-            return {"raw": result}
-
-        except Exception as e:
-            print(f"❌ 获取POI详情失败: {str(e)}")
+    def plan_route(self, origin_address: str, destination_address: str, origin_city: Optional[str] = None,
+                   destination_city: Optional[str] = None, route_type: str = "walking") -> Dict[str, Any]:
+        tools = {"walking": "maps_direction_walking_by_address", "driving": "maps_direction_driving_by_address",
+                 "transit": "maps_direction_transit_integrated_by_address"}
+        if route_type not in tools:
             return {}
+        arguments = {"origin_address": origin_address, "destination_address": destination_address}
+        if origin_city:
+            arguments["origin_city"] = origin_city
+        if destination_city:
+            arguments["destination_city"] = destination_city
+        data = self._call(tools[route_type], arguments)
+        routes = self._items(data, "transits" if route_type == "transit" else "paths")
+        valid = []
+        for route in routes:
+            try:
+                duration = float(route.get("duration"))
+                if duration >= 0:
+                    valid.append((duration, route))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        if not valid:
+            return {}
+        duration, route = min(valid, key=lambda pair: pair[0])
+        try:
+            distance = float(route.get("distance"))
+        except (ValueError, TypeError):
+            distance = None
+        return {"distance": distance, "duration": duration, "route_type": route_type, "description": "路线耗时仅供参考"}
 
-
-# 创建全局服务实例
-_amap_service = None
+    def geocode(self, address: str, city: Optional[str] = None) -> Optional[Location]:
+        arguments = {"address": address}
+        if city:
+            arguments["city"] = city
+        data = self._call("maps_geo", arguments)
+        rows = self._items(data, "geocodes")
+        coordinates = self._location(rows[0].get("location")) if rows and isinstance(rows[0], dict) else None
+        return Location(longitude=coordinates[0], latitude=coordinates[1]) if coordinates else None
 
 
 def get_amap_service() -> AmapService:
-    """获取高德地图服务实例(单例模式)"""
     global _amap_service
-    
-    if _amap_service is None:
-        _amap_service = AmapService()
-    
-    return _amap_service
-
+    with _amap_lock:
+        if _amap_service is None:
+            _amap_service = AmapService()
+        return _amap_service

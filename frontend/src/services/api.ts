@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { TripFormData, TripPlanResponse, TaskStatus, SpanSummary, SpanDetail, TaskMetrics } from '@/types'
+import type { DayEditOperation, DayEditResponse, PoiSearchResult } from '@/types/itinerary'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -43,6 +44,25 @@ export async function getTask(id: string): Promise<TaskStatus> {
 }
 export async function getTaskResult(id: string): Promise<TripPlanResponse> {
   return (await apiClient.get(`/api/trip/tasks/${encodeURIComponent(id)}/result`)).data
+}
+export async function searchPois(keywords: string, city: string): Promise<PoiSearchResult[]> {
+  const response = await apiClient.get('/api/map/poi', { params: { keywords, city, citylimit: true } })
+  const data = response.data?.data
+  return Array.isArray(data) ? data : []
+}
+export async function getPoiDetail(poiId: string): Promise<PoiSearchResult> {
+  const response = await apiClient.get(`/api/map/poi/${encodeURIComponent(poiId)}`)
+  return response.data?.data
+}
+export async function recalculateDay(input: {
+  task_id: string
+  date: string
+  edit_token: string
+  client_revision: number
+  request_id: string
+  operations: DayEditOperation[]
+}): Promise<DayEditResponse> {
+  return (await apiClient.post('/api/trip/recalculate-day', input)).data
 }
 export async function listTasks(status = '', offset = 0): Promise<TaskStatus[]> {
   return (await apiClient.get('/api/trip/tasks', { params: { status: status || undefined, limit: 50, offset } })).data

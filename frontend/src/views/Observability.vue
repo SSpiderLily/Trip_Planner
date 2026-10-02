@@ -187,6 +187,7 @@ async function showResult() {
   try {
     const response = await getTaskResult(selectedId.value)
     sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
+    sessionStorage.setItem('tripTaskId', selectedId.value)
     await router.push('/result')
   } catch (e) { error.value = errorText(e) }
 }

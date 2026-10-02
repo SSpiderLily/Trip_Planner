@@ -10,6 +10,7 @@ from ...models.schemas import (
     WeatherResponse
 )
 from ...services.amap_service import get_amap_service
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
 
@@ -41,7 +42,7 @@ async def search_poi(
         service = get_amap_service()
         
         # 搜索POI
-        pois = service.search_poi(keywords, city, citylimit)
+        pois = await run_in_threadpool(service.search_poi, keywords, city, citylimit)
         
         return POISearchResponse(
             success=True,
@@ -49,12 +50,25 @@ async def search_poi(
             data=pois
         )
         
-    except Exception as e:
-        print(f"❌ POI搜索失败: {str(e)}")
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"POI搜索失败: {str(e)}"
+            detail="POI搜索失败，请稍后重试"
         )
+
+
+@router.get("/poi/{poi_id}", summary="获取POI详情")
+async def get_poi_detail(poi_id: str):
+    try:
+        service = get_amap_service()
+        data = await run_in_threadpool(service.get_poi_info, poi_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail={"code": "POI_NOT_FOUND", "message": "未查询到地点详情"})
+        return {"success": True, "message": "地点详情查询成功", "data": data}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail={"code": "POI_LOOKUP_FAILED", "message": "地点详情查询失败"})
 
 
 @router.get(
@@ -80,7 +94,7 @@ async def get_weather(
         service = get_amap_service()
         
         # 查询天气
-        weather_info = service.get_weather(city)
+        weather_info = await run_in_threadpool(service.get_weather, city)
         
         return WeatherResponse(
             success=True,
@@ -88,11 +102,10 @@ async def get_weather(
             data=weather_info
         )
         
-    except Exception as e:
-        print(f"❌ 天气查询失败: {str(e)}")
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"天气查询失败: {str(e)}"
+            detail="天气查询失败，请稍后重试"
         )
 
 
@@ -117,7 +130,7 @@ async def plan_route(request: RouteRequest):
         service = get_amap_service()
         
         # 规划路线
-        route_info = service.plan_route(
+        route_info = await run_in_threadpool(service.plan_route,
             origin_address=request.origin_address,
             destination_address=request.destination_address,
             origin_city=request.origin_city,
@@ -131,11 +144,10 @@ async def plan_route(request: RouteRequest):
             data=route_info
         )
         
-    except Exception as e:
-        print(f"❌ 路线规划失败: {str(e)}")
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"路线规划失败: {str(e)}"
+            detail="路线规划失败，请稍后重试"
         )
 
 
@@ -160,4 +172,3 @@ async def health_check():
             status_code=503,
             detail=f"服务不可用: {str(e)}"
         )
-

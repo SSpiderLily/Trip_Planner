@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from ..services.task_repository import TaskRepository
 from ..services.task_service import TaskService
 from ..services.observation_service import ObservationService
+from ..services.day_edit_service import DayEditService
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
@@ -61,6 +62,7 @@ async def startup_event():
     repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
     await asyncio.to_thread(repository.initialize)
     app.state.task_service = TaskService(repository, ObservationService(repository, settings.observation_content_limit), get_trip_planner_agent)
+    app.state.day_edit_service = DayEditService(repository)
 
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")
@@ -109,4 +111,3 @@ if __name__ == "__main__":
         port=settings.port,
         reload=True
     )
-

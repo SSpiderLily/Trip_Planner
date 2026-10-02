@@ -1,5 +1,5 @@
 """新版行程契约：模型提出安排，程序核实地点并填充路段与汇总。"""
-from typing import Literal
+from typing import Literal, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -15,11 +15,22 @@ class Place(Model):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     is_area_reference: bool = False
+    tel: str | None = None
+    photos: list[str] = Field(default_factory=list)
+    opening_hours: str | None = None
 
 
 class Cost(Model):
     amount: float | None = Field(default=None, ge=0)
     basis: str = '未知'
+
+
+class ReferenceCost(Model):
+    amount: float | None = Field(default=None, ge=0)
+    currency: Literal['CNY'] = 'CNY'
+    unit: str | None = None
+    source: str | None = None
+    status: Literal['available', 'missing'] = 'missing'
 
 
 class Requirement(Model):
@@ -33,13 +44,20 @@ class Conditions(Model):
     end_date: str = ''
     travel_days: int = 1
     preferences: list[str] = Field(default_factory=list)
-    transportation: Literal['transit', 'walking', 'driving'] = 'transit'
+    transportation: Literal['transit', 'walking', 'bicycling', 'driving'] = 'transit'
     daily_time_budget_minutes: int = 600
     must_visit_requests: list[Requirement] = Field(default_factory=list)
     budget_per_adult: float | None = Field(default=None, ge=0)
     remarks: str = ''
     interpretation_notes: list[str] = Field(default_factory=list)
     reminder_only_requests: list[str] = Field(default_factory=list)
+    arrival_at: str | None = None
+    departure_at: str | None = None
+    arrival_place_id: str | None = None
+    departure_place_id: str | None = None
+    arrival_place: Place | None = None
+    departure_place: Place | None = None
+    budget_per_person: float | None = Field(default=None, ge=0)
 
 
 class Search(Model):
@@ -58,6 +76,7 @@ class Lodging(Model):
     area_name: str | None = None
     recommendation_reason: str | None = None
     place: Place | None = None
+    reference_cost: ReferenceCost = Field(default_factory=ReferenceCost)
 
 
 class Activity(Model):
@@ -70,6 +89,9 @@ class Activity(Model):
     place: Place | None = None
     estimated_cost: Cost = Field(default_factory=Cost)
     requirement_ids: list[str] = Field(default_factory=list)
+    opening_hours: str | None = None
+    photos: list[str] = Field(default_factory=list)
+    reference_cost: ReferenceCost | None = None
 
 
 class Day(Model):
@@ -84,9 +106,9 @@ class Draft(Model):
 
 
 class Itinerary(Model):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     planning_conditions: Conditions
     lodging_base: Lodging
-    days: list[dict]
+    days: list[dict[str, Any]]
     cost_summary: dict
     issues: list[dict]

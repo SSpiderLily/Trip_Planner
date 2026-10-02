@@ -2,7 +2,9 @@
 
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+from typing import Any
 
 
 # ============ 请求模型 ============
@@ -10,17 +12,50 @@ from datetime import date
 class TripRequest(BaseModel):
     """旅行规划请求"""
     city: str = Field(..., description="目的地城市", example="北京")
-    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
-    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
+    start_date: Optional[str] = Field(default=None, description="由到达时间推导的开始日期 YYYY-MM-DD", example="2025-06-01")
+    end_date: Optional[str] = Field(default=None, description="由离开时间推导的结束日期 YYYY-MM-DD", example="2025-06-03")
+    arrival_at: Optional[datetime] = Field(default=None, description="到达目的地的完整日期时间，Asia/Shanghai")
+    departure_at: Optional[datetime] = Field(default=None, description="离开目的地的完整日期时间，Asia/Shanghai")
+    arrival_place_id: Optional[str] = Field(default=None, max_length=100, description="可选到达地点高德POI ID")
+    departure_place_id: Optional[str] = Field(default=None, max_length=100, description="可选离开地点高德POI ID")
+    budget_per_person: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False, description="人均人民币参考预算，不含交通")
     travel_days: Optional[int] = Field(default=None, description="按日期自动计算；兼容旧客户端", ge=1, le=30)
     transportation: str = Field(default="公共交通", description="旧客户端交通选项")
     accommodation: str = Field(default="", description="旧客户端住宿偏好")
     lodging: str = Field(default="", max_length=300, description="已定住处，可留空")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_dates_from_times(cls, values: Any):
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        destination_tz = ZoneInfo("Asia/Shanghai")
+        for time_field, date_field in (("arrival_at", "start_date"), ("departure_at", "end_date")):
+            if values.get(date_field) is not None or values.get(time_field) is None:
+                continue
+            try:
+                raw = values[time_field]
+                parsed = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                local = parsed.replace(tzinfo=destination_tz) if parsed.tzinfo is None else parsed.astimezone(destination_tz)
+                values[date_field] = local.date().isoformat()
+            except (TypeError, ValueError):
+                # Let pydantic report the malformed datetime through the field itself.
+                pass
+        return values
     
     @model_validator(mode="after")
     def validate_dates(self):
+        destination_tz = ZoneInfo("Asia/Shanghai")
+        for field_name in ("arrival_at", "departure_at"):
+            value = getattr(self, field_name)
+            if value is not None:
+                value = value.replace(tzinfo=destination_tz) if value.tzinfo is None else value.astimezone(destination_tz)
+                setattr(self, field_name, value)
+        if self.start_date is None or self.end_date is None:
+            raise ValueError("请提供到达和离开时间，系统据此确定旅行日期")
         start, end = date.fromisoformat(self.start_date), date.fromisoformat(self.end_date)
         if start.isoformat() != self.start_date or end.isoformat() != self.end_date:
             raise ValueError("日期必须采用 YYYY-MM-DD")
@@ -29,6 +64,14 @@ class TripRequest(BaseModel):
             raise ValueError("旅行天数须在1至30天之间")
         if not self.city.strip():
             raise ValueError("目的地不能为空")
+        if (self.arrival_at is None) != (self.departure_at is None):
+            raise ValueError("到达和离开时间必须同时填写")
+        if self.arrival_at is not None:
+            # 无时区值按目的地本地时区处理；带时区值保留并在规划时换算。
+            if self.arrival_at.date().isoformat() != self.start_date or self.departure_at.date().isoformat() != self.end_date:
+                raise ValueError("到达和离开时间的日期必须与旅行起止日期一致")
+            if self.departure_at <= self.arrival_at:
+                raise ValueError("离开时间必须晚于到达时间")
         if self.travel_days is None:
             self.travel_days = days
         if (end - start).days + 1 != self.travel_days:
@@ -64,6 +107,41 @@ class RouteRequest(BaseModel):
     origin_city: Optional[str] = Field(default=None, description="起点城市")
     destination_city: Optional[str] = Field(default=None, description="终点城市")
     route_type: str = Field(default="walking", description="路线类型: walking/driving/transit")
+
+
+class DayEditOperation(BaseModel):
+    type: str = Field(..., pattern="^(add_poi|delete_activity|move_activity|select_leg_mode)$")
+    poi_id: Optional[str] = Field(default=None, max_length=100)
+    client_activity_id: Optional[str] = Field(default=None, min_length=1, max_length=64, pattern="^[A-Za-z0-9_-]+$")
+    activity_id: Optional[str] = Field(default=None, max_length=100)
+    confirmed: Optional[bool] = None
+    direction: Optional[str] = Field(default=None, pattern="^(up|down)$")
+    from_activity_id: Optional[str] = Field(default=None, max_length=100)
+    to_activity_id: Optional[str] = Field(default=None, max_length=100)
+    mode: Optional[str] = Field(default=None, pattern="^(walking|bicycling|transit|driving)$")
+
+    @model_validator(mode="after")
+    def validate_operation(self):
+        if self.type == "add_poi" and (not self.poi_id or not self.client_activity_id):
+            raise ValueError("新增地点必须包含poi_id和client_activity_id")
+        if self.type == "add_poi" and self.client_activity_id in {"lodging", "arrival", "departure"}:
+            raise ValueError("新增活动不能使用行程保留标识")
+        if self.type == "delete_activity" and (not self.activity_id or self.confirmed is not True):
+            raise ValueError("删除景点必须指定activity_id并确认")
+        if self.type == "move_activity" and (not self.activity_id or not self.direction):
+            raise ValueError("调整顺序必须指定activity_id和方向")
+        if self.type == "select_leg_mode" and not all((self.from_activity_id, self.to_activity_id, self.mode)):
+            raise ValueError("切换交通方式必须指定路段和方式")
+        return self
+
+
+class RecalculateDayRequest(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=120)
+    date: str = Field(..., pattern="^\\d{4}-\\d{2}-\\d{2}$")
+    edit_token: str = Field(..., min_length=20, max_length=100000)
+    client_revision: int = Field(..., ge=0)
+    request_id: str = Field(..., min_length=1, max_length=128)
+    operations: List[DayEditOperation] = Field(..., min_length=1, max_length=20)
 
 
 # ============ 响应模型 ============
@@ -182,6 +260,10 @@ class POIInfo(BaseModel):
     address: str = Field(..., description="地址")
     location: Location = Field(..., description="经纬度坐标")
     tel: Optional[str] = Field(default=None, description="电话")
+    photos: List[str] = Field(default_factory=list, description="查询到的图片地址")
+    opening_hours: Optional[str] = Field(default=None, description="查询到的开放时间")
+    reference_cost: Optional[float] = Field(default=None, ge=0, description="地图查询到的参考消费")
+    cost_basis: Optional[str] = Field(default=None, description="参考消费单位或适用说明")
 
 
 class POISearchResponse(BaseModel):
