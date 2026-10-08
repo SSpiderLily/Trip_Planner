@@ -33,8 +33,11 @@ def get_amap_mcp_tool() -> MCPTool:
                 uvx = str(local_uvx)
             if not uvx:
                 raise RuntimeError("未找到 uvx，请安装 uv 并将 uvx 加入 PATH 或放在 ~/.local/bin/uvx")
+            # MCP 1.8.1依赖Pydantic内部接口，与2.14不兼容；约束独立uvx环境。
             try:
-                tool = MCPTool(name="amap", description="高德地图服务", server_command=[uvx, "amap-mcp-server"],
+                tool = MCPTool(name="amap", description="高德地图服务", server_command=[uvx, "--from", "amap-mcp-server==0.1.11",
+                                   "--with", "pydantic==2.13.5", "python",
+                                   str(Path(__file__).resolve().parents[2] / "scripts" / "amap_stdio.py")],
                                env={"AMAP_MAPS_API_KEY": settings.amap_api_key}, auto_expand=True)
             except Exception:
                 # MCPTool currently hides discovery exceptions; never expose exception text that may contain secrets.

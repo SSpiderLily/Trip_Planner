@@ -1,6 +1,7 @@
 """FastAPI主应用"""
 
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from ..services.task_repository import TaskRepository
 from ..services.task_service import TaskService
@@ -14,13 +15,25 @@ from .routes import trip, poi, map as map_routes
 # 获取配置
 settings = get_settings()
 
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """统一管理任务服务的初始化和退出等待。"""
+    await startup_event(application)
+    try:
+        yield
+    finally:
+        await shutdown_event(application)
+
+
 # 创建FastAPI应用
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="基于HelloAgents框架的智能旅行规划助手API",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # 配置CORS
@@ -38,8 +51,7 @@ app.include_router(poi.router, prefix="/api")
 app.include_router(map_routes.router, prefix="/api")
 
 
-@app.on_event("startup")
-async def startup_event():
+async def startup_event(application: FastAPI):
     """应用启动事件"""
     print("\n" + "="*60)
     print(f"🚀 {settings.app_name} v{settings.app_version}")
@@ -61,8 +73,8 @@ async def startup_event():
         raise ValueError("观测存储配置必须为有效正数（内容上限至少256字节）")
     repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
     await asyncio.to_thread(repository.initialize)
-    app.state.task_service = TaskService(repository, ObservationService(repository, settings.observation_content_limit), get_trip_planner_agent)
-    app.state.day_edit_service = DayEditService(repository)
+    application.state.task_service = TaskService(repository, ObservationService(repository, settings.observation_content_limit), get_trip_planner_agent)
+    application.state.day_edit_service = DayEditService(repository)
 
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")
@@ -70,13 +82,12 @@ async def startup_event():
     print("="*60 + "\n")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
+async def shutdown_event(application: FastAPI):
     """应用关闭事件"""
     print("\n" + "="*60)
     print("👋 应用正在关闭...")
-    if hasattr(app.state, "task_service"):
-        await app.state.task_service.close()
+    if hasattr(application.state, "task_service"):
+        await application.state.task_service.close()
     print("="*60 + "\n")
 
 

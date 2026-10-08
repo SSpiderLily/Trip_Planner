@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -62,7 +63,7 @@ class MetricsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'legacy.sqlite3'
             legacy = SCHEMA.replace(' input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,\n', '')
-            with sqlite3.connect(path) as conn:
+            with closing(sqlite3.connect(path)) as conn, conn:
                 conn.executescript(legacy)
                 conn.execute("INSERT INTO tasks(task_id,status,request_data,created_at) VALUES ('old','failed','{}','2026-01-01')")
                 conn.execute("""INSERT INTO spans(span_id,task_id,name,operation_type,status,started_at)

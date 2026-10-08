@@ -1,7 +1,7 @@
 """数据模型定义"""
 
 from typing import List, Optional, Union
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -11,9 +11,9 @@ from typing import Any
 
 class TripRequest(BaseModel):
     """旅行规划请求"""
-    city: str = Field(..., description="目的地城市", example="北京")
-    start_date: Optional[str] = Field(default=None, description="由到达时间推导的开始日期 YYYY-MM-DD", example="2025-06-01")
-    end_date: Optional[str] = Field(default=None, description="由离开时间推导的结束日期 YYYY-MM-DD", example="2025-06-03")
+    city: str = Field(..., description="目的地城市", examples=["北京"])
+    start_date: Optional[str] = Field(default=None, description="由到达时间推导的开始日期 YYYY-MM-DD", examples=["2025-06-01"])
+    end_date: Optional[str] = Field(default=None, description="由离开时间推导的结束日期 YYYY-MM-DD", examples=["2025-06-03"])
     arrival_at: Optional[datetime] = Field(default=None, description="到达目的地的完整日期时间，Asia/Shanghai")
     departure_at: Optional[datetime] = Field(default=None, description="离开目的地的完整日期时间，Asia/Shanghai")
     arrival_place_id: Optional[str] = Field(default=None, max_length=100, description="可选到达地点高德POI ID")
@@ -23,8 +23,8 @@ class TripRequest(BaseModel):
     transportation: str = Field(default="公共交通", description="旧客户端交通选项")
     accommodation: str = Field(default="", description="旧客户端住宿偏好")
     lodging: str = Field(default="", max_length=300, description="已定住处，可留空")
-    preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
-    free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    preferences: List[str] = Field(default=[], description="旅行偏好标签", examples=[["历史文化", "美食"]])
+    free_text_input: Optional[str] = Field(default="", description="额外要求", examples=["希望多安排一些博物馆"])
 
     @model_validator(mode="before")
     @classmethod
@@ -78,8 +78,8 @@ class TripRequest(BaseModel):
             raise ValueError("旅行天数必须与起止日期范围（含首尾）一致")
         return self
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "city": "北京",
                 "start_date": "2025-06-01",
@@ -91,19 +91,20 @@ class TripRequest(BaseModel):
                 "free_text_input": "希望多安排一些博物馆"
             }
         }
+    )
 
 
 class POISearchRequest(BaseModel):
     """POI搜索请求"""
-    keywords: str = Field(..., description="搜索关键词", example="故宫")
-    city: str = Field(..., description="城市", example="北京")
+    keywords: str = Field(..., description="搜索关键词", examples=["故宫"])
+    city: str = Field(..., description="城市", examples=["北京"])
     citylimit: bool = Field(default=True, description="是否限制在城市范围内")
 
 
 class RouteRequest(BaseModel):
     """路线规划请求"""
-    origin_address: str = Field(..., description="起点地址", example="北京市朝阳区阜通东大街6号")
-    destination_address: str = Field(..., description="终点地址", example="北京市海淀区上地十街10号")
+    origin_address: str = Field(..., description="起点地址", examples=["北京市朝阳区阜通东大街6号"])
+    destination_address: str = Field(..., description="终点地址", examples=["北京市海淀区上地十街10号"])
     origin_city: Optional[str] = Field(default=None, description="起点城市")
     destination_city: Optional[str] = Field(default=None, description="终点城市")
     route_type: str = Field(default="walking", description="路线类型: walking/driving/transit")

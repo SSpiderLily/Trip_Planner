@@ -32,6 +32,8 @@ class FakeLLM:
         self.revision_invalid = False
         self.long_day = False
         self.invalid_first = False
+        self.missing_lodging_reference = False
+        self.skip_lodging_search = False
     def invoke(self, messages, **kwargs):
         assert len(messages) == 2, '每次调用必须独立上下文'
         data = json.loads(messages[-1]['content']); self.inputs.append(data)
@@ -40,13 +42,17 @@ class FakeLLM:
             return json.dumps({'conditions': {'city': '模型不能改城市', 'transportation': 'walking', 'must_visit_requests': [{'requirement_id': 'r1', 'text': '模型识别的必去公园'}]},
                                'searches': [] if data['candidates'] else [{'keywords': '模型决定搜索词', 'category': 'sightseeing'}]}, ensure_ascii=False)
         if stage == 'support':
-            return json.dumps({'searches': [] if any('meal' in p['categories'] for p in data['candidates']) else [
-                {'keywords': '用餐区域', 'category': 'meal'}, {'keywords': '住宿区域', 'category': 'lodging'}]}, ensure_ascii=False)
+            searches = [{'keywords': '用餐区域', 'category': 'meal'}]
+            if not self.skip_lodging_search:
+                searches.append({'keywords': '住宿区域', 'category': 'lodging'})
+            return json.dumps({'searches': [] if any('meal' in p['categories'] for p in data['candidates']) else searches}, ensure_ascii=False)
         if self.invalid_first and stage == 'final' and not data.get('repair'):
             return 'bad json'
         if stage == 'revision' and self.revision_invalid:
             return 'bad json'
         result = draft()
+        if self.missing_lodging_reference:
+            result['lodging_base']['place'] = None
         if self.long_day:
             result['days'][0]['activities'][0]['duration_minutes'] = 600
         return json.dumps(result, ensure_ascii=False)
@@ -178,6 +184,20 @@ class RouteWorkflowTest(unittest.TestCase):
         self.assertIsNone(result['lodging_base']['place'])
         self.assertFalse(any(leg['from_activity_id'] == 'lodging' or leg['to_activity_id'] == 'lodging'
                              for leg in result['days'][0]['legs']))
+
+    def test_missing_recommended_reference_uses_verified_lodging_candidate(self):
+        self.llm.missing_lodging_reference = True
+        result = self.run_plan()
+        self.assertEqual(result['lodging_base']['place']['source_id'], 'hotel')
+        self.assertTrue(result['lodging_base']['place']['is_area_reference'])
+
+    def test_day_trip_does_not_require_lodging_candidate(self):
+        self.llm.missing_lodging_reference = True
+        self.llm.skip_lodging_search = True
+        result = self.run_plan()
+        self.assertIsNone(result['lodging_base']['place'])
+        self.assertNotIn('LODGING_UNKNOWN', [issue['code'] for issue in result['issues']])
+        self.assertEqual(result['cost_summary']['lodging']['unknown_count'], 0)
 
     def test_minimal_request_and_date_validation(self):
         self.assertEqual(self.request.travel_days, 1)

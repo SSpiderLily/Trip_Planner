@@ -4,6 +4,8 @@
 
 ## 学习文档
 
+- [项目全景快照](docs/project-overview.html)：交互式架构与进度图，含快照日期和适用范围。
+
 - [单任务工程指标设计](docs/engineering-metrics-design.md)：观测页指标与 Token 采集的统计口径及验收依据。
 - [学习目标与阶段计划](docs/learning-plan.md)：全栈技术学习范围、掌握程度、阶段路线与第一轮项目完成标准。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
@@ -71,6 +73,8 @@ helloagents-trip-planner/
 ## 🚀 快速开始
 
 ### 本地一键启动（macOS / Linux）
+
+本机日常开发与运行统一使用 VS Code 打开的 `production/helloagents-trip-planner` 主目录。独立 worktree 的文件改动不会自动同步；修复需先整合回主目录并在主目录验证，再重启服务。
 
 首次使用先按下文安装后端和前端依赖，并分别配置 `backend/.env` 与 `frontend/.env`。之后在项目根目录的 VS Code 终端执行：
 
@@ -175,6 +179,8 @@ v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—1
 创建任务仍独立于HTTP连接在线程池执行，SQLite保留任务、结果和Span。局部编辑基于服务端签发的快照和操作列表，不接受客户端改写全局条件、金额或参考时长。连续操作合并处理，旧响应不覆盖新列表，重排失败可重试且不会恢复过期路线。
 
 地图查询有数量和超时限制，免费数据不可用时保留缺失状态，不自动启用付费服务。天气只按查询覆盖日期展示；住宿区域不冒充具体酒店，地图顺序示意不冒充实际道路导航。营业预约、酒店房价等内容以供应商实际返回为限，不保证全面覆盖。费用只汇总可解析的明确数值；价格区间或无法解释的单位保留为缺失，不取均值估算。
+
+高德 MCP 的独立 uvx 环境固定 `amap-mcp-server==0.1.11` 与 `pydantic==2.13.5`：该服务依赖的 MCP 1.8.1 与 Pydantic 2.14 的内部接口不兼容。后端 requirements.txt 不控制 uvx 子进程的依赖。高德 MCP 通过项目内 `backend/scripts/amap_stdio.py` 启动适配运行。适配仅丢弃第三方工具模块的调试 `print`，避免原始公交响应污染 JSON-RPC 标准输出或进入日志；不修改 uv 缓存，不屏蔽 MCP 日志、依赖警告或启动异常。
 
 `PLANNER_PLACE_QUERY_LIMIT` 默认36，`PLANNER_ROUTE_QUERY_LIMIT` 默认80，失败调用也计入额度；`PLANNER_TOOL_TIMEOUT_SECONDS` 默认25秒。当天编辑共享查询缓存并设总查询期限，额度耗尽后显示未知。`uvx` 需在 PATH 或 `~/.local/bin/uvx`，首次运行需要可访问 MCP 包与缓存；初始化没有发现工具时明确报错。
 

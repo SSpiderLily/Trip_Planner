@@ -28,8 +28,8 @@
 
       <div class="planner-panel">
         <div class="panel-topline"><span>YOUR TRIP DETAILS</span><span>预计填写 2 分钟</span></div>
-        <a-form :model="formData" layout="vertical" @finish="handleSubmit">
-          <div class="form-group">
+        <a-form class="planner-form" :model="formData" layout="vertical" @finish="handleSubmit">
+          <div class="form-group destination-group">
             <div class="group-heading"><span class="group-number">01</span><div><h3>目的地与时间</h3><p>每一段旅程，都有一个想去的地方。</p></div></div>
             <a-form-item name="city" :rules="[{ required: true, message: '请输入目的地城市' }]">
               <label class="field-label" for="trip-city">你想去哪里 <span>*</span></label>
@@ -59,7 +59,7 @@
             <p class="field-help">从搜索结果中选择地点，才会计算该端接驳；不填写也可以继续。</p>
           </div>
 
-          <div class="form-group">
+          <div class="form-group preferences-group">
             <div class="group-heading"><span class="group-number">02</span><div><h3>旅行的方式</h3><p>默认适中节奏，以公共交通和步行为主。</p></div></div>
             <div class="select-grid">
               <a-form-item name="budget_per_person">
@@ -371,21 +371,23 @@ onUnmounted(() => {
 @keyframes image-reveal { from { transform: scale(1.08); opacity: .7; } to { transform: scale(1); opacity: 1; } }
 .ticker { display: flex; align-items: center; justify-content: space-around; gap: 50px; white-space: nowrap; height: 62px; background: #dce9bd; font-size: 12px; font-weight: 700; letter-spacing: .13em; }
 .ticker span:nth-child(even) { color: #bc6b4d; font-size: 20px; }
-.planner { padding: 130px clamp(28px, 6vw, 100px) 140px; background: #fffdfa; display: grid; grid-template-columns: minmax(260px, .8fr) minmax(500px, 1.2fr); gap: clamp(70px, 10vw, 170px); }
-.planner-intro { padding-top: 20px; }
+.planner { padding: 64px clamp(24px, 6vw, 100px) 72px; background: #fffdfa; }
+.planner-intro { max-width: 1200px; margin: 0 auto 24px; }
+.planner .planner-intro h2 { font-size: clamp(28px, 3vw, 40px); margin: 12px 0; }
+.planner-intro h2 br { display: none; }
 .section-kicker { color: #a65e46; }
 .section-kicker span { color: #1b322c; }
 .planner h2, .process h2 { font-family: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif; font-size: clamp(38px, 3.8vw, 62px); font-weight: 600; line-height: 1.45; letter-spacing: -.065em; margin: 25px 0; }
 .planner h2 em { font-weight: 500; color: #ab6246; }
-.planner-intro > p { font-size: 15px; line-height: 2; max-width: 360px; color: #65716d; }
-.side-note { margin-top: 105px; padding-top: 24px; border-top: 1px solid #dcded5; display: flex; gap: 16px; align-items: center; font-size: 12px; line-height: 1.8; color: #7b887f; }
+.planner-intro > p { font-size: 14px; line-height: 1.8; max-width: 760px; color: #65716d; margin-bottom: 0; }
+.side-note { display: none; margin-top: 105px; padding-top: 24px; border-top: 1px solid #dcded5; gap: 16px; align-items: center; font-size: 12px; line-height: 1.8; color: #7b887f; }
 .side-note-symbol { font-size: 42px; color: #bf714e; line-height: 1; }
-.planner-panel { border: 1px solid #dbded4; padding: clamp(24px, 3.2vw, 52px); box-shadow: 16px 16px 0 #f1f2e8; background: #fffdfa; }
-.panel-topline { display: flex; justify-content: space-between; color: #a2aaa0; padding-bottom: 28px; border-bottom: 1px solid #dbded4; }
+.planner-panel { max-width: 1200px; margin: 0 auto; border: 1px solid #dbded4; padding: clamp(20px, 2.4vw, 32px); box-shadow: 16px 16px 0 #f1f2e8; background: #fffdfa; }
+.panel-topline { display: flex; justify-content: space-between; color: #a2aaa0; padding-bottom: 18px; border-bottom: 1px solid #dbded4; }
 .panel-topline span:first-child { color: #436255; }
-.form-group { border-bottom: 1px solid #e3e5db; padding: 36px 0 29px; }
+.form-group { border-bottom: 1px solid #e3e5db; padding: 24px 0 20px; }
 .last-group { border-bottom: 0; }
-.group-heading { display: flex; gap: 18px; margin-bottom: 30px; }
+.group-heading { display: flex; gap: 14px; margin-bottom: 20px; }
 .group-number { width: 30px; height: 30px; flex: none; border-radius: 50%; background: #dce9bd; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
 .group-heading h3 { font-family: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif; font-size: 23px; font-weight: 600; margin: -2px 0 4px; }
 .group-heading p { color: #9ca69c; font-size: 12px; margin: 0; }
@@ -436,9 +438,17 @@ onUnmounted(() => {
 .process-step > span { color: #a35d44; font-size: 11px; font-weight: 700; letter-spacing: .1em; }
 .process-step h3 { font-family: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif; font-size: 22px; margin: 30px 0 10px; font-weight: 600; }
 .process-step p { font-size: 13px; color: #66776b; line-height: 1.8; max-width: 260px; }
-@media (max-width: 1150px) { .hero h1 { font-size: clamp(40px, 4.4vw, 60px); } .hero-copy { padding-left: 42px; padding-right: 30px; } .planner { grid-template-columns: minmax(230px, .7fr) minmax(470px, 1.3fr); gap: 55px; } }
-@media (max-width: 850px) { .hero { grid-template-columns: 1fr; } .hero-copy { padding: 68px 32px 54px; } .hero h1 { font-size: clamp(43px, 7vw, 66px); margin: 50px 0 20px; } .hero-footnote { padding-top: 55px; } .hero-visual { min-height: 440px; } .planner { display: block; padding: 92px 32px 110px; } .planner-intro { margin-bottom: 42px; } .side-note { display: none; } .planner-panel { max-width: 680px; } }
-@media (max-width: 600px) { .hero-copy { padding: 55px 24px 40px; } .hero h1 { font-size: clamp(37px, 9.5vw, 50px); white-space: normal; margin-top: 40px; } .hero-description { font-size: 13px; } .hero-visual { min-height: 330px; } .hero-image-label { left: 22px; right: 22px; bottom: 22px; } .image-seal { width: 72px; height: 72px; top: 20px; right: 20px; font-size: 8px; } .ticker { justify-content: flex-start; padding: 0 24px; } .planner { padding: 76px 24px 90px; } .planner h2, .process h2 { font-size: 38px; } .planner-panel { padding: 23px; box-shadow: 8px 8px 0 #f1f2e8; } .panel-topline { font-size: 9px; } .date-grid, .select-grid, .endpoint-fields { grid-template-columns: 1fr; gap: 0; } .form-bottom { align-items: stretch; flex-direction: column; } .submit-button { width: 100%; } .process { padding: 80px 24px 90px; } .process-grid { grid-template-columns: 1fr; gap: 30px; } .process-step h3 { margin-top: 16px; } }
+@media (min-width: 1050px) {
+  .planner-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 32px; }
+  .destination-group { grid-column: 1; grid-row: 1 / 3; border-bottom: 0; border-right: 1px solid #e3e5db; padding-right: 32px; }
+  .preferences-group { grid-column: 2; grid-row: 1; }
+  .last-group { grid-column: 2; grid-row: 2; }
+  .form-bottom, .loading-note, .error-note, .task-link { grid-column: 1 / -1; }
+  .form-bottom { border-top: 1px solid #e3e5db; padding-top: 20px; margin-top: 4px; }
+}
+@media (max-width: 1150px) { .hero h1 { font-size: clamp(40px, 4.4vw, 60px); } .hero-copy { padding-left: 42px; padding-right: 30px; }  }
+@media (max-width: 850px) { .hero { grid-template-columns: 1fr; } .hero-copy { padding: 68px 32px 54px; } .hero h1 { font-size: clamp(43px, 7vw, 66px); margin: 50px 0 20px; } .hero-footnote { padding-top: 55px; } .hero-visual { min-height: 440px; } .planner { padding: 48px 32px 60px; } .planner-intro { margin-bottom: 24px; } }
+@media (max-width: 600px) { .hero-copy { padding: 55px 24px 40px; } .hero h1 { font-size: clamp(37px, 9.5vw, 50px); white-space: normal; margin-top: 40px; } .hero-description { font-size: 13px; } .hero-visual { min-height: 330px; } .hero-image-label { left: 22px; right: 22px; bottom: 22px; } .image-seal { width: 72px; height: 72px; top: 20px; right: 20px; font-size: 8px; } .ticker { justify-content: flex-start; padding: 0 24px; } .planner { padding: 40px 24px 52px; } .planner h2 { font-size: 30px; } .process h2 { font-size: 38px; } .planner-panel { padding: 23px; box-shadow: 8px 8px 0 #f1f2e8; } .panel-topline { font-size: 9px; } .date-grid, .select-grid, .endpoint-fields { grid-template-columns: 1fr; gap: 0; } .form-bottom { align-items: stretch; flex-direction: column; } .submit-button { width: 100%; } .process { padding: 80px 24px 90px; } .process-grid { grid-template-columns: 1fr; gap: 30px; } .process-step h3 { margin-top: 16px; } }
 </style>
 
 <style>

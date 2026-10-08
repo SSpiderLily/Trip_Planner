@@ -41,7 +41,7 @@ sightseeing 游览，meal 用餐，free_time 自由活动；活动按实际先�
 第一次 stage=layout 时先组合景点形成日程分布，住宿与餐饮可以暂缺；stage=final 时补齐已有候选中的住处和餐饮。
 候选不足用 free_time 保留自由活动，不重复景点填满。自由活动 place=null。
 已核实必去景点尽量全部保留，并用 requirement_ids 关联已提供的需求；无法核实的必去不编造地点。
-用户住宿 source=user，user_input 原文；无法唯一核实时 place=null。否则推荐一个区域作为全程基点，source=recommended，说明区域与理由。
+用户住宿 source=user，user_input 原文；无法唯一核实时 place=null。否则推荐一个区域作为全程基点，source=recommended，说明区域与理由；最终版从已核实住宿候选中选择 place 作为区域参考点。当天往返且没有住宿候选时可以留空。
 只参考地图已查到的开放时间；营业时间、预约条件未知时不声称开放或可预约。价格只能使用高德查询到的真实数值，查不到时留空，不估价。
 同一景点不重复；每天交通游玩加两餐和休息总时长以600分钟为上限，内容不必排满。
 地点选择、室内外安排参考给定的日期天气。开放/预约条件未知时不得声称确定开放。
@@ -279,6 +279,30 @@ class RouteTripPlanner:
             raise PlanningError('UNKNOWN_PLACE', '行程引用了未经核实的地点')
         return Place(**{**candidate, 'is_area_reference': place.is_area_reference})
 
+    @staticmethod
+    def lodging_reference(area_name, draft, state):
+        """模型漏选区域参考点时，从已核实住宿候选中选取贴近日程的地点。"""
+        candidates = [item for item in state['pool'].values()
+                      if 'lodging' in item.get('categories', []) and item.get('longitude') is not None
+                      and item.get('latitude') is not None]
+        if not candidates:
+            return None
+        terms = [part.rstrip('一带附近周边商圈') for part in re.split(r'[-·/，,、\s]+', area_name or '')]
+        terms = [part for part in terms if len(part) >= 2]
+        selected = [state['pool'].get(activity.place.source_id)
+                    for day in draft.days for activity in day.activities if activity.place]
+        points = [(item['longitude'], item['latitude']) for item in selected
+                  if item and item.get('longitude') is not None and item.get('latitude') is not None]
+        center = (sum(x for x, _ in points) / len(points), sum(y for _, y in points) / len(points)) if points else None
+
+        def rank(item):
+            label = str(item.get('name') or '') + str(item.get('address') or '')
+            match = sum(term in label for term in terms)
+            distance = ((item['longitude'] - center[0]) ** 2 + (item['latitude'] - center[1]) ** 2) if center else 0
+            return (-match, distance, str(item['source_id']))
+
+        return Place(**{**min(candidates, key=rank), 'is_area_reference': True})
+
     def resolve_endpoint(self, identity, city, state):
         """只接受地图详情可核实且能在目的地城市搜索到的到离地点。"""
         try:
@@ -446,9 +470,14 @@ class RouteTripPlanner:
             raise PlanningError('INVALID_LODGING', '没有提供住处时必须推荐住宿区域')
         base.place = self.ground(base.place, state)
         if base.source == 'recommended':
-            if not base.place or not base.area_name or not base.recommendation_reason:
-                raise PlanningError('INVALID_LODGING', '推荐住宿区域必须有已核实参考点和理由')
-            base.place.is_area_reference = True
+            if not base.area_name or not base.recommendation_reason:
+                raise PlanningError('INVALID_LODGING', '推荐住宿区域必须有名称和理由')
+            if not base.place:
+                base.place = self.lodging_reference(base.area_name, draft, state)
+            if not base.place and request.travel_days > 1:
+                raise PlanningError('INVALID_LODGING', '过夜行程的住宿区域必须有已核实参考点')
+            if base.place:
+                base.place.is_area_reference = True
         # 第一次确认后，用户住处的已核实位置固定，修改角色不能换酒店。
         if 'fixed_lodging' in state:
             base = state['fixed_lodging'].model_copy(deep=True)
@@ -460,7 +489,7 @@ class RouteTripPlanner:
             issues.append(problem('INTERPRETATION_NOTE', note))
         for note in conditions.reminder_only_requests:
             issues.append(problem('REMINDER_ONLY', note + '：仅作提醒，未据此调整路线'))
-        if not base.place:
+        if not base.place and request.travel_days > 1:
             issues.append(problem('LODGING_UNKNOWN', '用户住处无法定位，往返交通未知'))
         if state['weather_error']:
             issues.append(problem('WEATHER_FAILED', state['weather_error']))

@@ -84,7 +84,7 @@
             </div>
           </section>
           <article :id="activity.activity_id" class="activity">
-            <div class="activity-top"><span class="period">{{ derivedVisible ? periodName(activity.period, activity.start_at) : '时段与时刻待更新' }}<span v-if="derivedVisible && (activity.start_at || activity.end_at)"> · {{ activityTime(activity) }}</span></span><span>建议停留：{{ activity.duration_minutes == null ? '未查询到' : `约 ${activity.duration_minutes} 分钟` }}</span></div>
+            <div class="activity-top"><span class="period">{{ derivedVisible ? periodName(activity) : '时段与时刻待更新' }}<span v-if="derivedVisible && (activity.start_at || activity.end_at)"> · {{ activityTime(activity) }}</span></span><span>建议停留：{{ activity.duration_minutes == null ? '未查询到' : `约 ${activity.duration_minutes} 分钟` }}</span></div>
             <div class="activity-title"><button v-if="activity.place?.source_id" class="activity-name" @click="showActivity(activity)">{{ index + 1 }}. {{ activity.title }}</button><h3 v-else>{{ index + 1 }}. {{ activity.title }}</h3><div class="activity-actions">
               <button :disabled="!canEdit || index === 0" aria-label="上移景点" @click="moveActivity(activity, 'up')">↑</button>
               <button :disabled="!canEdit || index === day.activities.length - 1" aria-label="下移景点" @click="moveActivity(activity, 'down')">↓</button>
@@ -237,10 +237,14 @@ function availableModes(): TravelMode[] {
 }
 function formatMinutes(value: number | null) { return value == null ? '耗时未知' : `约 ${value} 分钟` }
 function formatDateTime(value: string) { return value ? value.replace('T', ' ').replace(/([+-]\d\d:\d\d|Z)$/, '') : '未提供' }
-function periodName(period: string, startAt?: string | null) {
-  const hour = startAt ? Number(startAt.match(/(?:T|\s)?(\d{2}):\d{2}/)?.[1]) : Number.NaN
-  if (Number.isFinite(hour)) return hour < 11 ? '上午' : hour < 14 ? '午餐' : hour < 18 ? '下午' : '晚间'
-  return ({ morning: '上午', lunch: '午餐', afternoon: '下午', dinner: '晚餐', evening: '晚间' } as Record<string, string>)[period] || period
+function periodName(activity: Activity) {
+  const hour = activity.start_at ? Number(activity.start_at.slice(11, 13)) : Number.NaN
+  if (activity.type === 'meal') {
+    if (Number.isFinite(hour)) return hour < 16 ? '午餐' : '晚餐'
+    return activity.period === 'lunch' ? '午餐' : activity.period === 'dinner' ? '晚餐' : '用餐'
+  }
+  if (Number.isFinite(hour)) return hour < 12 ? '上午' : hour < 18 ? '下午' : '晚间'
+  return ({ morning: '上午', lunch: '中午', afternoon: '下午', dinner: '傍晚', evening: '晚间' } as Record<string, string>)[activity.period] || activity.period
 }
 function costText(activity: Activity) { return visibleCost(activity.reference_cost) }
 function activityTime(activity: Activity) { return [activity.start_at, activity.end_at].filter(Boolean).map(value => value!.slice(11, 16)).join('–') }

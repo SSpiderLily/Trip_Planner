@@ -1,5 +1,9 @@
 # AGENTS.md — HelloAgents智能旅行助手
 
+## 开始与收尾入口
+
+本机文档同步规则统一见 [production/AGENTS.md](/Users/rewind/rewind_Workspace/workwork/production/AGENTS.md)，不在此复制。独立 worktree 处理本项目时也显式读取该入口；迁移到其他机器时先定位对应规则，不能默认为已加载。开始读取 README 和本次 Change；范围变化、验证完成时更新其权威状态，收尾按上级规则检查文档。
+
 AI旅行规划助手：用户在 `frontend` 填写目的地/日期/偏好，后端用 HelloAgents 的 `SimpleAgent` 通过高德地图（amap）MCP 工具自动搜索景点、天气、路线，生成多日行程。代码与文档注释主要为中文。
 
 ## 目录结构
@@ -22,7 +26,7 @@ AI旅行规划助手：用户在 `frontend` 填写目的地/日期/偏好，后�
 - 开发：`npm run dev`（Vite，端口 5173，`/api` 代理到 8000）
 - 构建 + 类型检查：`npm run build`（`vue-tsc && vite build`）
 
-没有 lint 或单测脚本，也没有测试框架。
+后端已有 Python 标准库 `unittest`，测试位于 `backend/tests/`；执行命令统一见 [README 验证说明](README.md)。前端有 `frontend/tests/` 回归材料，但当前 `package.json` 未配置 npm test/lint 脚本；不能将此表述为整个项目没有测试。
 
 ## 关键约定与易错点
 - 配置全部经 `backend/app/config.py` 读取环境变量（`backend/.env`）。**`.env` 含真实密钥（DeepSeek、高德、Unsplash），已被 `.gitignore` 排除，严禁提交或打印明文。** `frontend/.env.example` 里疑似放了真实高德 Key，同样不要打印或外传。
