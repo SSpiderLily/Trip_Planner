@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS spans_by_parent ON spans(task_id,parent_span_id);
 CREATE INDEX IF NOT EXISTS tasks_by_created ON tasks(created_at);
 """
 SUMMARY = 'task_id,status,created_at,started_at,finished_at,interruption_detected_at,error_code,error_message,error_step,observation_incomplete'
-SPAN_SUMMARY = 'span_id,task_id,parent_span_id,name,operation_type,status,started_at,finished_at,input_truncated,output_truncated'
+SPAN_SUMMARY = 'span_id,task_id,parent_span_id,name,operation_type,status,started_at,finished_at,input_truncated,output_truncated,input_tokens,output_tokens,total_tokens'
 
 
 class TaskRepository:
