@@ -124,6 +124,9 @@ export interface SpanSummary {
   status: 'running' | 'succeeded' | 'failed' | 'interrupted'
   started_at: string
   finished_at: string | null
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
   input_truncated: boolean
   output_truncated: boolean
 }

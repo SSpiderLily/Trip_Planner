@@ -72,6 +72,7 @@ class MetricsTest(unittest.TestCase):
             repo.initialize()
             repo.initialize()
             self.assertIsNone(repo.metric_spans('old')[0]['input_tokens'])
+            self.assertEqual([repo.spans('old')[0][key] for key in ('input_tokens', 'output_tokens', 'total_tokens')], [None, None, None])
 
     def test_single_provider_call_records_usage_without_putting_it_in_message(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -94,6 +95,34 @@ class MetricsTest(unittest.TestCase):
             self.assertEqual((stored['input_tokens'], stored['output_tokens'], stored['total_tokens']), (4, 2, 6))
             detail = repo.span('task', stored['span_id'])
             self.assertEqual(detail['output_data'], 'answer')
+
+    def test_span_summary_exposes_only_usage_metadata_and_isolates_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = TaskRepository(Path(directory) / 'summary.sqlite3')
+            repo.initialize()
+            for task in ('one', 'two'):
+                repo.create(task, {})
+                repo.start(task)
+            repo.begin_span(('call', 'one', None, 'llm.invoke', 'llm',
+                             '2026-01-01T00:00:00+00:00', '{"messages":[]}', 0))
+            repo.end_span('call', 'succeeded', '"answer"', False, None,
+                          dict(input_tokens=0, output_tokens=2, total_tokens=3))
+            repo.fail('one', 'FIXTURE', 'fixture')
+            repo.fail('two', 'FIXTURE', 'fixture')
+            app = FastAPI()
+            app.state.task_service = TaskService(repo, ObservationService(repo), lambda: None)
+            app.include_router(router, prefix='/api')
+            with TestClient(app) as client:
+                summary = client.get('/api/trip/tasks/one/spans').json()[0]
+                detail = client.get('/api/trip/tasks/one/spans/call').json()
+                for key in ('input_tokens', 'output_tokens', 'total_tokens'):
+                    self.assertEqual(summary[key], detail[key])
+                self.assertEqual(summary['input_tokens'], 0)
+                self.assertEqual(summary['total_tokens'], 3)
+                self.assertTrue({'input_data', 'output_data', 'error'}.isdisjoint(summary))
+                self.assertEqual(client.get('/api/trip/tasks/two/spans').json(), [])
+                self.assertEqual(client.get('/api/trip/tasks/two/spans/call').status_code, 404)
+                self.assertEqual(client.get('/api/trip/tasks/missing/spans').status_code, 404)
 
     def test_project_adapter_uses_one_original_request(self):
         llm = UsageAwareLLM.__new__(UsageAwareLLM)
