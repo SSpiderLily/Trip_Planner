@@ -11,9 +11,18 @@ _llm_instance = None
 class UsageAwareLLM(HelloAgentsLLM):
     """保留 HelloAgents 非流式调用行为，同时向观测层返回原响应的用量。"""
 
-    def invoke_with_usage(self, messages, **kwargs):
+    def invoke_with_usage(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
         try:
-            response = self._client.chat.completions.create(
+            client = self._client
+            client_options = {}
+            if request_timeout is not None:
+                client_options['timeout'] = request_timeout
+            if max_retries is not None:
+                client_options['max_retries'] = max_retries
+            if client_options:
+                client = client.with_options(**client_options)
+
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=kwargs.get('temperature', self.temperature),
