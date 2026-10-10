@@ -913,6 +913,16 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - 本轮仅修改设计、规则、状态与验证文档；正式缓存、并发和后台补齐尚未实现，未运行业务测试或真实模型/MCP查询，未启动服务、提交或推送。
 
 
+## F11a 行程路线事实缓存基础（2026-10-10）
+
+- 根方审批后在 `codex/planning-route-cache` 实现独立 `RouteFactCache`，单个 plan、单个 asyncio event loop 使用；通过 `aclose()` 取消该 plan 尚未完成的 loader。普通等待者取消由 `asyncio.shield` 隔离。查询键按供应商、API/adapter版本、工具名、GCJ-02坐标系、有向端点ID和坐标、城市、交通方式及保留类型的脱敏实际参数区分；公交实际 date/time/strategy 单独参与匹配，公交时间按发送的分钟精度规范化。
+- available步行/骑行缓存3600秒、transit缓存900秒，empty缓存60秒，均从异步loader完成时开始计时。响应入缓存前核对adapter版本、RouteFact方向/端点/坐标/方式、FactSource provider/API/tool和实际参数，以及公交时间证据；缺请求时间元数据的响应不能填充定时公交请求。错误事实、异常和校验失败不缓存并清理in-flight。错误只在同时等待的消费者之间合并；后续调用可以重试。本服务不维护规划轮次错误记忆、重试预算或冷却，后续scheduler应负责轮次内抑制。计数只提供外部加载、缓存命中、in-flight加入和错误数，不扩展观测页。
+- 深拷贝保护 `RouteFact` 内的来源参数、方案属性和分段属性；测试确认调用者修改返回值不会污染后续命中。新模块没有接入 `RouteOptionsService`、正式任务入口、后台矩阵或数据库。
+- 定向验证：使用共用解释器运行 `PYTHONPATH=. .../backend/venv/bin/python -m unittest discover -s tests -p 'test_route_fact_cache.py' -v`，16项通过；覆盖TTL边界/完成起算、方向/坐标/城市/公交时刻和策略变化、跨plan隔离、并发取消、错误不缓存及清理、错误响应拒收、嵌套字典隔离、loop边界、显式关闭、敏感参数拒绝和计数。后端完整回归 `PYTHONPATH=. .../backend/venv/bin/python -m unittest discover -s tests -v` 共138项通过（执行方自检及主对话独立复跑）；输出有既有 Starlette/AnyIO 弃用警告。
+- 验证范围只证明独立缓存服务与固定事实替身的离线行为，不证明真实AMap接入、服务生命周期持有、错误轮次抑制、后台补齐或性能提升。未发起真实MCP/地图调用、未启动服务、未触碰数据库。主对话技术验收通过；Git交付状态以`codex/planning-route-cache`的PR为准，由用户审查并手动合并。
+
+- 审查修正：骑行MCP入参名与官方HTTP参数不同，缓存按vendor记录的`origin/destination`匹配，公共交通包括展开后的`extensions=base`。新增三种方式的vendor HTTP替身→真实适配器→缓存贯穿测试，并验证loader吞掉取消后不能重新写入已关闭缓存。
+
 ## 数据契约与MCP实施派发准备（2026-10-10）
 
 - 用户授权第一步编码及高德真实接口核对，要求另开执行对话，本对话负责审批与验收。CHG-003已同步范围、分工和验收入口；新主从调度、交通后台任务与导出保存留待后续阶段。
