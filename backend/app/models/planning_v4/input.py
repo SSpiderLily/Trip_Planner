@@ -1,7 +1,7 @@
 """v4 原始需求、需求整理和后端规划约束。"""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -152,6 +152,20 @@ class RuleSet(ContractModel):
         return self
 
 
+class PlanningBoundaryFacts(ContractModel):
+    """本次规划实际采用的缓冲及仅用于上界判断的边界事实。"""
+
+    effective_return_buffer_s: int = Field(ge=0)
+    return_buffer_source: Literal["explicit_user", "default"]
+    day_ready_at: AwareDatetime | None = None
+    arrival_start_optimistic_at: AwareDatetime = Field(
+        description="就绪时间未知时的乐观起点，等于请求到达时刻；不表示已经到达酒店。",
+    )
+    departure_activity_end_upper_bound_at: AwareDatetime = Field(
+        description="离开时刻减实际采用缓冲、不含返程交通的活动结束乐观上界；不表示真实可用终点。",
+    )
+
+
 class DayConstraint(ContractModel):
     day_id: str = Field(min_length=1)
     day_date: date
@@ -192,11 +206,32 @@ class PlanningInput(ContractModel):
     requirements: RequirementSummary
     rules: RuleSet
     days: tuple[DayConstraint, ...]
+    boundary_facts: PlanningBoundaryFacts | None = None
 
     @model_validator(mode="after")
     def validate_local_references(self):
         if self.requirements.request_id != self.request.request_id:
             raise ValueError("需求整理必须引用原始 request_id")
+        if self.boundary_facts is not None:
+            facts = self.boundary_facts
+            arrival_utc = self.request.arrival_at.astimezone(timezone.utc)
+            departure_utc = self.request.departure_at.astimezone(timezone.utc)
+            if facts.arrival_start_optimistic_at.astimezone(timezone.utc) != arrival_utc:
+                raise ValueError("乐观到达起点必须引用TripRequest.arrival_at")
+            if (
+                facts.return_buffer_source == "default"
+                and facts.effective_return_buffer_s != self.rules.return_buffer_default_s
+            ):
+                raise ValueError("默认返程缓冲必须与RuleSet默认值一致")
+            if facts.day_ready_at is not None:
+                ready_utc = facts.day_ready_at.astimezone(timezone.utc)
+                if not arrival_utc <= ready_utc <= departure_utc:
+                    raise ValueError("day_ready_at 必须位于旅行到离时间范围内")
+            expected_departure_upper_bound = departure_utc - timedelta(
+                seconds=facts.effective_return_buffer_s,
+            )
+            if facts.departure_activity_end_upper_bound_at.astimezone(timezone.utc) != expected_departure_upper_bound:
+                raise ValueError("离开日乐观上界必须等于离开时间减实际采用缓冲")
         day_ids = [day.day_id for day in self.days]
         if len(day_ids) != len(set(day_ids)):
             raise ValueError("day_id 必须唯一")
