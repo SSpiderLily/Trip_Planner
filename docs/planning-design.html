@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>规划改造设计参考 · HelloAgents</title>
+<style>
+:root{--paper:#f6f7f2;--ink:#203b33;--muted:#64766d;--line:#d9e1d6;--green:#3c6651;--sand:#a87535;--blue:#506c90}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}a{color:var(--green);text-underline-offset:4px}button{font:inherit;color:inherit;cursor:pointer;background:white;border:1px solid var(--line);border-radius:6px;padding:7px 12px}button:hover{background:#eaf0e4}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #b7864d;outline-offset:3px}button:disabled{opacity:.45;cursor:default}.skip{position:absolute;top:-60px;left:12px}.skip:focus{top:10px;z-index:5;background:white;padding:10px}.topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:17px 32px;background:#fffef9;border-bottom:1px solid var(--line)}.brand{font-weight:650;text-decoration:none;letter-spacing:.02em}.brand span{font-weight:400;color:var(--muted);margin-left:12px}.meta{font-size:11px;color:var(--muted)}.layout{display:grid;grid-template-columns:230px minmax(0,1fr);max-width:1700px;margin:auto}.sidebar{padding:30px 22px;position:sticky;top:0;height:100vh;border-right:1px solid var(--line)}.eyebrow{font-size:10px;letter-spacing:.15em;color:#a06840;font-weight:650}.tabs{display:flex;flex-direction:column;gap:8px;margin:18px 0}.tabs button{text-align:left;display:flex;gap:11px;padding:13px 11px;background:transparent;border-color:transparent}.tabs button[aria-selected=true]{background:#e6eedd;border-color:#c5d5bf}.tabs b{font-size:11px;color:#8b9c84}.tabs span{display:block}.tabs small{display:block;font-size:10px;color:var(--muted);font-weight:400}.side-note{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:20px}.side-links{display:flex;flex-direction:column;gap:10px;margin-top:24px;font-size:12px}.main{padding:30px clamp(20px,3vw,48px) 64px;min-width:0}.intro{display:flex;justify-content:space-between;gap:30px;align-items:start}.intro h1{font:38px/1.3 "Songti SC","Noto Serif SC",serif;margin:10px 0 14px;letter-spacing:-.025em}.intro p{max-width:830px;margin:7px 0;color:var(--muted)}.intro .stamp{flex-shrink:0;padding:13px 16px;background:#e6eedd;border:1px solid #cedbc4;font-size:11px}.stamp strong{display:block;font-size:18px;margin-top:5px}.scope{padding:13px 17px;background:#fffdf5;border-left:3px solid #b08a55;margin:20px 0 24px;color:#687565;font-size:12px}.legend{display:flex;gap:20px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:18px 0}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:var(--green)}.legend .proposal{background:var(--sand)}.legend .current{background:var(--blue)}.panel-header{display:flex;justify-content:space-between;align-items:start;gap:20px;margin-bottom:15px}.panel-header h2{font:27px "Songti SC",serif;margin:6px 0}.panel-header p{margin:6px 0;font-size:12px;color:var(--muted)}.badge{padding:4px 9px;border:1px solid #d9c6a5;background:#f8f1e4;color:#96652e;font-size:10px;white-space:nowrap}.badge.confirmed{background:#eaf1e4;color:#42694b;border-color:#cbdcc5}.chart-card{background:#fffefa;border:1px solid var(--line);border-radius:9px;overflow:hidden;box-shadow:0 6px 24px #233b2e05}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:12px 17px;background:#f0f4e9;border-bottom:1px solid var(--line);font-size:11px;color:var(--muted)}.chart-toolbar .tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.tools button{font-size:11px;padding:5px 10px}.zoom-label{min-width:40px;text-align:center}.canvas{height:660px;overflow:auto;background-color:#fffefa;background-image:radial-gradient(#e0e5dc .8px,transparent .8px);background-size:16px 16px;padding:22px;overscroll-behavior:contain}.canvas svg{display:block;max-width:none}.diagram-title{font-size:19px;font-weight:650;fill:var(--ink)}.diagram-note{font-size:13px;fill:var(--muted)}.edge{fill:none;stroke:#829488;stroke-width:1.8;stroke-linejoin:round;marker-end:url(#arrow)}.edge.optional{stroke:#b08a55;stroke-dasharray:6 5}.edge-label{font-size:12px;fill:#5d7466;paint-order:stroke;stroke:#fffefa;stroke-width:6px;stroke-linejoin:round}.lane{fill:#f4f6ef;stroke:#e0e6db;stroke-width:1}.lane-label{font-size:16px;font-weight:650;fill:#45624f}.lane-help{font-size:11px;fill:#7b8a7d}.node rect{fill:white;stroke:#d5ddd1;stroke-width:1.5}.node[data-status=confirmed] rect{fill:#f0f6eb;stroke:#90ac81}.node[data-status=current] rect{fill:#eff3f8;stroke:#a5b6cb}.node.active rect{stroke:#a97643;stroke-width:3;filter:drop-shadow(0 3px 5px #526c4922)}.node{cursor:pointer;outline:none}.node:hover rect,.node:focus rect{stroke:#a97643;stroke-width:2.5}.node-title{font-size:16px;font-weight:600;fill:#2a4339}.node-sub{font-size:12px;fill:#718173}.node-tag{font-size:10px;fill:#9a703a}.node[data-status=confirmed] .node-tag{fill:#58794d}.node[data-status=current] .node-tag{fill:#5b7392}.detail-layout{display:grid;grid-template-columns:1.25fr 1fr;gap:18px;margin-top:20px}.detail-box{background:#fffef9;border:1px solid var(--line);border-radius:8px;padding:22px;min-width:0}.detail-box h3{font-size:17px;margin:3px 0 12px}.detail-box p{font-size:12px;color:var(--muted);margin:10px 0}.detail-grid{display:grid;grid-template-columns:70px 1fr;gap:9px 15px;font-size:12px}.detail-grid dt{color:#81917d}.detail-grid dd{margin:0;overflow-wrap:anywhere}.questions{margin:12px 0 0;padding-left:19px;font-size:12px;color:var(--muted)}.questions li{margin:9px 0}.difference{background:#edf2f7;color:#59718e;border-left:3px solid #93a7bf;padding:12px 15px;font-size:12px;margin-top:16px}.matrix{margin-top:26px}.matrix h3{font:24px "Songti SC",serif;margin:6px 0 14px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:white}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:12px 16px;text-align:left;border-bottom:1px solid #e5eadd;vertical-align:top}th{background:#eef3e8;color:#516d56;font-weight:500}td:last-child{white-space:nowrap;color:#9a713b}tbody tr:last-child td{border:0}.source{margin:24px 0;font-size:12px}.source summary{cursor:pointer;color:#667c67}.source pre{max-height:380px;overflow:auto;background:#ecf0e6;border:1px solid var(--line);padding:17px;font:11px/1.65 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.footer{border-top:1px solid var(--line);padding-top:18px;font-size:11px;color:#7f8f79}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#355c46;color:white;padding:12px 22px;border-radius:5px;z-index:9;font-size:12px}[hidden]{display:none!important}.screen-reader{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:16px 20px}.sidebar>.eyebrow,.side-note,.side-links{display:none}.tabs{flex-direction:row;flex-wrap:wrap;margin:0;gap:5px}.tabs button{padding:8px 10px}.tabs small{display:none}.main{padding:22px 18px 48px}.intro h1{font-size:29px}.intro .stamp{display:none}.detail-layout{grid-template-columns:1fr}.topbar{padding:14px 18px}.topbar .meta{display:none}.brand span{margin-left:6px;font-size:11px}.canvas{height:520px;padding:12px}.panel-header{flex-wrap:wrap}.chart-toolbar{flex-wrap:wrap}.legend{gap:12px}.scope{margin:17px 0}.intro p{font-size:12px}}@media print{.topbar,.sidebar,.chart-toolbar,.source,.toast,.skip,.legend{display:none}.layout{display:block}.main{padding:0}.canvas{height:auto;overflow:visible;background:none;padding:0}.chart-card{border:0;box-shadow:none}.canvas svg{width:100%!important;height:auto!important}.intro h1{font-size:25px}.detail-layout{grid-template-columns:1fr}.detail-box,.table-wrap{break-inside:avoid}.footer{margin-top:20px}body{background:white}}
+.reference,.choices{margin:30px 0;scroll-margin-top:20px}.reference h3,.choices h3{font:24px "Songti SC",serif;margin:6px 0 14px}.arrival-table td:last-child{white-space:normal}.reference p,.choices p{font-size:12px;color:var(--muted)}.window-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.window{background:#fffefa;border:1px solid var(--line);border-radius:7px;padding:12px 15px}.window strong,.window span{display:block}.window span{color:var(--muted);font-size:12px}.missing-example{margin:15px 0;padding:14px 17px;background:#fff8e9;border:1px dashed #c99b59;border-radius:7px;font-size:12px;color:#896433}.missing-example strong{display:block}.choices td:last-child{white-space:normal;color:var(--muted)}.choices th:first-child{width:17%}.choices th:nth-child(2){width:48%}.choices td{overflow-wrap:anywhere}.choices .choice-id{display:block;color:#a4773f;font-size:10px;letter-spacing:.05em}.choices h4{font-size:16px;margin:22px 0 8px}.cost-note{padding:13px 17px;background:#edf2f7;border-left:3px solid #93a7bf;font-size:12px;overflow-wrap:anywhere}@media(max-width:600px){.window-list{grid-template-columns:repeat(2,minmax(0,1fr))}.choices th,.choices td{padding:10px 8px}.choices table{min-width:670px}}@media print{.window-list{grid-template-columns:repeat(3,minmax(0,1fr))}.choices .table-wrap{break-inside:auto}.choices tr{break-inside:avoid}}
+
+.data-step{border:1px solid var(--line);border-radius:8px;background:#fffefa;margin:16px 0;padding:0 16px 16px;scroll-margin-top:20px}.data-step>summary{cursor:pointer;font-size:16px;font-weight:600;padding:16px 0}.data-step>summary span{color:var(--sand);margin-right:10px;font-size:12px}.data-step:not([open]){padding-bottom:0}.data-sample{margin:14px 0;border-left:3px solid #93a7bf;padding:8px 12px;background:#f0f4f7}.data-sample summary{cursor:pointer;font-size:12px;color:#506c90}.data-sample pre{font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:520px;overflow:auto}.data-walkthrough th:first-child{width:27%}.data-walkthrough th:nth-child(2){width:auto}.sidebar{overflow-y:auto}@media print{.data-sample pre{max-height:none}}
+</style>
+</head>
+<body>
+<a class="skip" href="#diagrams">跳到设计图</a>
+<header class="topbar"><a class="brand" href="#">HelloAgents <span>/ 规划改造设计参考</span></a><span class="meta">设计整理 · 2026-10-10</span><a href="project-overview.html">当前实现地图 ↗</a></header>
+<div class="layout">
+<aside class="sidebar"><p class="eyebrow">DESIGN REFERENCE</p><nav id="tabs" class="tabs" role="tablist" aria-label="设计图选择"></nav><p class="side-note">先明确各方职责，<br>再约定传递的数据，<br>最后检查编辑与保存。<br><br>点击图中的节点，查看输入、输出和设计边界。</p><div class="side-links"><a href="#stage-flow">三阶段规划职责 ↓</a><a href="#planning-open-items">泳道决定与候选缩减 ↓</a><a href="#reference-windows">参考窗口与缺项位置 ↓</a><a href="#planning-experience">旅行规划经验与主线 ↓</a><a href="#agent-contracts">多智能体与MCP契约 ↓</a><a href="#delegation-contract">派发协议与结束条件 ↓</a><a href="#mcp-fields">MCP字段建议 ↓</a><a href="#data-walkthrough">需求到初版 · 数据结构 ↓</a><a href="#time-transport-algorithm">时间与交通算法 ↓</a><a href="#route-query-cache">交通查询与缓存 ↓</a><a href="#implementation-choices">实现、算法与成本清单 ↓</a><a href="../CONTEXT.md">已确认业务规则 ↗</a><a href="changes/CHG-003-planning-performance-observability.md#流程与数据讨论">范围、待办与接受状态 ↗</a><a href="../README.md">项目用法 ↗</a></div></aside>
+<main class="main">
+<div class="intro"><div><p class="eyebrow">FROM PROTOTYPE TO IMPLEMENTATION</p><h1>把行程背后的流程，<br>说明白再改造。</h1><p>统一查看规划职责、数据关系、预览状态及导出保存。用同一套图讨论模型、MCP、后端和前端怎样协作。</p></div><div class="stamp">原型展示与操作方向<strong>初步接受</strong><span>正式方案仍需讨论</span></div></div>
+<div class="scope">本页是规划设计参考，不是完整运行说明或新的执行计划。业务规则以 CONTEXT 为准，范围和状态以 CHG-003 为准。主流程与子任务契约已定案；planning_v4 核心数据模型、引用校验和 AMap 字段适配已实现为独立模块，并完成小规模真实接口核对，尚未接入正式规划主流程。时间/返程算法、缓存调度、保存与页面接入仍待实现；图中“建议”表示细节未定案。状态变化时同步更新本页。</div>
+<div class="legend"><span><i></i>已确认业务行为</span><span><i class="proposal"></i>建议结构 / 待讨论</span><span><i class="current"></i>当前实现差异</span></div>
+<section id="diagrams" role="tabpanel" aria-labelledby="tab-planning">
+<div class="panel-header"><div><p id="diagram-kicker" class="eyebrow"></p><h2 id="diagram-title"></h2><p id="diagram-description"></p></div><span id="diagram-badge" class="badge"></span></div>
+<div class="chart-card"><div class="chart-toolbar"><span>点击节点看说明 · 大图可在画布内滚动</span><div class="tools"><button id="zoom-out" aria-label="缩小设计图">−</button><span id="zoom-label" class="zoom-label"></span><button id="zoom-in" aria-label="放大设计图">＋</button><button id="fit">适应宽度</button><button id="download">下载 SVG</button><button id="print">打印当前图</button></div></div><div id="canvas" class="canvas" tabindex="0" aria-label="可滚动的设计图画布"></div></div>
+<div class="detail-layout"><article id="node-detail" class="detail-box" aria-live="polite"></article><article class="detail-box"><p class="eyebrow">DISCUSSION CHECKLIST</p><h3>本图还需要明确什么</h3><ol id="questions" class="questions"></ol><div id="difference" class="difference"></div><p id="code-sources"></p></article></div>
+<details class="source"><summary>查看当前图的数据定义（修改 HTML 中的 designs 对象即可维护）</summary><pre id="diagram-source"></pre></details>
+</section>
+<section id="stage-flow" class="reference" aria-labelledby="stage-title"><p class="eyebrow">CONFIRMED / MODEL & BACKEND</p><h3 id="stage-title">主智能体派发 → 汇总规划 → 后端补交通</h3><div class="window-list"><div class="window"><strong>1 · 模型按需求查询</strong><span>主智能体决定所需信息并派发给子智能体；子智能体通过MCP查询，后端核实地点、天气与cost事实。</span></div><div class="window"><strong>2 · 主智能体汇总规划</strong><span>结合候选位置、旅行日天气、可用价格和每日规则，输出主题、活动时段、景点建议停留时长及景点与餐馆顺序；未设定酒店时给出住宿区域和一家查询核实的推荐酒店。</span></div><div class="window"><strong>3 · 后端查询并计算交通</strong><span>保留模型顺序，查询各方式耗时与真实路径，推荐相邻路段最快方式，计算时长、已知消费并检查缺项。</span></div></div><p>缺项或已核实的安排冲突反馈给模型，仅针对对应日期补齐或修正，合计每日期最多3轮；达到上限仍有问题则交付带提示的可编辑草稿。后端不重新优化地点顺序，模型也不补造地点、价格、天气或交通耗时。</p><p>价格与天气有查询数据才使用；消费统一参考cost人均消费，预报未覆盖或缺价格不阻止规划。三阶段是职责分工，不等于固定三次模型调用。正式代码尚未完成新范围。</p></section>
+<section id="planning-open-items" class="choices" aria-labelledby="planning-open-title"><p class="eyebrow">PLANNING / CONFIRMED & CANDIDATES</p><h3 id="planning-open-title">泳道决定与候选缩减</h3><p>离开日、模型推荐住宿、冲突修正及候选数量均已确认。接下来讨论下方工程实现清单；其中推荐方案尚未定案。</p><div class="table-wrap"><table><thead><tr><th>事项</th><th>本轮决定或建议</th><th>状态</th></tr></thead><tbody><tr><td>离开日不足3小时</td><td>不安排活动，保留返程时间；这类未安排不算缺项，不触发补查。</td><td>已确认；返程算法草案见下方时间与交通算法</td></tr><tr><td>用户未设定酒店</td><td>模型在每日规划中给出推荐住宿区域和一家有查询依据的酒店，并作为路线起点；已有酒店优先核实使用，不替换。查询失败时不编造酒店。</td><td>已确认，正式业务待实现</td></tr><tr><td>已核实的安排冲突</td><td>开放时间/到离范围等已核实冲突反馈模型，仅修相关日期，与缺项共用每日期最多3轮。未知价格、天气或交通只提示，不因此重排。</td><td>已确认，首次生成不计轮数</td></tr><tr><td>候选数量缩减</td><td>已确认景点每可用时段先2个，餐馆每餐先1家，住宿区域内先1家合适酒店。选不出或缺项时只补对应类别，不为凑数扩搜。</td><td>已确认，正式业务待实现</td></tr></tbody></table></div><h4>模型先看到少量候选，不必一次准备全部备选</h4><div class="table-wrap"><table><thead><tr><th>类别</th><th>原建议 → 已确认数量</th><th>何时补充</th></tr></thead><tbody><tr><td>景点</td><td>每可用游览时段3个 → 先2个候选；候选可跨时段共享，活动可重复引用同一地点。</td><td>没有合适地点或仍缺游览活动时，再补对应时段/区域的候选。</td></tr><tr><td>餐馆</td><td>每餐3家 → 先1家满足基本需求的餐馆；搜索范围仍1公里，必要时扩到3公里。</td><td>不符合需求、已查实关门或缺餐时，再补下一家。</td></tr><tr><td>酒店</td><td>3家 → 住宿区域内先1家合适且可定位的酒店；连续住同一区域复用，不每天重新找。</td><td>不符合明确要求或无可定位酒店时，再补候选；缺cost不单独扩大搜索。</td></tr></tbody></table></div><p>完整一天若三个游览时段、三餐及酒店都需要新查且不共享候选，模型候选摘要可从约21条缩至10条（6个景点候选＋3家餐馆＋1家酒店）。这是数量示例，不是实际查询次数或等待时长承诺；同一次搜索返回2条或3条通常仍是一次工具请求，节省主要来自精简模型输入、复用信息和减少不必要的详情查询。</p><p>必去地点另行核实，不因普通候选缩减而遗漏。地图下方默认两个景点和一家餐馆的用户推荐展示保持；可复用已有核实候选；备用推荐不足时只补缺少的类别，缩减规划候选不减少用户已确认的推荐入口。正式代码未改造，实际质量与耗时待验证。</p></section>
+<section id="reference-windows" class="reference" aria-labelledby="reference-title"><p class="eyebrow">CONFIRMED / REFERENCE WINDOWS</p><h3 id="reference-title">六个参考窗口，缺项留在对应位置</h3><p>时间窗口已确认，仅用于组织参考安排，不承诺分钟级执行；首尾日按实际可用时段覆盖。业务规则统一维护于 <a href="../CONTEXT.md">CONTEXT</a>。</p><div class="window-list"><div class="window"><strong>早餐</strong><span>08:00—09:00</span></div><div class="window"><strong>上午游览</strong><span>09:00—12:00</span></div><div class="window"><strong>午餐</strong><span>12:00—14:00</span></div><div class="window"><strong>下午游览</strong><span>14:00—17:00</span></div><div class="window"><strong>晚餐</strong><span>17:00—19:00</span></div><div class="window"><strong>晚上游览</strong><span>19:00—22:00</span></div></div><h4>到达时间只决定从哪个游览时段开始</h4><div class="table-wrap arrival-table"><table><thead><tr><th>到达时间</th><th>游览开始</th><th>例子</th></tr></thead><tbody><tr><td>凌晨00:00—06:00</td><td>当天下午</td><td>10月10日02:00到达 → 10月10日下午</td></tr><tr><td>上午06:00—12:00</td><td>当天下午</td><td>10月10日10:00到达 → 10月10日下午</td></tr><tr><td>下午12:00—18:00</td><td>当天晚上</td><td>10月10日15:00到达 → 10月10日晚上</td></tr><tr><td>晚上18:00—24:00</td><td>次日上午</td><td>10月10日20:00到达 → 10月11日上午</td></tr></tbody></table></div><p>边界时刻归后一个时段，例如12:00属于下午到达。用餐独立判断，不因游览从下午开始就自动取消午餐；默认用餐1小时；景点停留3小时是参考，模型可按景点和当天安排调整。没有安排义务的时段不显示缺项，也不触发补查。</p><div class="missing-example"><strong>午餐 · 餐馆尚未补齐</strong>这里是对应日期午餐的缺项位置。可在地图下方的目的地列表添加餐馆。<br>浅色虚线占位是本次选择的展示建议；景点缺项采用相同方式，本轮不改原型或正式前端。</div><p>三轮补查后保留这些位置和已有效安排，交付可编辑草稿。参考窗口交界不等于自动失败。上午到达从当天下午开始游览，下午到达从当天晚上开始，晚上到达从次日上午开始，凌晨到达从当天下午开始；餐次另按是否够用餐1小时判断。景点默认停留3小时，模型可调整时长，同一地点可在多个时段重复安排。四块边界及凌晨当天下午开始的规则已经确认；离开日不足3小时不安排活动，保留返程时间。</p></section>
+<section id="planning-experience" class="choices" aria-labelledby="planning-experience-title"><p class="eyebrow">RESEARCH / 2026-10-10 / PROPOSAL</p><h3 id="planning-experience-title">先确定规划主线，再拆智能体任务</h3><p>本节为旅行规划经验调查；用户已接受先明确核心需求/固定条件、再判断查询依赖及并行的主线，以下具体顺序与案例仍为建议。来源涉及海外目的地，仅借鉴规划方法，不扩大本项目城市范围。</p><div class="table-wrap"><table><thead><tr><th>来源经验</th><th>来源</th><th>对项目的启发（推导）</th></tr></thead><tbody>
+<tr><td>先列希望体验的地点，再按地理顺序、日期和时间预算形成粗行程；检查开放日及预约条件。</td><td><a href="https://www.ricksteves.com/travel-tips/trip-planning/itinerary-tips">Rick Steves行程规划</a>；<a href="https://www.ricksteves.com/travel-tips/sightseeing/sightseeing-strategies">观光安排策略</a></td><td>先识别不可变条件和核心体验；明确预约仅采用用户提供或可核实信息，不新增预约服务要求。</td></tr>
+<tr><td>按相邻景点和城区组织路线；示例沿游览区域安排午餐。</td><td><a href="https://www.visitlondon.com/things-to-do/london-attractions-map">Visit London景点地图与区域路线</a></td><td>主智能体先得到位置与区域分组，再安排每天主要区域；普通餐馆跟随当日活动位置查询，指定必吃餐馆则提前作为重要条件。</td></tr>
+<tr><td>减少长距离移动和频繁更换住宿；首尾日保守安排。</td><td><a href="https://www.japan.travel/en/gc/tips/">JNTO旅行建议</a>；<a href="https://www.lonelyplanet.com/articles/how-to-plan-a-trip">Lonely Planet规划经验</a></td><td>已定酒店先作为约束；未定酒店先看整趟主要活动区域，再选住宿基地，不因每日主题变化就推荐换酒店。</td></tr>
+<tr><td>天气、地理位置、时间和旅行风格共同影响安排。</td><td><a href="https://www.ricksteves.com/travel-tips/trip-planning/itinerary-tips">Rick Steves行程规划</a></td><td>天气可与地点搜集并行，用于日期分配和室内外取舍；预报未覆盖则按既有规则提示未知。</td></tr>
+</tbody></table></div><h4>推荐讨论主线</h4><p>需求与固定条件 → 核心体验及位置（天气并行） → 活动区域与每日粗分配 → 住宿基地及每日景点安排 → 按餐次所在区域补餐馆 → 主智能体整合初版 → 后端交通查询、计算和问题反馈。</p><p>住宿与日程是逐步配合的：先有区域级草案就能找酒店，无须等到每个餐馆确定；选中酒店后再核对每天起点。用户已定酒店、必吃餐馆或某个体验本身就是旅行目的时，相应内容提前作为固定条件。普通餐馆在区域和时段明确后再搜，避免全城无目标搜索。</p><p>这条主线不要求新增早期全量路线查询，先使用已核实位置作区域判断；最终仍由后端按既有决定查询已选地点交通。参考窗口、候选数量、cost口径和每日期三轮不变；全天时间安排是否过满在后续依据真实交通检查，不将经验建议直接当作已确认需求。</p></section>
+<section id="agent-contracts" class="choices" aria-labelledby="agent-contracts-title"><p class="eyebrow">MAIN AGENT / SPECIALISTS / BACKEND</p><h3 id="agent-contracts-title">主智能体统筹，子智能体返回信息</h3><p>主智能体先把模糊需求整理为核心需求与固定条件，再判断需要哪些信息、依赖与并行关系及派给谁，收到结果后统一规划整趟旅程；这项架构已确认，替代此前搜集/规划/修正三个平级角色的建议。结合多智能体官方实践，已确认固定景点、餐饮、住宿三个子角色，主智能体动态派发任务；天气由主智能体发起MCP工具查询。此划分已确认，替代此前餐饮住宿合并、独立天气子智能体的建议；本轮确定派发流程、子任务输入输出及结束条件，见下方委派协议；正式代码未实现。</p>
+<div class="table-wrap"><table><thead><tr><th>角色</th><th>接受什么</th><th>返回什么</th></tr></thead><tbody>
+<tr><td>主智能体（已确认）</td><td>完整需求、日期和时段规则、已有事实、子任务结果、后端检查反馈。</td><td>信息任务派发，或整趟每日主题、时段、有序活动、酒店与住宿区域、天气建议及缺项；需要补查时只派发相关日期和类别，由主智能体修正安排。</td></tr>
+<tr><td>景点子智能体（已确认）</td><td>主智能体给出的城市、日期/可用时段、偏好、必去地点、候选目标及已有信息。</td><td>核实景点ID、名称、位置、开放信息、cost人均消费、适配理由及缺失项；提出可组合区域供主智能体参考，不独立确定整趟顺序。</td></tr>
+<tr><td>餐饮子智能体（已确认）</td><td>指定日期/餐次、前后活动地点或区域、饮食偏好、已选餐馆及每餐1家的初始目标。</td><td>核实餐馆ID/位置、开放信息、cost、适配理由和缺失原因；处理指定必吃餐馆或按区域补餐。不会移动景点或修改每日顺序。</td></tr>
+<tr><td>住宿子智能体（已确认）</td><td>整趟核心活动区域、到离地点、用户住宿条件或已订酒店、已有候选及先1家的目标。</td><td>核实已订酒店，或建议住宿区域与一家可定位酒店；带位置、cost及选择理由，不查具体房型报价。主智能体最终决定是否采用。</td></tr><tr><td>天气工具（已确认）</td><td>主智能体提供城市与旅行日期，由后端执行MCP。</td><td>后端按日期返回预报、发布时间及未覆盖状态；主智能体用于行程和出行建议，不另建天气模型角色。</td></tr>
+<tr><td>后端执行与校验（程序）</td><td>主智能体的派发动作、子智能体的工具请求、MCP返回和主智能体的规划。</td><td>执行被派发的任务、校验工具与参数、维护事实/缓存/版本/轮数；主智能体确定委派对象和查询目的，后端不替代其作规划决策。规划后查询交通、计算时长和参考消费、检查问题并回传。</td></tr>
+</tbody></table></div><h4 id="worked-example">用既有上海三日测试需求演示前三项设计</h4><p>原始输入来自<a href="changes/CHG-003-planning-performance-observability.md#req-001-固定基线样例">CHG-003固定基线样例</a>：上海，2026-10-10 09:00到达，2026-10-12 19:00离开（+08:00）；偏好城市漫步、美食；到离地点、住宿、预算未填。完整备注：“想看上海代表性景点，必须去外滩。以公共交通结合步行为主，节奏适中，尽量少折返；安排顺路午餐和晚餐。”本节仅复用输入演示新设计，不运行旧基准，不复用旧行程作为新规则的输出；下方任务ID、区域和候选引用仅为说明。</p>
+<h4>① 主智能体整理出的需求</h4><div class="table-wrap"><table><thead><tr><th>类别</th><th>本例内容</th><th>处理</th></tr></thead><tbody>
+<tr><td>核心需求</td><td>上海代表性景点、城市漫步、本地美食体验。</td><td>用于候选筛选和每日主题，不自动把所有地标列为必去。</td></tr>
+<tr><td>固定条件</td><td>到离时间与城市；必须去外滩。</td><td>外滩独立核实并在规划中明确关联；不能用名字相似的餐馆或酒店替代。</td></tr>
+<tr><td>可调整偏好</td><td>公共交通结合步行、节奏适中、少折返、午晚餐顺路。</td><td>公共交通与步行是偏好，不擅自推断禁止骑行；不把“适中”转换为新的每日活动数量上限。排序仍由主智能体根据区域和规则决定。</td></tr>
+<tr><td>未知项</td><td>具体到离地点、住宿、预算未填；没有指定餐馆。</td><td>不虚构车站/机场或预算；需要推荐住宿区域和酒店。早餐按现行完整性规则安排，备注提午晚餐不等于排除早餐。</td></tr>
+<tr><td>后端规则输入</td><td>六个参考窗口、到达规则、用餐1小时/景点3小时、候选2/1/1、每日期最多3轮。</td><td>10日从下午游览，夜间也可安排；11日覆盖完整日；12日仅考虑离开前时段，晚间游览不安排。10日午餐和12日晚餐需结合可用时间、已知交通与返程缓冲判断；未知部分明确标记，不能当零。</td></tr>
+</tbody></table></div><h4>② 子任务清单与派发顺序（建议）</h4><div class="table-wrap"><table><thead><tr><th>任务与执行者</th><th>输入/目标</th><th>依赖与返回</th></tr></thead><tbody>
+<tr><td>S1 · 景点子智能体</td><td>核实必去外滩，按城市漫步及代表性景点需求查候选，普通候选按每可用游览时段2个初始目标；必去点单独核实，跨日共享去重事实。</td><td>需求已明确即可启动。返回地点ID/名称/位置、开放信息、cost、适配理由及可组合区域建议；不输出整趟行程。</td></tr>
+<tr><td>W1 · 天气工具</td><td>上海，10月10—12日；查询后按日期匹配。</td><td>与S1并行。返回覆盖日期、天气/温度、发布时间和未知原因；本例没有实际查询，不假设天气。</td></tr>
+<tr><td>P1 · 主智能体中间决策</td><td>阅读S1与可用的W1结果，保留外滩必去条件，形成每天主要区域和粗活动分布。</td><td>区域依据来自核实位置；天气暂缺不阻塞。此步不是新子智能体。</td></tr>
+<tr><td>H1 · 住宿子智能体</td><td>按P1的整趟区域、未订酒店条件，推荐住宿区域和1家可定位酒店；保留cost，不查房型报价。</td><td>依赖P1区域。与已具备位置的午晚餐任务可并行；返回酒店事实及区域选择理由。</td></tr>
+<tr><td>F1 · 餐饮子智能体</td><td>按P1给出的各日期午晚餐活动区域，城市漫步/美食偏好，每个适用餐次先1家；不得擅自添加不辣等饮食限制。</td><td>依赖相关餐次区域。一个任务可覆盖多个餐次，内部按需查询；时间边界待定的餐次注明暂定，不强行补齐。</td></tr>
+<tr><td>F2 · 餐饮子智能体</td><td>若采用酒店附近早餐方案，为11日及12日查早餐候选，每餐1家。</td><td>该方案下依赖H1酒店位置；可复用餐馆，不必每天重新查。若主智能体已选其他明确早餐区域，则不必等H1。10日09:00到达，不强排08:00—09:00早餐。</td></tr>
+</tbody></table></div><p>常见顺序是S1与W1并行 → 主智能体形成P1 → H1与F1并行 → 需要酒店位置的F2 → 主智能体整合初版。任务粒度按所需信息划分，同一餐饮角色可执行F1、F2；不按模型每一次工具调用新建角色，也不要求当天所有查询整批完成才启动其他无关就绪任务。</p>
+<h4>一条具体派发指令示例</h4><div class="cost-note">任务F1，交给餐饮子智能体：为10月11日午餐和晚餐各找1家适合本地美食体验的具体餐馆。使用主智能体在P1中确定的午餐区域A和晚餐区域B及附近景点事实引用。按已确认半径先1公里、没有合适结果再扩大到3公里；复用已查餐馆。返回核实地点ID、名称、坐标、开放信息、cost、对应餐次、推荐理由和缺失项。不要改景点顺序；cost未返回不阻止候选交付。A/B是等待P1填入的区域，不是已经查到的位置。</div>
+<h4>③ 子智能体应该返回什么</h4><div class="table-wrap"><table><thead><tr><th>返回项</th><th>本例形式（占位）</th><th>意义</th></tr></thead><tbody>
+<tr><td>任务标识与状态</td><td>F1；完成/部分/失败</td><td>“完成”指已找到符合目标的候选，不要求所有可选字段齐全。</td></tr>
+<tr><td>对应日期/餐次</td><td>2026-10-11，午餐</td><td>主智能体知道这个候选服务哪项需求；也可明确可复用范围。</td></tr>
+<tr><td>核实地点事实</td><td>place_id=&lt;MCP返回ID&gt;，名称/坐标=&lt;实际查询值&gt;</td><td>后端事实库是依据，子智能体引用事实ID；原文名字本身不代表已核实。</td></tr>
+<tr><td>消费与开放信息</td><td>cost=&lt;查询值或null&gt;；营业时间=&lt;查询值或未知&gt;</td><td>缺cost可标记missing；没查、查询失败、成功但字段为空要区分。</td></tr>
+<tr><td>适配理由</td><td>&lt;基于位置与已返回类别，说明如何符合区域及偏好&gt;</td><td>子智能体的推荐判断与地图事实分开，不凭名称断言步行5分钟或营业可用。</td></tr>
+<tr><td>缺失与来源</td><td>缺项列表、原因、工具/事实引用和查询时间</td><td>比如只有午餐候选时返回部分，明确晚餐未找到；不要让主智能体自行猜测漏了什么。</td></tr>
+</tbody></table></div><p>景点结果沿用同一外壳，补充必去要求的对应关系和区域建议；住宿结果补住宿区域及适配整趟分布的理由。每条返回数值来自工具事实而非模型估计。本节没有发起查询，所以不填真实POI ID、坐标、cost、天气或“查询成功”的记录。</p><h4>何时继续派发，何时进入规划</h4><p>主智能体看到候选有真实身份/位置、符合目标且已有足够信息时进入规划；cost和天气缺失仅提示。候选缺少、必去点身份不确定或事实与明确条件冲突时，针对缺失发起下一任务；依赖酒店位置的早餐暂等H1，不能误判为搜索失败。进入初版后的缺项/冲突按每日期3轮规则处理；子任务完成状态不是整趟交付状态，不把内部每次委派算作一轮。</p>
+<h4 id="multiagent-practices">可借鉴的官方实践与本项目建议</h4><p>本轮聚焦任务拆分和子角色边界，不以串行与并行生成相同行程为目标，也不将架构调研变成测试实施。以下为官方经验的项目化推导，未选定新框架。</p><div class="table-wrap"><table><thead><tr><th>实践依据</th><th>经验</th><th>项目建议</th></tr></thead><tbody>
+<tr><td><a href="https://www.anthropic.com/engineering/building-effective-agents">Anthropic：Building effective agents</a></td><td>主智能体按输入动态分解并综合结果；能独立处理的任务适合并行，复杂度按需要增加。</td><td>固定能力边界，动态生成任务。天气取数和交通计算直接用工具/程序，不将每个API包装成模型角色。</td></tr>
+<tr><td><a href="https://www.anthropic.com/engineering/multi-agent-research-system">Anthropic：多智能体研究系统</a></td><td>委派要说明目标、输出格式、可用工具/来源及范围，避免重复工作和遗漏；返回有依据的摘要。</td><td>任务带日期/区域、偏好、已有事实、候选目标与结束条件。地点事实由后端保留，子智能体返回ID、理由及缺失；达到当前目标即返回，不无限扩搜。</td></tr>
+<tr><td><a href="https://docs.langchain.com/oss/python/langchain/multi-agent/subagents">LangChain：Subagents</a></td><td>主智能体将子智能体作为工具调用，按能力描述路由；控制输入上下文，并接收任务结果继续统筹。</td><td>建议对主智能体暴露find_attractions、find_restaurants、find_lodging三个任务入口及get_weather工具。不是改用LangChain：可以在现有HelloAgents中实现同一模式。</td></tr>
+</tbody></table></div><h4>接到需求后怎么拆（依赖示例）</h4><ol><li>主智能体提取核心目标、固定条件、偏好和未知项，先复用已知事实。</li><li>第一批查独立信息：景点候选和天气；已订酒店或必吃餐馆也可同时核实，不能固定要求所有餐饮住宿都等景点完成。</li><li>主智能体根据返回位置、开放信息和天气，形成每日区域草案。这是主智能体的全局判断，不派给多个子智能体各排一份完整行程。</li><li>第二批填补有依赖的信息：按整趟区域派住宿任务，按每日餐次区域派餐饮任务；输入都满足时可并行。依赖酒店的早餐查询要等酒店位置。</li><li>主智能体收集结果后完成整趟规划；后端执行交通查询与校验。有问题时只重开对应日期、区域或类别的任务，主智能体统一修正。</li></ol><p>这是常见依赖模板，主智能体可根据已知条件调整顺序；不增加“每个角色每轮必须调用”的规则。一次子任务建议解决一个有意义的信息目标，如“给第二天三个餐次找到合适餐馆”，允许内部多次查询；不要每调用一次POI接口就新建智能体，也不要把整趟需求复制给每个子智能体。子智能体只查本领域、只返回候选和依据，主智能体是整趟规划的唯一修改者。</p><p>子任务统一契约：目标、日期/时段、区域/已知地点、必须满足条件、偏好、数量、已有事实、依赖及返回要求。结果统一为任务ID、完成/部分/失败、核实地点ID及摘要、推荐理由、缺失原因与来源引用。餐饮住宿cost缺失不阻止完成；没有符合条件的地点则返回缺失，不伪造候选。停止规则遵守已确认候选目标和每日期三轮，不新增调用总量上限。</p>
+<h4 id="main-agent-workflow">主智能体的五步工作法</h4><p>“明确核心需求和固定条件 → 判断所需信息、依赖和并行 → 派发子任务”的方向已确认。景点、餐饮、住宿三个子角色与天气直接调用工具已确认；具体委派协议见下方，调用数量由实际依赖和缺项决定。</p><div class="table-wrap"><table><thead><tr><th>步骤</th><th>主智能体的判断</th><th>交付给下一步的内容</th></tr></thead><tbody>
+<tr><td>1 · 理解与整理需求</td><td>用户此行最想获得什么？哪些已固定？哪些只是偏好或暂缺信息？</td><td>需求摘要：核心目标、固定条件、可调整偏好、待核实信息及采用的假设；保留原文依据。日期、时段与默认时长规则由后端提供；模型可按已确认规则调整具体景点的停留时长，不改写规则本身。</td></tr>
+<tr><td>2 · 制定信息任务</td><td>要作出规划还缺哪些事实？每项事实能解决哪个决定？已有信息能否复用？</td><td>任务清单：任务ID、子角色、目的、城市/日期/区域、筛选要求、候选目标、需返回字段、依赖任务或事实、完成条件。计划可随查询结果更新。</td></tr>
+<tr><td>3 · 派发与接收</td><td>哪些任务依赖已经满足，可以一起执行？返回信息是否满足任务目的？</td><td>主智能体派发就绪任务，后端执行并回传完成/部分/失败及事实。独立任务并行，有依赖的等待所需事实；不因某个无关慢任务阻塞其他就绪任务。</td></tr>
+<tr><td>4 · 汇总与整趟规划</td><td>核心条件是否有依据？候选位置如何分成每日区域？住宿和餐饮是否适合这些区域？天气是否支持日期安排？</td><td>先形成区域与每日草案，派发剩余住宿/餐饮查询，再输出有序每日安排、主题、酒店、天气建议及缺项。明确缺失的cost或天气不阻止规划，不等待不可能取得的事实。</td></tr>
+<tr><td>5 · 按反馈补查修正</td><td>后端反馈的是缺事实、缺安排还是已核实冲突？能否使用已有信息修正？</td><td>只需调整则直接改对应日期；缺事实则派发定向补查后修正。后端复核、计数及停止；缺项与冲突共用每日期最多3轮，耗尽后交付带提示草稿。</td></tr>
+</tbody></table></div><h4>模糊需求怎样变成明确需求</h4><p>建议将“想轻松一点”解释为减少跨区折返、避免无必要的换酒店等可调整偏好；不得擅自把它改成“每天只能两个景点”，也不能删除既定餐次/时段要求。用户明确“必须去”的地点是固定条件；一般“喜欢博物馆”是偏好。已订酒店、明确预约时间和到离时间优先保留。会改变城市、日期或明确目标的歧义才需要澄清；低影响选择可采用可见假设，不能把推测伪装成用户已确认条件。冲突先标记，不静默丢弃明确要求。</p><h4>同一子智能体可以承接多个不同任务</h4><p>子智能体按能力分工，任务按依赖拆分。例如餐饮子智能体可以先核实用户指定的必吃餐馆，之后再接收“某日午餐附近找一家餐馆”的任务；不必将它所有工作绑成一次调用。天气工具请求依赖城市与日期，景点任务依赖兴趣和可用时段；附近餐馆依赖地点/区域和餐次，未定酒店依赖整趟主要区域。主智能体不必一次想出全部任务，查到位置后再补下一批任务。</p><h4>例子：城市三日游（假设输入，不是真实查询）</h4><p>用户说“玩三天，喜欢老街和博物馆，想吃本地菜，酒店没订”。若到离日期时间已由表单提供，主智能体先整理这些条件，再并行派发景点子任务与旅行日天气工具查询。获得地点位置后，形成每天主要区域；随后可并行查询覆盖这些区域的住宿与各餐次附近餐馆，二者无额外依赖时不必互相等待。主智能体汇总输出完整安排，后端再查询公共交通/骑行/步行并检查。若酒店已定，则酒店核实从第一批开始，并进入区域分配的条件。</p><p>主智能体决定“查什么、交给谁、根据结果如何规划”；子智能体解决指定的信息任务；后端确保任务和工具实际执行、事实可追溯、旧结果不覆盖新版本、轮数与终止规则有效。具体动作结构、并发粒度、超时及失败重试仍待工程定案。</p>
+<h4>调用与依赖</h4><p>①后端校验输入并交主智能体 → ②主智能体派发景点子任务、天气工具查询以及其他条件已知的独立任务 → ③收到景点位置后，主智能体确定要补的区域信息并分别派发餐饮和住宿任务 → ④子智能体结果由后端校验并交回主智能体，主智能体判断是否已有足够信息 → ⑤主智能体输出整趟规划 → ⑥后端查询交通并检查 → ⑦有问题则回主智能体，按需再次派发补查并修正。</p><p>建议主智能体输出结构化动作delegate或plan，子智能体输出工具请求或task_result；实际框架调用保留工具协议兼容。各角色可使用同一底层模型，独立提示词和上下文。主智能体拥有整趟上下文，子智能体只接收任务所需信息；后端维护事实库，不靠模型反复转述数值。补查和已核实冲突仍共用每日期3轮，内部委派不另计轮数。天气与地点独立时可并行，餐饮住宿需位置依据时等待依赖，不固定每个角色都必须每轮运行。</p>
+<h4 id="delegation-contract">主智能体委派协议：本轮确定，尚未实现</h4>
+<p>固定三个子角色，每个角色通过一个委派工具供主智能体调用；无需每天创建一个角色。主智能体只派发有独立查询与筛选目标的工作，天气或已知地点详情可直接请求工具。后端执行模型选择的任务，不把上海示例的阶段顺序固化为所有旅行的流程。上方新增“子任务派发图”，可点击节点查看责任与结束分支。</p>
+<h4>派发与接收流程</h4><ol>
+<li>主智能体整理原始需求：核心目标、固定条件、偏好、未知项与可见假设；后端提供日期和时段规则。</li>
+<li>主智能体根据已有事实决定需要哪些子任务、各任务需要什么前置事实；缺少前置区域的任务暂不执行，已有事实可复用则不重复查询。</li>
+<li>主智能体调用景点、餐饮或住宿委派工具，可在同批提出多个独立任务。后端校验角色、输入和依赖，只并行执行依赖已满足的任务；不共享可变对话上下文。</li>
+<li>子智能体在限定范围内执行“选择查询 → MCP返回 → 判断候选是否可用”，达到目标或满足停止条件即返回。主智能体不接收全部搜索过程，后端保留事实及脱敏观测记录。</li>
+<li>后端校验结构与事实引用，将完整、部分或失败结果回传；主智能体利用新信息续派、调整查询目标或汇总规划。重复且没有新事实的任务不再次原样执行。</li>
+<li>候选满足规划需要，或相关查询已结束且明确无法补齐时，主智能体输出初版及缺项。后端补交通并检查；只有相关日期缺项或已核实冲突才进入该日补齐修正。</li>
+</ol>
+<h4>子任务输入：主智能体给目标，后端补执行信息</h4><div class="table-wrap"><table><thead><tr><th>字段</th><th>提供者与内容</th><th>约束</th></tr></thead><tbody>
+<tr><td>task_id / run_id / context_revision / base_revision</td><td>后端生成任务标识、所属生成执行及上下文版本；已有行程时再附base_revision。</td><td>结果必须关联原任务；过期结果不直接覆盖新安排。</td></tr>
+<tr><td>role / objective</td><td>主智能体选择景点、餐饮、住宿及本次明确目标。</td><td>子智能体不改变整趟目标，不向其他子智能体转派。</td></tr>
+<tr><td>scope</td><td>城市、适用日期/时段或餐次、区域或地点引用。</td><td>允许一次任务覆盖多个日期；依赖位置未知时暂不执行周边搜索。</td></tr>
+<tr><td>constraints / preferences</td><td>固定要求、用户明确偏好及相关原文，分开传递。</td><td>不把模型假设转成用户硬条件，不填造预算、禁忌或到离站点。</td></tr>
+<tr><td>known_fact_ids / excluded_poi_ids / depends_on</td><td>主智能体指定所需事实与依赖，后端解析事实摘要和已查范围。</td><td>复用已有结果，已排除地点说明原因；只传相关上下文。</td></tr>
+<tr><td>target / required_fields</td><td>候选目标与可用性要求：普通景点每可用时段先2个、每餐1家、酒店先1家；必去地点单独核实。</td><td>身份和坐标须有依据；已知不满足硬条件的地点不能算合格。cost、开放时间可未知，不能为凑可选字段无限查询。</td></tr>
+<tr><td>execution_policy / repair_scope</td><td>后端注入工具权限、搜索范围、截止时间、可重试错误策略；修正任务附日期及轮次。</td><td>具体超时、并发和技术重试数另议；不新增业务调用总量上限。</td></tr>
+</tbody></table></div>
+<h4>子任务输出：事实引用与推荐判断分开</h4><div class="table-wrap"><table><thead><tr><th>字段</th><th>内容</th></tr></thead><tbody>
+<tr><td>task_id / status / stop_reason</td><td>状态为complete、partial、failed；停止原因如target_met、no_match、scope_exhausted、no_progress、deadline、tool_error。等待依赖是后端调度状态，不是假装查询失败。</td></tr>
+<tr><td>candidates</td><td>POI及事实引用、适用日期/时段/餐次、推荐理由、未知字段。后端关联真实名称、坐标、cost原义、来源及查询时间；模型不能改写工具数值。</td></tr>
+<tr><td>coverage / missing</td><td>逐项说明目标是否覆盖、哪些餐次或必去要求仍缺、原因及已查区域；成功空结果与工具故障分开。</td></tr>
+<tr><td>角色附加信息</td><td>景点返回必去要求绑定与区域建议；餐饮返回餐次绑定；住宿返回推荐区域、酒店引用及适合全程分布的理由。</td></tr>
+<tr><td>next_action_hint</td><td>可建议扩大区域或需要什么前置信息；主智能体决定是否采纳，不代表子智能体已获继续派发权限。</td></tr>
+</tbody></table></div>
+<h4>什么时候停止</h4><div class="table-wrap"><table><thead><tr><th>层级</th><th>结束条件</th><th>后续行为</th></tr></thead><tbody>
+<tr><td>一次子任务</td><td>目标已覆盖即complete；尚缺候选但搜索范围已用尽、重复查询无新增有效事实或到达执行期限，则partial；工具/模型/协议异常导致无可用结果则failed。</td><td>成功查询但没有匹配地点返回partial + no_match，不伪装工具故障；出错前已有有效候选则保留为partial。缺cost或开放时间可complete，但必须标未知。已知开放冲突不能忽略。</td></tr>
+<tr><td>初版搜集</td><td>主智能体判断已有信息足够，或已收到无法继续取得信息的明确结果。</td><td>进入带缺项的初版，不以候选完全齐全作为唯一出口；禁止通过改任务ID反复原样查询。没有新增搜索依据时停止该方向。</td></tr>
+<tr><td>每日期补齐修正</td><td>该日完整且无已核实冲突，或累计完成3轮，或因已确认无进展/执行期限而无法继续。</td><td>后端在每轮开始分配日期轮次，完成修正及重新检查后结算；中断轮保留记录，重启不能清零。首次生成不计轮数，轮内工具调用和子任务不分别计轮数；多日期任务分别关联各日。停止后保留有效安排和对应位置提示。</td></tr>
+<tr><td>整趟交付</td><td>各日期已完成或结束自动修正，输出结构有效且存在可用规划内容。</td><td>交付可编辑草稿；缺价格、天气或部分交通不阻止。整份模型输出不可解析、无任何可用内容等执行故障需单独报错，不能冒充有用草稿。</td></tr>
+</tbody></table></div><p>两类停止分开：业务补齐最多每日期3轮；技术超时和重试避免任务无限等待，具体数值仍待工程讨论。三轮是上限，不要求对同一无结果查询无变化地重复三次。后端记录角色、依赖、耗时、Token、工具调用、结束原因和日期轮次，先制作观测，不承诺性能提升。</p>
+<h4>任务和结果的统一契约（核心模型已实现，调度待接入）</h4><div class="table-wrap"><table><thead><tr><th>数据</th><th>执行者</th><th>核心内容</th></tr></thead><tbody>
+<tr><td>PlanningInput</td><td>后端 → 主智能体</td><td>原始需求及完整备注、明确输入、各日期可用时段和规则；显式条件不能被模型覆盖。</td></tr>
+<tr><td>Subtask</td><td>主智能体 → 子智能体</td><td>任务ID、目标角色、目的、日期/时段、区域/地点引用、筛选要求、所需字段、候选目标、已有事实ID及依赖。</td></tr>
+<tr><td>TaskResult</td><td>子智能体 → 主智能体，经后端核验</td><td>任务ID、完成/部分/失败状态、事实ID及摘要、推荐理由、缺失项及原因；地点和cost来源与查询时间由后端关联，子智能体不能改写工具事实。子任务失败不直接等于整趟规划失败。</td></tr>
+<tr><td>PlanProposal / DayRevision</td><td>主智能体 → 后端（校验后生成PlanDraft）</td><td>日期、主题、带独立活动引用的有序地点ID、类型/时段、景点建议停留时长、酒店ID及住宿区域、天气建议、缺项；修正附目标日期和基准版本。</td></tr>
+<tr><td>ValidationReport</td><td>后端 → 主智能体</td><td>问题代码、日期和活动/时段、事实依据、交通摘要、需保留的安排及已用轮数；主智能体判断是否委派补查。</td></tr>
+<tr><td>ItineraryPreview</td><td>后端 → 前端</td><td>每日安排、地点事实、酒店、天气、公共交通/骑行/步行方案、cost参考消费及汇总、缺失提示与版本。完整路径留在后端与地图，不交模型复述。</td></tr>
+</tbody></table></div>
+<h4 id="mcp-fields">MCP与后端数据契约（核心字段已实现，扩展项仍为建议）</h4>
+<p>分两层：MCP保留高德响应和来源，后端统一类型、单位和缺失状态。本轮已实现 planning_v4 核心类型、校验器、AMap 适配器及项目内固定版本 MCP 封装；现有 v3 API 和默认行程仍沿用旧流程。英文名是项目契约字段，不要求与高德HTTP参数同名；工具凭据由服务端注入，不进入事实来源或模型输入。候选数量是业务筛选目标，不是接口分页大小。</p>
+<div class="table-wrap"><table><thead><tr><th>工具</th><th>建议输入</th><th>建议输出</th></tr></thead><tbody>
+<tr><td>关键词搜索</td><td>keywords、city/adcode、city_limit、types、page、page_size、requested_fields。</td><td>items[]地点摘要、分页回显、供应商返回的数量。摘要保留poi_id、name、location、address、typecode、city/adcode及已返回的business字段。</td></tr>
+<tr><td>周边搜索</td><td>center经纬度、radius_m、keywords/types、page、page_size、sort；区域限制仅按所选接口支持传入。</td><td>同一地点摘要；供应商返回时附distance_m。不得把搜索中心距离当作道路距离或交通耗时。</td></tr>
+<tr><td>地点详情</td><td>poi_id、requested_fields；首版可单ID，批量支持按接口能力另行适配。</td><td>基础地点字段，以及cost原值、营业时间原文、商圈、标签、评分和图片（有才返回）。详情仅用于补充需要的缺失字段，不强制每个搜索命中都再查一遍。</td></tr>
+<tr><td>天气预报</td><td>city_adcode、forecast类型。旅行日期由后端用于匹配，不伪装成官方历史/任意未来日期查询参数。</td><td>city/adcode、report_time、forecasts[]：date、day/night_weather、day/night_temp_c、day/night_wind、day/night_power。后端另生成covered_dates及uncovered_dates。</td></tr>
+<tr><td>步行/骑行/公共交通路线</td><td>origin、destination经纬度；mode由工具确定。公共交通补起终城市、strategy及可选departure_at，适配为接口支持的date/time。</td><td>options[]：option_id、duration_s、distance_m、segments[]；每段保留方式、距离、耗时、polyline及可用的线路名、站点、换乘信息。返回实际采用的日期/时间与策略，未使用则明确未应用。</td></tr>
+</tbody></table></div>
+<h4>统一事实结构与缺失表达</h4><div class="table-wrap"><table><thead><tr><th>结构</th><th>建议字段与规则</th></tr></thead><tbody>
+<tr><td>ToolResult</td><td>schema_version、tool_call_id、status（ok/empty/error）、data、missing_fields、error。ok允许可选字段缺失；empty仅代表请求成功且没有结果；错误不能转换成空结果。</td></tr>
+<tr><td>来源 Source</td><td>provider、tool、api_version、queried_at、脱敏effective_params；供应商发布时间另存report_time，不能用查询时间替代。后端生成fact_id并关联来源；缓存保留原查询时间。</td></tr>
+<tr><td>地点 PlaceFact</td><td>poi_id、name、location{lng,lat,coordinate_system}为进入路线计算的基本条件；address、city、adcode、typecode按官方返回保留。缺坐标可留作待核实命中，不能进入已定位候选。</td></tr>
+<tr><td>消费与营业信息</td><td>cost{raw,value,unit:"per_person_reference"}，value仅明确数字可解析，否则null；opentime_today_raw、opentime_week_raw及来源日期。今日营业时间不能直接判定旅行日期开放。后端解析得到的日期窗口必须另存，标明推导依据与未知状态。</td></tr>
+<tr><td>RouteFact</td><td>起终POI引用、mode、查询条件、options及来源；方案ID关联同一方案总耗时与分段路径。geometry_status区分complete/partial/missing；缺路径可保留已有耗时，地图不补假直线。A→B与B→A分别记录。</td></tr>
+<tr><td>错误与缺失</td><td>error{category,provider_code,message,retryable}；category区分invalid_request、auth、rate_limit、timeout、network、provider_error、invalid_response。missing_fields逐字段给not_returned、not_supported或unparseable；预报缺日另标out_of_coverage。null不是0，也不等于免费。</td></tr>
+</tbody></table></div>
+<p>后端负责事实ID、类型转换、秒/米单位、日期覆盖、缓存与错误分类；模型负责推荐理由、主题、区域选择和天气建议。模型接收地点与天气摘要，不接收完整路线polyline。最终行程引用poi_id/fact_id，活动使用独立activity_id；每日顺序和交通选择是安排数据，不写进POI事实。</p>
+<p>建议首版字段先覆盖身份、位置、cost、营业信息、天气日期和同源路线；电话、图片、评分可作为可选信息，不因缺失阻止规划。本轮沿用v3地点接口并完成有限样本核对，未迁移POI 2.0；未采样地点与账号权限的覆盖不作保证。</p>
+<p>官方依据：<a href="https://developer.amap.com/api/webservice/guide/api-advanced/newpoisearch">POI 2.0</a>列有business.cost人均消费、营业信息与show_fields；不同查询类型返回字段可能不同。<a href="https://developer.amap.com/api/webservice/guide/api/weatherinfo">天气接口</a>以城市编码查询，返回发布时间和逐日预报。<a href="https://lbs.amap.com/api/webservice/guide/api/direction">路线接口</a>确认公共交通参数支持strategy、date、time；本轮通过真实 MCP 样本核对了其中一次请求参数。</p>
+<h4>本轮工具封装与字段适配</h4><p>固定版本amap-mcp-server 0.1.11的HTTP封装已放入项目源码工作区并保留许可，尚未提交；amap_stdio.py隔离第三方调试输出，HTTP请求统一应用超时。适配器输出来源、脱敏有效参数、类型化地点/天气/路线事实及分类错误。下表区分本轮实现与样本实际观察；样本数量有限，不能代表所有地点或账号覆盖。</p><div class="table-wrap"><table><thead><tr><th>工具能力</th><th>本轮实现与样本观察</th><th>范围与限制</th></tr></thead><tbody>
+<tr><td>关键词/周边搜索</td><td>补充types、page、offset、extensions等适用参数；保留地点坐标、城市/行政区、类别和返回的业务字段。样本各返回5条，供应商count为100/600。</td><td>每条地点缺营业时间时保留missing_fields；分页和候选去重策略仍由正式规划流程接入。</td></tr>
+<tr><td>地点详情与消费</td><td>保留biz_ext原层级，并兼容旧消费者所需的cost/opentime平铺字段；cost原文可保留，无法解析时不造数值。样本详情返回adcode 310101，未返回营业时间。</td><td>不同POI字段按实际响应缺失；尚未连接新行程主流程或页面。</td></tr>
+<tr><td>步行/骑行</td><td>保留各方案总耗时、距离、分段polyline及步骤；样本分别返回1条完整几何方案，步行9段、骑行19段。</td><td>路径与耗时同源；适配器不补直线，不代表所有端点都会有路线。</td></tr>
+<tr><td>公共交通</td><td>透传并记录strategy、date、time；样本使用2026-10-11 09:00及strategy=0，返回3个方案，分段数12/10/18。</td><td>来源参数证明请求已发送，但供应商未回显时间，故标记sent_not_echoed；三个方案均为partial几何，缺失部分不补造。</td></tr>
+<tr><td>天气</td><td>保留adcode、reporttime与预报日期；按预期日期计算覆盖状态。样本返回4天预报，覆盖2026-10-10至13。</td><td>天气API按城市编码返回可用预报，不把查询参数伪装成任意目标日期。</td></tr>
+<tr><td>错误与HTTP超时</td><td>统一实际请求超时，按HTTP状态和高德错误码分类；成功空结果、无效结构与错误分开。</td><td>重试、正式缓存、轮数和全流程调度属于后续阶段。</td></tr>
+</tbody></table></div><p>固定上海地点样本先执行6次后因路线字段解析中断，修复后同组复测8次，并为cost、坐标、路线耗时/距离与站点再核对8次；共22次真实API请求，3次MCP启动诊断未到达HTTP。脱敏typed字段摘要见<a href="learning-log.md#planning-v4-amap-live-contract-2026-10-10">学习日志</a>。真实结果只覆盖本次返回，不代表所有地点的字段覆盖；POI 2.0与v3参数仍按各接口分别处理。</p></section>
+<section id="data-walkthrough" class="choices data-walkthrough" aria-labelledby="data-walkthrough-title"><p class="eyebrow">DATA DESIGN / SHANGHAI 3 DAYS / CONTRACT SELF-CHECK</p><h3 id="data-walkthrough-title">从上海三日需求到可编辑初版</h3><p>本节展示目标数据结构和固定上海基线。planning_v4 的核心输入、事实、提案、草稿、校验、预览和编辑契约已实现并通过合成样例自检；AMap字段适配已完成小规模真实核对。示例中的DEMO标识和$占位仍只用于说明对象关联，不是真实POI、天气、价格或路线。主流程接线、ActivityTiming、返程算法、缓存与前端交付仍待后续实现。</p><div class="window-list"><div class="window"><strong>用户提供</strong><span>上海；10月10日09:00到达，12日19:00离开；城市漫步、美食、必须去外滩。</span></div><div class="window"><strong>模型决定</strong><span>核心需求、子任务、区域、每日主题与有序活动、推荐理由。</span></div><div class="window"><strong>后端负责</strong><span>标识、事实、结构校验、交通、时长、问题、版本和按日轮数。</span></div></div><p>阅读顺序：先看输入输出总表，再展开八个阶段。字段中的?表示可为null；省略仅用于模型摘要投影，完整对象显式保留空值及原因。时间戳带+08:00，日历日期与时区分开；耗时用秒、距离用米，页面显示小时和分钟；经纬度使用同源GCJ-02。</p>
+<div class="table-wrap"><table><thead><tr><th>阶段</th><th>执行者</th><th>输入 → 输出</th></tr></thead><tbody><tr><td>1 用户提交</td><td>前端 → 后端</td><td>TripRequest → request_id；原始输入保留</td></tr><tr><td>2 需求整理</td><td>主智能体 + 后端规则</td><td>TripRequest → PlanningInput（需求解释 + 日期时段规则）</td></tr><tr><td>3 派发子任务</td><td>主智能体 → 后端 → 子智能体</td><td>PlanningInput + 已有事实 → Subtask；依赖就绪才执行</td></tr><tr><td>4 查询并返回候选</td><td>子智能体 + MCP + 后端</td><td>Subtask → ToolResult → FactStore + TaskResult</td></tr><tr><td>5 形成每日安排</td><td>主智能体 → 后端</td><td>需求 + 候选摘要 → PlanProposal → PlanDraft</td></tr><tr><td>6 补交通并计算</td><td>后端 + MCP</td><td>PlanDraft + FactStore → RouteFacts、Legs、DaySummary</td></tr><tr><td>7 检查与局部修正</td><td>后端 → 主智能体</td><td>安排 + 事实 + 计算 → ValidationReport / DayRevision</td></tr><tr><td>8 交付可编辑初版</td><td>后端 → 前端</td><td>当前有效版本 + 事实 + 问题 → ItineraryPreview；后续EditCommand</td></tr></tbody></table></div>
+<h4>标识与版本：哪些是一回事，哪些必须分开</h4><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>request_id / run_id / plan_id：string</td><td>后端分配：一次需求、一次生成执行、一个持续编辑的行程。</td><td>DEMO_REQ、DEMO_RUN、DEMO_PLAN；重试工具不新建整趟行程。</td></tr><tr><td>task_id / tool_call_id：string</td><td>一个委派任务可有多次工具调用；不能与run_id混用。</td><td>DEMO_S1 → DEMO_Q1、DEMO_Q2。</td></tr><tr><td>poi_id / fact_id：string</td><td>poi_id是供应商地点身份；fact_id是后端生成的不可变查询事实快照。</td><td>同一poi_id再次查询可有新fact_id；旧快照保留原依据。</td></tr><tr><td>day_id / slot_id / activity_id：string</td><td>某天、某天某个参考时段、一次具体活动。</td><td>D2 / D2_morning / A2_M；重复景点保留不同activity_id。</td></tr><tr><td>revision / context_revision：int</td><td>行程内容版本与搜集上下文版本分开；后端维护。</td><td>初始草稿revision=1，后续修正或编辑递增；尚无草稿时base_revision=null。</td></tr><tr><td>rule_version / schema_version：string / int</td><td>业务规则快照与数据格式版本分开。</td><td>示例规则travel-rules-20261010；schema_version=4是本次草案，现有v3不改。</td></tr></tbody></table></div>
+<details class="data-step" id="data-step-1" open><summary><span>01</span> 用户需求 TripRequest</summary><p class="cost-note">输入：用户表单与完整备注。输出：不可静默改写的TripRequest，后端分配request_id。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>city：string；arrival_at / departure_at：datetime</td><td>用户明确城市与到离时间；后端检查有效范围。</td><td>上海；2026-10-10 09:00至12日19:00。</td></tr><tr><td>timezone：string</td><td>日期和参考窗口的解释时区。</td><td>Asia/Shanghai；不因服务器时区改变行程日期。</td></tr><tr><td>preferences / transport_preferences：string[]</td><td>用户偏好与通行偏好，不等于硬性禁令。</td><td>公共交通结合步行不等于禁止骑行。</td></tr><tr><td>arrival_place_query / departure_place_query / lodging_query：string?</td><td>用户填写的原始地点文本；之后由查询核实。</td><td>全部null，不猜车站、机场或用户酒店。</td></tr><tr><td>budget：{amount:decimal?, currency, scope, party_basis}</td><td>预算是全程旅费；人数口径可明确未指定。</td><td>amount=null；不补造金额，不擅自解释为人均或整团。</td></tr><tr><td>remarks：string</td><td>保留原文，用于需求依据和模型输入。</td><td>提到午晚餐不等于排除早餐。</td></tr></tbody></table></div><details class="data-sample"><summary>查看：上海三日原始输入</summary><pre>{
+  &quot;request_id&quot;: &quot;DEMO_REQ&quot;,
+  &quot;city&quot;: &quot;上海&quot;,
+  &quot;arrival_at&quot;: &quot;2026-10-10T09:00:00+08:00&quot;,
+  &quot;departure_at&quot;: &quot;2026-10-12T19:00:00+08:00&quot;,
+  &quot;timezone&quot;: &quot;Asia/Shanghai&quot;,
+  &quot;preferences&quot;: [
+    &quot;城市漫步&quot;,
+    &quot;美食&quot;
+  ],
+  &quot;transport_preferences&quot;: [
+    &quot;transit&quot;,
+    &quot;walking&quot;
+  ],
+  &quot;arrival_place_query&quot;: null,
+  &quot;departure_place_query&quot;: null,
+  &quot;lodging_query&quot;: null,
+  &quot;budget&quot;: {
+    &quot;amount&quot;: null,
+    &quot;currency&quot;: &quot;CNY&quot;,
+    &quot;scope&quot;: &quot;whole_trip&quot;,
+    &quot;party_basis&quot;: &quot;unspecified&quot;
+  },
+  &quot;remarks&quot;: &quot;想看上海代表性景点，必须去外滩。以公共交通结合步行为主，节奏适中，尽量少折返；安排顺路午餐和晚餐。&quot;
+}</pre></details></details>
+<details class="data-step" id="data-step-2"><summary><span>02</span> 需求与时段 PlanningInput</summary><p class="cost-note">首次输入：TripRequest和RuleSet；主智能体输出RequirementSummary，后端结合DayConstraint整理为PlanningInput供后续使用。后端核对模型没有覆盖用户条件；这些是数据阶段，不强制每阶段单独调用一次模型。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>requirements_id / request_id：string</td><td>需求解释标识及原始输入引用，后端分配。</td><td>DEMO_REQUIREMENTS → DEMO_REQ。</td></tr><tr><td>core_goals：string[]</td><td>主智能体整理核心体验。</td><td>代表性景点、城市漫步、美食。</td></tr><tr><td>hard_requirements[]：{requirement_id,kind,text,source}</td><td>明确要求及其原文依据；source指表单字段或备注片段。</td><td>M1必须去外滩；不能绑定同名餐馆作为完成。</td></tr><tr><td>preferences / unknowns / assumptions：array</td><td>可调整偏好、缺失输入、模型采用的可见假设，分别保存。</td><td>“节奏适中”不转换成每天最多2个景点。</td></tr><tr><td>RuleSet：windows、duration_defaults_s、sightseeing_duration_adjustable、full_day_start_time、return_buffer_default_s、arrival_policy、max_repair_rounds</td><td>后端提供已确认规则；每个run固定版本。</td><td>6窗口；meal=3600，sightseeing=10800仅为默认，允许模型调整景点时长；完整日08:00出发，返程缓冲默认3600秒，用户明确要求优先；补齐最多3轮。</td></tr><tr><td>DayConstraint：day_id、date、available_bounds、slots[]</td><td>后端算日期和开始规则；参考窗口不是活动实际时刻。</td><td>D1/10日、D2/11日、D3/12日。</td></tr><tr><td>Slot：slot_id、period、reference_window、eligibility、reason</td><td>period为breakfast/morning/lunch/afternoon/dinner/evening；eligibility为required/skipped/conditional。</td><td>条件未核实用conditional并关联待核实原因；不得借此隐藏缺项。</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>日期</th><th>不安排</th><th>安排义务</th><th>说明</th></tr></thead><tbody><tr><td>10月10日 D1</td><td>早餐 skipped；上午 skipped</td><td>午餐 conditional；下午 required；晚餐 required；晚上 required</td><td>09:00到达；从下午游览。午餐结合到达后移动判断，未知不自动取消。</td></tr><tr><td>10月11日 D2</td><td>无自动跳过时段</td><td>早餐、上午、午餐、下午、晚餐、晚上均required</td><td>完整日默认08:00从酒店出发；每餐1小时，景点默认3小时，模型可调整。</td></tr><tr><td>10月12日 D3</td><td>晚上 skipped</td><td>早餐、上午、午餐、下午、晚餐先保留评估；返程相关边界conditional</td><td>19:00离开，默认缓冲1小时；返程地点和路线仍未知，不能先宣布最后餐次或下午一定可行。</td></tr></tbody></table></div><p>conditional不是skipped：后端仍保留候选或参考安排，并输出时间未核实提示。返程终点和路线未核实前，D3不能声明每日可行性已验证；默认1小时缓冲已经确定。满足不足3小时规则时才整日不安排，并记录原因。</p><details class="data-sample"><summary>查看：需求整理片段</summary><pre>{
+  &quot;requirements_id&quot;: &quot;DEMO_REQUIREMENTS&quot;,
+  &quot;request_id&quot;: &quot;DEMO_REQ&quot;,
+  &quot;core_goals&quot;: [
+    &quot;上海代表性景点&quot;,
+    &quot;城市漫步与美食&quot;,
+    &quot;尽量少折返&quot;
+  ],
+  &quot;hard_requirements&quot;: [
+    {
+      &quot;requirement_id&quot;: &quot;M1&quot;,
+      &quot;kind&quot;: &quot;must_visit&quot;,
+      &quot;text&quot;: &quot;外滩&quot;,
+      &quot;source&quot;: {
+        &quot;field&quot;: &quot;remarks&quot;,
+        &quot;quote&quot;: &quot;必须去外滩&quot;
+      }
+    }
+  ],
+  &quot;unknowns&quot;: [
+    &quot;arrival_place&quot;,
+    &quot;departure_place&quot;,
+    &quot;lodging&quot;,
+    &quot;budget&quot;
+  ],
+  &quot;assumptions&quot;: [],
+  &quot;rule_version&quot;: &quot;travel-rules-20261010&quot;,
+  &quot;days_ref&quot;: [
+    &quot;D1&quot;,
+    &quot;D2&quot;,
+    &quot;D3&quot;
+  ]
+}</pre></details></details>
+<details class="data-step" id="data-step-3"><summary><span>03</span> 派发 Subtask 与执行上下文</summary><p class="cost-note">输入：需求、已知事实和区域草案。输出：带依赖的Subtask；后端验证后执行，角色固定但任务数量动态。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>task_id / run_id / context_revision / base_revision</td><td>后端关联任务；首次搜集base_revision=null，修正时引用当前行程版本。</td><td>DEMO_F1属于DEMO_RUN，不能被其他行程使用。</td></tr><tr><td>role / objective</td><td>主智能体选择attractions/dining/lodging并说明目标。</td><td>天气是ToolRequest，不额外创建weather子角色。</td></tr><tr><td>scope：city、day_ids、slot_ids、area_hint_ids</td><td>主智能体限定城市、日期、餐次和已确定区域。</td><td>F1覆盖D2午晚餐，而不是全城搜餐馆。</td></tr><tr><td>depends_on[]：{kind,id}；known_fact_ids / excluded_poi_ids</td><td>前置事实、可复用事实和排除地点。</td><td>先有区域再做周边餐饮；没有中心坐标就暂不执行。</td></tr><tr><td>target / required_fields / constraints / preferences</td><td>所需候选、可用性底线、硬条件和偏好。</td><td>普通景点每时段先2个；餐馆每餐1个；酒店先1个。</td></tr><tr><td>ExecutionContext：allowed_tools、deadline_at?、retry_policy_ref</td><td>后端注入执行权限和运行保护，不由模型编造。</td><td>具体参数另议，不能用无限等待代替未定超时。</td></tr><tr><td>AreaHint：area_hint_id、label、anchor_poi_ids、center?、basis</td><td>主智能体提出区域建议；中心由真实位置支持。</td><td>区域是规划判断，不冒充官方商圈事实。</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>示例任务</th><th>输入依赖</th><th>结果去向</th></tr></thead><tbody><tr><td>DEMO_S1景点 + DEMO_W1天气工具</td><td>城市、日期、偏好已知，可并行</td><td>景点候选和天气交主智能体</td></tr><tr><td>主智能体P1区域草案</td><td>景点位置；天气有则利用</td><td>生成AreaHint，不是子任务</td></tr><tr><td>DEMO_H1住宿 + DEMO_F1午晚餐</td><td>所需区域已知，可并行</td><td>酒店候选及餐次候选</td></tr><tr><td>DEMO_F2早餐</td><td>若采用酒店附近早餐，依赖H1位置</td><td>D2/D3早餐候选；已有合适区域则不强加酒店依赖</td></tr></tbody></table></div><details class="data-sample"><summary>查看：F1派发输入模板</summary><pre>{
+  &quot;task_id&quot;: &quot;DEMO_F1&quot;,
+  &quot;run_id&quot;: &quot;DEMO_RUN&quot;,
+  &quot;context_revision&quot;: 2,
+  &quot;base_revision&quot;: null,
+  &quot;role&quot;: &quot;dining&quot;,
+  &quot;objective&quot;: &quot;为第二天午餐和晚餐各找一家顺路餐馆&quot;,
+  &quot;scope&quot;: {
+    &quot;city&quot;: &quot;上海&quot;,
+    &quot;day_ids&quot;: [
+      &quot;D2&quot;
+    ],
+    &quot;slot_ids&quot;: [
+      &quot;D2_lunch&quot;,
+      &quot;D2_dinner&quot;
+    ],
+    &quot;area_hint_ids&quot;: [
+      &quot;DEMO_AREA_D2&quot;
+    ]
+  },
+  &quot;depends_on&quot;: [
+    {
+      &quot;kind&quot;: &quot;area_hint&quot;,
+      &quot;id&quot;: &quot;DEMO_AREA_D2&quot;
+    }
+  ],
+  &quot;known_fact_ids&quot;: [
+    &quot;DEMO_F_MUSEUM&quot;
+  ],
+  &quot;target&quot;: {
+    &quot;candidates_per_slot&quot;: 1
+  },
+  &quot;constraints&quot;: [],
+  &quot;preferences&quot;: [
+    &quot;美食&quot;,
+    &quot;顺路&quot;
+  ],
+  &quot;excluded_poi_ids&quot;: [],
+  &quot;required_fields&quot;: [
+    &quot;poi_id&quot;,
+    &quot;name&quot;,
+    &quot;location&quot;
+  ],
+  &quot;repair_scope&quot;: null
+}</pre></details></details>
+<details class="data-step" id="data-step-4"><summary><span>04</span> 工具事实 FactStore 与子任务结果 TaskResult</summary><p class="cost-note">输入：子任务和工具调用。输出：后端保存的事实快照与子智能体的候选建议；两者通过fact_id关联。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>ToolRequest：tool_call_id、tool、arguments</td><td>后端记录一次MCP请求，arguments为已校验参数。</td><td>不把Key或完整敏感响应交模型。</td></tr><tr><td>ToolResult：status、data、missing_fields、error、source</td><td>统一ok/empty/error，与子任务complete/partial/failed区分。</td><td>一条请求成功但cost缺失仍为ok；检索无结果为empty。</td></tr><tr><td>PlaceFact：fact_id、provider、poi_id、name、location、typecode</td><td>地点不可变快照，字段由官方返回并由后端校验。</td><td>provider+poi_id确定地点身份；无有效坐标不能用于路线。</td></tr><tr><td>PlaceFact可选：address、city/adcode、cost、opening、photos</td><td>可选事实原值与解析值；空值保留原因。</td><td>cost不是门票/每晚房价；今日营业时间不当旅行日开放时间。</td></tr><tr><td>Source：tool_call_id、api_version、queried_at、effective_params；field_sources?</td><td>后端记录数据来源，脱敏；多次响应合并时保留逐字段来源。</td><td>不能把新详情查询时间套到旧消费上。</td></tr><tr><td>WeatherFact：fact_id、adcode、report_time、forecasts[]</td><td>按日期的预报事实；覆盖/未覆盖由后端匹配。</td><td>预报未覆盖10日就标未知，不把今天实况复制过去。</td></tr><tr><td>TaskResult：task_id、status、stop_reason、candidates、coverage、missing</td><td>子智能体返回选择及缺口；后端验证引用存在。</td><td>partial仍可贡献可用候选；不是整趟失败。</td></tr><tr><td>Candidate：poi_id、place_fact_id、slot_ids、requirement_ids、reason</td><td>一个事实可用于多个槽位；推荐理由与事实分离。</td><td>必去绑定只是提议，后端核实类别/身份与实际安排后才算满足。</td></tr></tbody></table></div><p>下例仅演示“工具有事实”和“子任务部分完成”的字段形状，假设查询返回这些状态；本轮没有执行查询。DEMO_F_LUNCH等是全量候选池中的示例引用，片段不枚举全部事实。</p><details class="data-sample"><summary>查看：外滩地点事实模板（$字段必须由工具填入）</summary><pre>{
+  &quot;fact_id&quot;: &quot;DEMO_F_BUND&quot;,
+  &quot;kind&quot;: &quot;place&quot;,
+  &quot;provider&quot;: &quot;amap&quot;,
+  &quot;poi_id&quot;: &quot;$POI_BUND_FROM_MCP&quot;,
+  &quot;name&quot;: &quot;$OFFICIAL_NAME&quot;,
+  &quot;location&quot;: {
+    &quot;lng&quot;: &quot;$LNG_FROM_MCP&quot;,
+    &quot;lat&quot;: &quot;$LAT_FROM_MCP&quot;,
+    &quot;coordinate_system&quot;: &quot;GCJ-02&quot;
+  },
+  &quot;typecode&quot;: &quot;$TYPECODE_FROM_MCP&quot;,
+  &quot;cost&quot;: {
+    &quot;raw&quot;: null,
+    &quot;value&quot;: null,
+    &quot;unit&quot;: &quot;per_person_reference&quot;
+  },
+  &quot;source_refs&quot;: [
+    &quot;DEMO_Q1&quot;
+  ],
+  &quot;missing_fields&quot;: [
+    {
+      &quot;field&quot;: &quot;cost&quot;,
+      &quot;reason&quot;: &quot;not_returned&quot;
+    }
+  ]
+}</pre></details><details class="data-sample"><summary>查看：餐饮子任务部分返回模板</summary><pre>{
+  &quot;task_id&quot;: &quot;DEMO_F1&quot;,
+  &quot;status&quot;: &quot;partial&quot;,
+  &quot;stop_reason&quot;: &quot;scope_exhausted&quot;,
+  &quot;candidates&quot;: [
+    {
+      &quot;poi_id&quot;: &quot;$POI_LUNCH_FROM_MCP&quot;,
+      &quot;place_fact_id&quot;: &quot;DEMO_F_LUNCH&quot;,
+      &quot;slot_ids&quot;: [
+        &quot;D2_lunch&quot;
+      ],
+      &quot;reason&quot;: &quot;与当日游览区域匹配&quot;
+    }
+  ],
+  &quot;coverage&quot;: [
+    {
+      &quot;slot_id&quot;: &quot;D2_lunch&quot;,
+      &quot;status&quot;: &quot;covered&quot;
+    },
+    {
+      &quot;slot_id&quot;: &quot;D2_dinner&quot;,
+      &quot;status&quot;: &quot;missing&quot;
+    }
+  ],
+  &quot;missing&quot;: [
+    {
+      &quot;slot_id&quot;: &quot;D2_dinner&quot;,
+      &quot;reason&quot;: &quot;本轮未找到满足条件的餐馆&quot;
+    }
+  ],
+  &quot;next_action_hint&quot;: &quot;主智能体判断是否有新的搜索依据&quot;
+}</pre></details></details>
+<details class="data-step" id="data-step-5"><summary><span>05</span> 每日安排 PlanProposal → PlanDraft</summary><p class="cost-note">输入：PlanningInput、候选与天气摘要。输出：模型的安排提案，经后端结构及事实引用校验后成为PlanDraft。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>PlanProposal：days[]、requirement_bindings、missing</td><td>模型输出主题、区域、时段、顺序及景点建议停留时长；不输出查询价格或路线。</td><td>新活动用临时client_ref；修正保留已有activity_id。</td></tr><tr><td>PlanDraft：plan_id、revision、request_id、rule_version、days[]</td><td>后端分配稳定ID和首版版本；不是最终数据库保存。</td><td>初始草稿解析后revision=1，日修正也递增；格式错误修复不改变业务补齐轮数。</td></tr><tr><td>DayPlan：day_id、date、theme、activities[]</td><td>activities数组是唯一顺序来源，不再同时存一套可冲突的序号。</td><td>D1/D2/D3分别安排；主题是模型文字，不是事实。</td></tr><tr><td>Activity：activity_id、slot_id、kind、poi_id、place_fact_id、duration_s、duration_source、duration_reason?</td><td>一次游览或用餐；景点时长由主智能体结合地点和当天安排给出，未提供时后端采用3小时默认值。duration_source区分model/default/user，duration_reason记录调整理由（字段建议）；用户明确条件优先，用餐仍默认1小时。</td><td>A2_M和A2_A引用同一博物馆事实，却是两次活动。</td></tr><tr><td>Lodging：poi_id?、place_fact_id?、area_hint_id?、selection_source、status</td><td>推荐区域与具体酒店分开；没有核实酒店则保持缺失。</td><td>同一家酒店可用于3天的路线起点，不每天重新造酒店。</td></tr><tr><td>WeatherAdvice：text?、basis_fact_ids、status</td><td>主智能体根据覆盖当日的天气提出建议；无预报就标未知。</td><td>不写“晴天”占位，不依据未覆盖日期推断下雨。</td></tr><tr><td>unfilled_slot_ids / requirement_bindings</td><td>缺安排的槽位保留位置；绑定必去要求与实际活动。</td><td>D2_dinner没有餐馆时没有假Activity；占位由Slot+Issue渲染。</td></tr></tbody></table></div><p>生产校验：Activity引用的PlaceFact必须存在、poi_id相符且可定位；Activity.slot_id必须属于该日期且不是skipped。必去要求必须绑定合适类别的真实活动。完整性和时间可行性在第7步检查，不能因为JSON合法就当作行程完整。</p><div class="table-wrap"><table><thead><tr><th>日期</th><th>安排模板</th><th>尚未确定的内容</th></tr></thead><tbody><tr><td>D1 / 10日</td><td>午餐视可用时间；下午景点；晚餐；晚上景点</td><td>没有到达站点，不计算虚构接驳。</td></tr><tr><td>D2 / 11日</td><td>早餐→博物馆上午→午餐→同一博物馆下午→晚餐缺项→外滩晚上</td><td>这是重复活动与缺项示例；是否开放及交通可行仍须真实检查。</td></tr><tr><td>D3 / 12日</td><td>早餐、上午、午餐、下午按返程边界评估；晚餐条件未核实；不安排晚上游览</td><td>缓冲默认采用已确认的1小时；返程端点或路线未知时仍保留提示。</td></tr></tbody></table></div><details class="data-sample"><summary>查看：D2每日安排模板（整份days[]还有D1/D3）</summary><pre>{
+  &quot;plan_id&quot;: &quot;DEMO_PLAN&quot;,
+  &quot;revision&quot;: 1,
+  &quot;request_id&quot;: &quot;DEMO_REQ&quot;,
+  &quot;rule_version&quot;: &quot;travel-rules-20261010&quot;,
+  &quot;day&quot;: {
+    &quot;day_id&quot;: &quot;D2&quot;,
+    &quot;date&quot;: &quot;2026-10-11&quot;,
+    &quot;theme&quot;: &quot;从博物馆走向江边（模型主题示例）&quot;,
+    &quot;lodging&quot;: {
+      &quot;poi_id&quot;: &quot;$POI_HOTEL&quot;,
+      &quot;place_fact_id&quot;: &quot;DEMO_F_HOTEL&quot;,
+      &quot;area_hint_id&quot;: &quot;DEMO_STAY_AREA&quot;,
+      &quot;selection_source&quot;: &quot;recommended&quot;
+    },
+    &quot;activities&quot;: [
+      {
+        &quot;activity_id&quot;: &quot;A2_B&quot;,
+        &quot;slot_id&quot;: &quot;D2_breakfast&quot;,
+        &quot;kind&quot;: &quot;meal&quot;,
+        &quot;poi_id&quot;: &quot;$POI_BREAKFAST&quot;,
+        &quot;place_fact_id&quot;: &quot;DEMO_F_BREAKFAST&quot;,
+        &quot;duration_s&quot;: 3600,
+        &quot;duration_source&quot;: &quot;default&quot;,
+        &quot;duration_reason&quot;: null
+      },
+      {
+        &quot;activity_id&quot;: &quot;A2_M&quot;,
+        &quot;slot_id&quot;: &quot;D2_morning&quot;,
+        &quot;kind&quot;: &quot;sightseeing&quot;,
+        &quot;poi_id&quot;: &quot;$POI_MUSEUM&quot;,
+        &quot;place_fact_id&quot;: &quot;DEMO_F_MUSEUM&quot;,
+        &quot;duration_s&quot;: 10800,
+        &quot;duration_source&quot;: &quot;default&quot;,
+        &quot;duration_reason&quot;: null
+      },
+      {
+        &quot;activity_id&quot;: &quot;A2_L&quot;,
+        &quot;slot_id&quot;: &quot;D2_lunch&quot;,
+        &quot;kind&quot;: &quot;meal&quot;,
+        &quot;poi_id&quot;: &quot;$POI_LUNCH_FROM_MCP&quot;,
+        &quot;place_fact_id&quot;: &quot;DEMO_F_LUNCH&quot;,
+        &quot;duration_s&quot;: 3600,
+        &quot;duration_source&quot;: &quot;default&quot;,
+        &quot;duration_reason&quot;: null
+      },
+      {
+        &quot;activity_id&quot;: &quot;A2_A&quot;,
+        &quot;slot_id&quot;: &quot;D2_afternoon&quot;,
+        &quot;kind&quot;: &quot;sightseeing&quot;,
+        &quot;poi_id&quot;: &quot;$POI_MUSEUM&quot;,
+        &quot;place_fact_id&quot;: &quot;DEMO_F_MUSEUM&quot;,
+        &quot;duration_s&quot;: 10800,
+        &quot;duration_source&quot;: &quot;default&quot;,
+        &quot;duration_reason&quot;: null
+      },
+      {
+        &quot;activity_id&quot;: &quot;A2_E&quot;,
+        &quot;slot_id&quot;: &quot;D2_evening&quot;,
+        &quot;kind&quot;: &quot;sightseeing&quot;,
+        &quot;poi_id&quot;: &quot;$POI_BUND_FROM_MCP&quot;,
+        &quot;place_fact_id&quot;: &quot;DEMO_F_BUND&quot;,
+        &quot;duration_s&quot;: 10800,
+        &quot;duration_source&quot;: &quot;default&quot;,
+        &quot;duration_reason&quot;: null
+      }
+    ],
+    &quot;unfilled_slot_ids&quot;: [
+      &quot;D2_dinner&quot;
+    ],
+    &quot;weather_advice&quot;: {
+      &quot;text&quot;: null,
+      &quot;basis_fact_ids&quot;: [],
+      &quot;status&quot;: &quot;unavailable&quot;
+    }
+  }
+}</pre></details></details>
+<details class="data-step" id="data-step-6"><summary><span>06</span> 路线事实、相邻路段与后端计算</summary><p class="cost-note">输入：PlanDraft和核实坐标。输出：当天已选地点的RouteFacts、当前顺序的Legs、计算摘要；模型不重新排序。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>RouteQuery：origin / destination、mode、effective_departure_at?、strategy</td><td>对已选地点去重后查询有向地点对；公共交通条件进入查询键。</td><td>A→B不同于B→A；不查询未选候选。具体出发时间策略另议。</td></tr><tr><td>RouteFact：fact_id、query、options[]、source、status</td><td>一组查询事实；同一地点对不同方式/日期时间可有多份。</td><td>重复地点复用前提是查询条件相同，不把不同出发时间的公交当同一事实。</td></tr><tr><td>RouteOption：option_id、duration_s?、distance_m?、segments[]、geometry_status</td><td>方案耗时与路径同源；每段保留方式/线路/站点/坐标。</td><td>无时长不能参与最快比较；无路径不画直线，已有时长仍可作为参考。</td></tr><tr><td>Leg：leg_id、plan_revision、from、to、mode_results[]、selected_option_id?</td><td>from/to为hotel或activity引用；表达当前相邻连接。</td><td>酒店→首个活动；最后是否回酒店待定，不自动增加末段。</td></tr><tr><td>mode_results：mode、status、route_fact_id?、option_ids[]</td><td>mode固定transit/bicycling/walking；状态pending/available/empty/error。</td><td>三类各有状态，不能只靠缺少数组项来判断“无路线”。</td></tr><tr><td>selection_source：backend_fastest_available/user/same_place</td><td>后端在已有有效方案中比较；用户选择优先保留。</td><td>某类查询失败时仅说明“已知方案最快”，不承诺全部方式最优。</td></tr><tr><td>ActivityTiming：activity_id、estimated_start_at?、estimated_end_at?、status</td><td>后端结合停留和交通计算；未知传播，不把交通缺失当0。</td><td>部分时间未知时保持null及问题引用；参考窗口不等于精确预约。</td></tr><tr><td>DaySummary：stay_s、known_travel_s、unknown_leg_ids、feasibility</td><td>已知交通小计与完整总耗时分开；可行性verified/conflict/unverified。</td><td>未知路段存在时total_duration_s=null，不报虚假的完整总时长。</td></tr><tr><td>CostSummary：status、items[]、known_subtotal?、missing_poi_ids、basis</td><td>先展示地点cost；重复活动和住宿计次未定时不自动汇总。</td><td>aggregation_pending时known_subtotal=null；未填预算不判断超支。</td></tr></tbody></table></div><p>连续两个活动若引用同一地点，后端可标same_place并使用0交通时间，这是本地推导，不能标为高德查询结果。中间插入餐馆后，两次博物馆活动仍有往返路段。路线矩阵与相邻路段分开，因此改顺序可以复用已查事实；旧计算通过plan_revision识别。</p><details class="data-sample"><summary>查看：博物馆→午餐路段模板（状态为演示假设，未真实查询）</summary><pre>{
+  &quot;leg_id&quot;: &quot;DEMO_L_M_L&quot;,
+  &quot;plan_revision&quot;: 1,
+  &quot;from&quot;: {
+    &quot;kind&quot;: &quot;activity&quot;,
+    &quot;id&quot;: &quot;A2_M&quot;
+  },
+  &quot;to&quot;: {
+    &quot;kind&quot;: &quot;activity&quot;,
+    &quot;id&quot;: &quot;A2_L&quot;
+  },
+  &quot;origin_poi_id&quot;: &quot;$POI_MUSEUM&quot;,
+  &quot;destination_poi_id&quot;: &quot;$POI_LUNCH_FROM_MCP&quot;,
+  &quot;mode_results&quot;: [
+    {
+      &quot;mode&quot;: &quot;transit&quot;,
+      &quot;status&quot;: &quot;available&quot;,
+      &quot;route_fact_id&quot;: &quot;DEMO_R1&quot;,
+      &quot;option_ids&quot;: [
+        &quot;DEMO_O1&quot;
+      ]
+    },
+    {
+      &quot;mode&quot;: &quot;bicycling&quot;,
+      &quot;status&quot;: &quot;empty&quot;,
+      &quot;route_fact_id&quot;: &quot;DEMO_R2&quot;,
+      &quot;option_ids&quot;: []
+    },
+    {
+      &quot;mode&quot;: &quot;walking&quot;,
+      &quot;status&quot;: &quot;error&quot;,
+      &quot;route_fact_id&quot;: null,
+      &quot;option_ids&quot;: [],
+      &quot;error_ref&quot;: &quot;DEMO_ROUTE_ERROR&quot;
+    }
+  ],
+  &quot;selected_option_id&quot;: &quot;DEMO_O1&quot;,
+  &quot;selection_source&quot;: &quot;backend_fastest_available&quot;
+}</pre></details></details>
+<details class="data-step" id="data-step-7"><summary><span>07</span> 检查 ValidationReport 与按日修正</summary><p class="cost-note">输入：当前安排、事实、交通计算和日期规则。输出：问题定位、必去满足情况、每天补齐状态；主智能体据此决定定向查询或改安排。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>ValidationReport：plan_id、based_on_revision、day_results、requirement_results</td><td>后端检查明确版本；结构合法与每日完整分开。</td><td>R1检查不能覆盖用户编辑后的R2。</td></tr><tr><td>DayValidation：completeness、feasibility、issue_ids、delivery</td><td>完整性complete/incomplete/not_required/conditional；可行性verified/conflict/unverified。</td><td>安排齐全但交通未知，也不能写成已验证可行。</td></tr><tr><td>Issue：issue_id、code、category、scope、message、evidence_refs</td><td>scope定位day/slot/activity/leg；category为missing_arrangement/known_conflict/unknown_info。</td><td>缺晚餐绑定D2_dinner；活动不存在也能准确放置提示。</td></tr><tr><td>triggers_repair：bool；based_on_revision：int</td><td>后端按业务规则决定是否触发补齐；未知消费不触发。</td><td>缺餐或已核实开放冲突触发；缺cost/预报/部分交通只提示。</td></tr><tr><td>RequirementResult：requirement_id、status、activity_ids、place_fact_ids</td><td>satisfied/unsatisfied/unverified；核实身份与类型，并且已安排才满足。</td><td>外滩候选查到但未安排不能算M1满足。</td></tr><tr><td>RepairState：completed_rounds、active_round_id?、state、stop_reason?</td><td>后端按日期维护；轮内多个任务不分别计数，中断恢复同轮。</td><td>0..3轮；首次生成不计；到上限保留缺项草稿。</td></tr><tr><td>DayRevision：base_revision、day_id、replacement_day、preserve_activity_ids</td><td>主智能体只交目标日期修改；后端校验并升版本。</td><td>其他日期与保留活动不被清空；交通和问题随新版本重算。</td></tr></tbody></table></div><p>以下演示分支假设：外滩身份和活动已核实，D2晚餐补查3轮仍缺失。completed_rounds=3仅说明状态形状，不是本次真实调用记录。天气和路段问题另有Issue，此片段只展开晚餐。</p><details class="data-sample"><summary>查看：缺项位置与补齐结束模板</summary><pre>{
+  &quot;issue&quot;: {
+    &quot;issue_id&quot;: &quot;DEMO_I_D2_DINNER&quot;,
+    &quot;code&quot;: &quot;MISSING_MEAL&quot;,
+    &quot;category&quot;: &quot;missing_arrangement&quot;,
+    &quot;scope&quot;: {
+      &quot;day_id&quot;: &quot;D2&quot;,
+      &quot;slot_id&quot;: &quot;D2_dinner&quot;,
+      &quot;activity_id&quot;: null,
+      &quot;leg_id&quot;: null
+    },
+    &quot;message&quot;: &quot;晚餐餐馆尚未补齐，可自行添加&quot;,
+    &quot;evidence_refs&quot;: [],
+    &quot;based_on_revision&quot;: 1,
+    &quot;triggers_repair&quot;: true
+  },
+  &quot;report&quot;: {
+    &quot;plan_id&quot;: &quot;DEMO_PLAN&quot;,
+    &quot;based_on_revision&quot;: 1,
+    &quot;day_results&quot;: [
+      {
+        &quot;day_id&quot;: &quot;D2&quot;,
+        &quot;completeness&quot;: &quot;incomplete&quot;,
+        &quot;feasibility&quot;: &quot;unverified&quot;,
+        &quot;issue_ids&quot;: [
+          &quot;DEMO_I_D2_DINNER&quot;
+        ],
+        &quot;repair&quot;: {
+          &quot;completed_rounds&quot;: 3,
+          &quot;active_round_id&quot;: null,
+          &quot;state&quot;: &quot;stopped&quot;,
+          &quot;stop_reason&quot;: &quot;max_rounds&quot;
+        },
+        &quot;delivery&quot;: &quot;draft_with_issues&quot;
+      }
+    ],
+    &quot;requirement_results&quot;: [
+      {
+        &quot;requirement_id&quot;: &quot;M1&quot;,
+        &quot;status&quot;: &quot;satisfied&quot;,
+        &quot;activity_ids&quot;: [
+          &quot;A2_E&quot;
+        ],
+        &quot;place_fact_ids&quot;: [
+          &quot;DEMO_F_BUND&quot;
+        ]
+      }
+    ]
+  }
+}</pre></details></details>
+<details class="data-step" id="data-step-8"><summary><span>08</span> 可编辑初版 ItineraryPreview</summary><p class="cost-note">输入：当前有效安排、事实、交通与检查结果。输出：前端能独立渲染、定位缺项和发起局部编辑的预览；不把生成完成视为最终保存。</p><div class="table-wrap"><table><thead><tr><th>字段 / 类型</th><th>含义与提供者</th><th>上海示例 / 约束</th></tr></thead><tbody><tr><td>schema_version / plan_id / revision / source_run_id / request_id / rule_version</td><td>后端封装当前有效版本与来源；首次交付保留内部草稿版本，不重置为1。</td><td>编辑沿用plan_id，成功应用操作后revision递增。</td></tr><tr><td>status：ready/draft_with_issues</td><td>表达是否带缺项或未解决问题；与后台运行成功失败分开。</td><td>D2晚餐缺失仍可编辑、导出。</td></tr><tr><td>day_ids / days_by_id</td><td>day_ids按日期排序；每个DayPreview含slots、activities、lodging、weather、leg_ids、summary、issue_ids。</td><td>所有3个日期都保留，即使某日不安排也有原因。</td></tr><tr><td>facts_by_id / places_by_poi_id / legs_by_id / issues_by_id</td><td>只带当前展示所需事实与候选；POI映射到该版采用的事实快照。</td><td>每个引用必须可解；详细路径可同响应内携带，是否拆分页另议。</td></tr><tr><td>destinations[] / recommendations[]（DayPreview的派生视图）</td><td>destinations按当天activities去重，带activity_ids；推荐排除已加入POI，酒店单独展示。</td><td>一个博物馆目的地对应A2_M与A2_A两个活动；候选不足显示实际数量。</td></tr><tr><td>calculation：based_on_revision、status、pending_leg_ids</td><td>前端识别计算是否匹配当前编辑；未完成/失败也保持内容。</td><td>已确认当前路线先展示，备用路线后台补齐；当前路段计算与备用查询进度分开，pending不能伪装完整。</td></tr><tr><td>save_state.last_saved_ref：string?</td><td>与当前编辑分开的最近成功保存引用；这里只保留关联。</td><td>首次预览null；持久化位置、期限和保存协议本轮不定。</td></tr><tr><td>EditCommand：command_id、plan_id、base_revision、day_id、operation、payload</td><td>后续编辑请求携带旧版本；后端校验后返回新版本和受影响数据。</td><td>操作reorder_activities/remove_activity/add_activity/select_transport；目的地批量删除语义另议。</td></tr></tbody></table></div><p>重排payload必须是该日现有activity_id的完整排列，不能借重排偷偷新增或删除。新增活动需引用可核实POI并指定slot_id；切换交通需引用该leg有效的option_id。删除活动后对应Slot仍保留，缺项只提示，不自动补回。旧重算响应不能覆盖新编辑。</p><details class="data-sample"><summary>查看：三日预览外层结构模板</summary><pre>{
+  &quot;schema_version&quot;: 4,
+  &quot;plan_id&quot;: &quot;DEMO_PLAN&quot;,
+  &quot;revision&quot;: 1,
+  &quot;source_run_id&quot;: &quot;DEMO_RUN&quot;,
+  &quot;request_id&quot;: &quot;DEMO_REQ&quot;,
+  &quot;requirements_id&quot;: &quot;DEMO_REQUIREMENTS&quot;,
+  &quot;rule_version&quot;: &quot;travel-rules-20261010&quot;,
+  &quot;status&quot;: &quot;draft_with_issues&quot;,
+  &quot;day_ids&quot;: [
+    &quot;D1&quot;,
+    &quot;D2&quot;,
+    &quot;D3&quot;
+  ],
+  &quot;days_by_id&quot;: {
+    &quot;D1&quot;: &quot;$DAY1_OBJECT&quot;,
+    &quot;D2&quot;: &quot;$DAY2_OBJECT_WITH_ACTIVITIES_AND_SLOTS&quot;,
+    &quot;D3&quot;: &quot;$DAY3_OBJECT&quot;
+  },
+  &quot;places_by_poi_id&quot;: &quot;$MAP_TO_SELECTED_PLACE_FACT_ID&quot;,
+  &quot;facts_by_id&quot;: &quot;$REFERENCED_PLACE_WEATHER_ROUTE_FACTS&quot;,
+  &quot;legs_by_id&quot;: &quot;$LEG_OBJECTS&quot;,
+  &quot;issues_by_id&quot;: {
+    &quot;DEMO_I_D2_DINNER&quot;: {
+      &quot;issue_id&quot;: &quot;DEMO_I_D2_DINNER&quot;,
+      &quot;code&quot;: &quot;MISSING_MEAL&quot;,
+      &quot;category&quot;: &quot;missing_arrangement&quot;,
+      &quot;scope&quot;: {
+        &quot;day_id&quot;: &quot;D2&quot;,
+        &quot;slot_id&quot;: &quot;D2_dinner&quot;,
+        &quot;activity_id&quot;: null,
+        &quot;leg_id&quot;: null
+      },
+      &quot;message&quot;: &quot;晚餐餐馆尚未补齐，可自行添加&quot;,
+      &quot;evidence_refs&quot;: [],
+      &quot;based_on_revision&quot;: 1,
+      &quot;triggers_repair&quot;: true
+    }
+  },
+  &quot;calculation&quot;: {
+    &quot;based_on_revision&quot;: 1,
+    &quot;status&quot;: &quot;partial&quot;
+  },
+  &quot;save_state&quot;: {
+    &quot;last_saved_ref&quot;: null
+  }
+}</pre></details><details class="data-sample"><summary>查看：用户删除单次活动后的编辑请求</summary><pre>{
+  &quot;command_id&quot;: &quot;DEMO_EDIT_1&quot;,
+  &quot;plan_id&quot;: &quot;DEMO_PLAN&quot;,
+  &quot;base_revision&quot;: 1,
+  &quot;day_id&quot;: &quot;D2&quot;,
+  &quot;operation&quot;: &quot;remove_activity&quot;,
+  &quot;payload&quot;: {
+    &quot;activity_id&quot;: &quot;A2_A&quot;
+  }
+}</pre></details><p>示例删除下午活动A2_A，上午活动A2_M和它引用的博物馆事实仍保留；D2_afternoon保留为缺项位置，不自动补回。后端应用后revision由1变2，复用地点与可用路线事实，只重算受影响连接；仍然没有自动保存最终结果。这里示例的补查没有产生新的有效安排，因此首次交付仍为1；若内部修正已产生新版本，首次交付应使用实际版本。</p></details>
+<h4>关联关系与必须成立的条件</h4><div class="table-wrap"><table><thead><tr><th>关联</th><th>含义 / 校验</th></tr></thead><tbody><tr><td>TripRequest 1 → N Subtask（经run_id）</td><td>一个需求的生成执行中可以派发多个任务；每任务可有多次工具请求。</td></tr><tr><td>TaskResult N ↔ N PlaceFact</td><td>多个任务可复用同一地点事实；候选按用途筛选，不重复制造地点。</td></tr><tr><td>PlanDraft 1 → N DayPlan → N Activity</td><td>日期有独立标识；activities数组决定展示顺序，slot_id决定参考时段归属。</td></tr><tr><td>Activity N → 1 PlaceFact；Lodging → PlaceFact</td><td>同一地点可出现多次；删一次活动不等于地点事实失效。</td></tr><tr><td>Slot 1 → 0..N Activity；Issue → Slot</td><td>缺活动时仍能显示餐次或景点占位；无安排义务的slot不算缺项。</td></tr><tr><td>Leg → 两个端点；Leg → RouteOption → RouteFact</td><td>相邻活动变化时路段重建；方案可以复用查询事实但不能串错起终点、方向或时间条件。</td></tr><tr><td>DayPreview.weather → WeatherFact中的同日预报</td><td>建议与预报事实分开；不跨日期移用天气。</td></tr><tr><td>ItineraryPreview → 同revision的计算与检查</td><td>旧结果保留来源但不覆盖新版；出错保留当前编辑与提示。</td></tr></tbody></table></div><h4>本轮仍保留的设计边界</h4><p>时间推算、返程缓冲与公共交通出发时间的算法建议见下方<a href="#time-transport-algorithm">上海三日时间演算</a>。当前路线先展示、备用路线后台补齐及路线缓存/统一工具并发参数已确认，见下方交通查询与缓存。首尾接驳政策、cost汇总计次与人数、技术超时/重试、模型与子任务并发、目的地批量删除、预览存储与最终保存仍待讨论。本节通过conditional、unverified、aggregation_pending等状态表达这些缺口，不预设结论。v4核心契约已在独立模块实现；正式API迁移策略和路径另行确定。</p></section>
+<section id="time-transport-algorithm" class="choices" aria-labelledby="time-transport-title"><p class="eyebrow">CONFIRMED TIMING RULES / ALGORITHM PROPOSAL</p><h3 id="time-transport-title">时间与交通怎样算：固定顺序，逐段推算，检查返程</h3><p>沿用上海2026-10-10 09:00到达、10月12日19:00离开，偏好城市漫步和美食、必须去外滩的需求。已确认：景点3小时仅为默认参考，主智能体可按景点和当天安排调整；完整日默认08:00从酒店出发；返程默认预留1小时，用户明确要求优先。用餐默认1小时、模型排序和每个日期最多3轮继续保留。本节的具体计算与字段仍是工程建议，正式代码尚未实现。下方交通耗时和可用营业区间为演算假设，不是高德查询结果；08:00起步与1小时缓冲采用已确认默认规则。原输入未填到离地点和酒店，不能把下面的假设当作补齐了用户信息。</p>
+<h4>1 · 先分清参考时间与必须满足的条件</h4>
+<div class="table-wrap"><table><thead><tr><th>时间类别</th><th>建议算法</th><th>举例</th></tr></thead><tbody><tr><td>参考窗口</td><td>作为默认开始锚点及提示范围；跨过结束边界不单独触发补查。</td><td>上午09:00—12:00，算出09:30—12:30可以保留并说明顺延。</td></tr><tr><td>到离范围、明确预约、已核实开放区间</td><td>作为硬条件核对，实际活动必须在可用范围内。</td><td>不能把15:00关门的博物馆排到17:00，也不能因需要补餐挤掉已预留的返程时间。</td></tr><tr><td>停留时长</td><td>主智能体给出景点建议停留时长，后端采用该值推算；未提供时使用3小时默认值。后端不自行改写模型时长。</td><td>用餐默认3600秒；景点默认10800秒，模型可按地点和当天安排缩短或延长，例如外滩改为7200秒，并说明安排理由。用户明确要求优先。</td></tr><tr><td>未知事实</td><td>保持unverified，并保留当前安排。</td><td>营业时间未知不是已关门，交通未知不是0秒。</td></tr><tr><td>首尾日餐次是否需要安排</td><td>先根据外部可用时间与餐次参考窗口，检查是否容得下完整1小时及必要移动；边界未知则conditional。</td><td>不能因为前一个景点排太晚，就把原本应安排的晚餐改成“不需要”。</td></tr><tr><td>离开日不足3小时</td><td>针对当天可用时间，不是把每个不足3小时的残余时段一律删掉。</td><td>某个候选离返程站太远导致不足，应先换近处候选；不能据此断言整天无法安排。</td></tr></tbody></table></div>
+<h4>2 · 按既定顺序前推活动时刻</h4><p>后端接受活动顺序、模型给出的景点停留时长（未提供时用默认值）、酒店起点、参考窗口、可用开放信息及当前交通选择。完整日默认08:00从酒店出发已确认；用户明确要求优先。到达日从用户已能在酒店/起点开始活动的时刻计算，不能把09:00到达城市直接当作09:00已在酒店。这个时刻未知时，先给带未核实标记的参考安排。</p><ol>
+<li>上一项结束时刻作为下一段出发时刻。首段采用day_ready_at；若起点或起步时刻未知，不制造已核实接驳。</li>
+<li>按该出发时刻选择有效交通方案，得到到达下一地点的时刻。</li>
+<li>默认开始时刻取“到达时刻”和“该活动参考窗口开始”中较晚的一个；早到的时间单独记为等待。</li>
+<li>若有覆盖旅行日的已核实开放区间，在该区间中找到能连续容纳完整停留时长的最早开始时间。没有这样的区间则生成开放冲突；只有今日营业信息或无法解析的描述时，标未核实。</li>
+<li>若用户已有明确预约，固定预约时刻优先；到达太晚或开放区间不容纳该预约时报告冲突，不把预约静默顺延。确定开始时刻后，结束时刻＝开始时刻＋停留时长。把结束时刻传给下一段，再检查到离边界和返程可行性。参考窗口顺延只提示，不以假设的关门时间限制活动。</li>
+</ol><div class="cost-note">arrive_i = depart_i + travel_i<br>start_i = max(arrive_i, reference_start_i)，再对齐可用开放区间<br>end_i = start_i + stay_i<br>wait_i = start_i − arrive_i<br>day_elapsed = 全部停留 + 实际采用路段 + 等待；不能只把景点和交通相加。</div><p>若某段耗时未知，该段后的确定时刻保持null，或另列明确标注的参考时间；不要用参考时间得出“必然赶得上”的结论。day_elapsed只有在整条链可计算时才有完整值；否则分别显示已知交通和未知路段。活动数组顺序不变；时间发生冲突时将该日交回主智能体处理。</p>
+<h4>上海三日怎样应用这些规则</h4><div class="table-wrap"><table><thead><tr><th>日期</th><th>进入算法的条件</th><th>结果</th></tr></thead><tbody><tr><td>10月10日 · 到达日</td><td>09:00到达城市，上午游览不安排；原始到达地点未填。</td><td>午餐先判断是否足够1小时；下午和晚上游览可规划。酒店何时可出发及接驳未核实，不声称到达后每段时刻已算准。</td></tr><tr><td>10月11日 · 完整日</td><td>采用默认酒店08:00出发；演算假设三餐与三个游览活动均可用，景点在此分支仍采用默认3小时。</td><td>按下表逐段前推。沿用同一博物馆上午、下午各一个活动的结构示例。</td></tr><tr><td>10月12日 · 离开日</td><td>19:00离开；返程地点及出行类型未填。</td><td>安排白天候选，同时标返程未核实；夜间游览不安排。缓冲已采用默认1小时；补齐终点及对应路线后才能推算最晚结束时刻。</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>10月11日活动</th><th>上一段采用的交通（假设）</th><th>推算时刻</th><th>判断</th></tr></thead><tbody><tr><td>酒店出发</td><td>—</td><td>08:00</td><td>作为本例起点</td></tr><tr><td>早餐</td><td>步行10分钟</td><td>08:10—09:10</td><td>比早餐参考结束晚10分钟，只提示</td></tr><tr><td>博物馆·上午 A2_M</td><td>公共交通20分钟</td><td>09:30—12:30</td><td>游览3小时；比上午参考结束晚30分钟，只提示</td></tr><tr><td>午餐</td><td>步行10分钟</td><td>12:40—13:40</td><td>用餐1小时</td></tr><tr><td>同一博物馆·下午 A2_A</td><td>公共交通20分钟</td><td>14:00—17:00</td><td>第二个活动ID，共用地点事实</td></tr><tr><td>晚餐</td><td>步行10分钟</td><td>17:10—18:10</td><td>本节演示已补齐餐馆的分支；此前数据示例的缺项分支仍保留</td></tr><tr><td>外滩·晚上 A2_E</td><td>公共交通20分钟</td><td>19:00—22:00</td><td>18:30到达，等待30分钟；晚上游览3小时</td></tr></tbody></table></div>
+<p>演算合计：停留12小时＋交通1小时30分钟＋等待30分钟＝从08:00到22:00的14小时。这个例子说明“六个时段都完整”可能仍然偏满；不能把它宣称为节奏适中的已验证方案。本表保留全部景点采用默认3小时的对照分支。现已允许主智能体按景点特点和当天安排调整时长：例如外滩安排2小时，则19:00—21:00游览，后端重算后全天跨度为13小时；这只是调整演示，不是真实推荐结果。调整停留时长不等于删除应覆盖的游览时段或餐次。日末回酒店没有计入这14小时，建议首版单列可选回程参考，不混入“已包含回酒店”的总时长。</p>
+<h4>3 · 交通方式怎样选择</h4><p>后端先遵守用户明确选择和禁用条件，再比较官方返回方案的总耗时。普通偏好“公共交通结合步行”不等于禁止骑行；在耗时完全相同时，可用用户偏好作为稳定的选择依据，不为了偏好把明显更慢的方案标成最快。这里采用“当前出发时刻下逐段选最快”的简单算法；公共交通耗时随时刻变化，不能据此承诺全天交通耗时的数学全局最优，也不重新排列模型给出的地点。</p>
+<div class="table-wrap"><table><thead><tr><th>同一路段的假设方案</th><th>耗时</th><th>选择</th></tr></thead><tbody><tr><td>公共交通</td><td>20分钟</td><td>默认推荐：三类有效方案中最快</td></tr><tr><td>骑行</td><td>25分钟</td><td>保留可选；若用户手动选它，该段晚到5分钟；后续逐段重算，已有等待可能吸收延迟</td></tr><tr><td>步行</td><td>45分钟</td><td>保留可选；按真实返回显示，不估成零</td></tr></tbody></table></div>
+<ol><li>同一地点连续活动标记same_place，交通为本地推导的0秒，不发MCP请求；中间有餐馆则仍计算往返。</li><li>每种方式可能返回多个方案，先取该类中耗时最短的有效方案，再比较三类。有效要求方向和查询条件匹配、总耗时可用、没有已知违反用户硬条件；路径缺失单独标记，不把已有耗时丢掉。</li><li>比较接口方案的总耗时，不把公交接驳、步行、换乘再加到总耗时上；这些分段用于地图和说明，避免重复计算。</li><li>用户选择的是通行方式：该方式仍有有效方案时继续采用，即使更慢；出发时间变化后更新为该方式的新有效方案。若该方式已无有效方案，则标“用户选择待更新/不可用”并提示，不静默换成其他方式。</li><li>某类无路线或失败时只在已知有效方案中推荐，标“已查到方案中最快”；三类都未知则保留未知路段。</li></ol>
+<h4>公共交通的出发时间与地点对查询</h4><p>相邻路段应在前一活动推算结束后，按实际参考出发时刻查询公共交通，然后继续向后计算。这样每一段只依赖前面的结果，不需要反复整体迭代来得到当天时刻。修改上午活动时，后续公交出发时间也会改变；只复用查询条件仍匹配的事实。</p><p>步行/骑行及不依赖时刻的查询可按候选已选范围并行。用户已确认的当天全量有向地点对仍查询：非相邻公共交通段建议先以当天09:00作为明确标注的参考出发时刻，仅供备用；变成相邻段后，必须匹配新的出发时刻再查询，不能将09:00结果直接冒充17:00方案。09:00参考值仍待确认；当前路线先展示、其余备用路线后台补齐已确认；具体查询队列、缓存键及编辑重查见<a href="#route-query-cache">交通查询与缓存</a>。日期时间无支持或未应用时记录time_basis=unspecified，不能宣称已核实某时刻可乘。</p><p>高德公共交通接口支持可选date/time与换乘策略，适配时必须保留实际使用的参数；它提供的是路线参考，不是车票和实际班次保证。依据：<a href="https://lbs.amap.com/api/webservice/guide/api/direction">高德官方路径规划文档</a>。真实样本已确认`date=2026-10-11`、`time=09:00`、`strategy=0`进入请求；该响应未回显出发时间，且三方案的路径几何均为partial，因此只标sent_not_echoed，不能把它当作时间确认或完整路线验证。完整字段摘要见<a href="learning-log.md#planning-v4-amap-live-contract-2026-10-10">学习日志</a>。</p>
+<h4>4 · 离开日怎样预留返程时间</h4><p>建议将19:00解释为用户提供的离开事件时刻，另存departure_event_type（未知也可）、return_buffer_s及其来源。已确认返程默认预留1小时，用户明确要求优先采用。buffer_source标记default或user；默认值不再作为“缓冲待定”处理。这1小时与前往返程地点的交通耗时分别计算，是产品规划默认值，不是铁路或机场要求。返程地点与路线依据核实后，依据采用的缓冲检查冲突；缺终点或路线仍标未核实。</p><div class="cost-note">需要到达返程地点的时刻 = departure_at − return_buffer<br>在某个末活动地点的最晚离开时刻 = departure_at − return_buffer − 该地点至返程地点的交通耗时</div><p>上述减法适用于给定查询条件下的参考耗时。公共交通随出发时刻变化时，应直接核对“活动结束时刻＋按该时刻查询的返程耗时 ≤ 需要到站时刻”，不能反复用同一固定45分钟推算任意时刻的可行性。</p>
+<div class="table-wrap"><table><thead><tr><th>上海原输入 / 演算分支</th><th>处理</th><th>结论</th></tr></thead><tbody><tr><td>原始输入：12日19:00离开，终点未填</td><td>return_leg=null；latest_activity_end_at=null；返程检查unverified。</td><td>保留白天参考安排并提示补充返程地点，不虚构虹桥站，不把返程耗时按0。</td></tr><tr><td>演算追加已核实返程终点与公共交通45分钟的假设；缓冲采用已确认默认1小时</td><td>需要18:00到达；固定耗时下末景点最晚17:15离开。</td><td>若下午景点14:00—17:00，则17:45抵达，距18:00有15分钟余量；不等于所有交通风险已验证。</td></tr><tr><td>若改选返程骑行1小时15分钟</td><td>17:00出发→18:15到达，超过18:00截止15分钟。</td><td>保留用户方式，标返程冲突；不能悄悄切回公共交通。</td></tr><tr><td>如果在原景点附近加晚餐17:00—18:00，且餐馆到终点仍45分钟</td><td>18:00出发→18:45到达，超过18:00截止45分钟。</td><td>这家餐馆的安排不可行；先考虑更合适位置/顺序。不能仅凭这个景点的17:15截止，就把全城所有晚餐都判为不必安排。</td></tr></tbody></table></div>
+<p>离开日餐次要按实际候选位置核对：在参考窗口内能否完整用餐1小时并留足返程；若只有某家餐馆太远，属于候选或安排冲突；若外部可用时间本来就不足1小时，则该餐次skipped，不算缺项。边界未知则conditional。未确定返程地点时不能自动裁掉晚餐，也不能标成已保证可行。</p><p>离开日“不足3小时不安排”建议分两步：先看日开始到扣除缓冲后的可用跨度；起步时刻明确且采用用户要求或默认1小时缓冲后，如果即使不计交通也不足3小时，可直接按规则跳过。这个整日判断阈值仍是3小时，不随单个景点停留时长变化；有足够时间时继续规划，随后根据真实返程路线复核当前方案。仅因某个远处末景点导致不足，不应直接取消整天，应先反馈模型尝试近处安排。无法证明时间不足的未知情形保留提示，不按0计算或冒充规则豁免。到达日与离开日为同一天时，两侧约束同时应用。</p>
+<h4>5 · 发现冲突后怎样处理</h4>
+<div class="table-wrap"><table><thead><tr><th>检查结果</th><th>是否触发生成阶段修正</th><th>处理</th></tr></thead><tbody><tr><td>超过参考窗口，如上午结束12:30</td><td>否</td><td>保留顺序与完整时长，显示顺延；不给该日增加补查轮数。</td></tr><tr><td>某日应安排的晚餐没有餐馆</td><td>是</td><td>绑定day_id/slot_id；模型复用已有候选或派发餐饮补查。</td></tr><tr><td>博物馆已核实16:00关门，当前排14:00—17:00</td><td>是</td><td>返回冲突活动与营业事实；主智能体可结合景点特点将停留调整为2小时，或调整顺序/候选，再由后端重算复核。用户已明确要求的时长不能被覆盖，后端不自行截短活动。</td></tr><tr><td>返程抵达18:15，需18:00前到达</td><td>是</td><td>返回截止、抵达、超出15分钟及采用方案；主智能体在原需求内修正。</td></tr><tr><td>缺价格、天气、部分交通、返程终点或未核实营业时间</td><td>否</td><td>unknown_info；按位置提示，保留可编辑草稿，不无限补查。</td></tr><tr><td>用户编辑后产生冲突</td><td>不自动调用模型恢复旧安排</td><td>立即更新问题与可计算内容，保持用户顺序/方式；不能消费生成补查轮数把用户改动改回去。</td></tr></tbody></table></div>
+<details class="data-sample"><summary>查看：用户改选骑行后的计算结果与冲突提示</summary><pre>{
+  &quot;plan_id&quot;: &quot;DEMO_PLAN&quot;,
+  &quot;based_on_revision&quot;: 2,
+  &quot;origin&quot;: &quot;user_edit&quot;,
+  &quot;day_id&quot;: &quot;D3&quot;,
+  &quot;issue&quot;: {
+    &quot;code&quot;: &quot;RETURN_DEADLINE_CONFLICT&quot;,
+    &quot;category&quot;: &quot;known_conflict&quot;,
+    &quot;scope&quot;: {
+      &quot;leg_id&quot;: &quot;DEMO_RETURN_LEG&quot;
+    },
+    &quot;latest_arrival_at&quot;: &quot;2026-10-12T18:00:00+08:00&quot;,
+    &quot;estimated_arrival_at&quot;: &quot;2026-10-12T18:15:00+08:00&quot;,
+    &quot;overrun_s&quot;: 900,
+    &quot;selected_mode&quot;: &quot;bicycling&quot;,
+    &quot;triggers_repair&quot;: false,
+    &quot;evidence_refs&quot;: [
+      &quot;$VERIFIED_RETURN_ROUTE_FACT&quot;
+    ],
+    &quot;message&quot;: &quot;本例假设下返程晚15分钟；保留手动选择并提示&quot;
+  },
+  &quot;repair_scope&quot;: null
+}</pre></details>
+<p>生成阶段优先利用已有事实修正，只缺新地点时才派发补查。一次针对该日的补齐/修正及重新检查算一轮，缺项与冲突共享最多3轮，首次生成不计。每轮携带base_revision与需要保留的活动；所有受影响交通重新核对，其他日期不改。成功解决即停止；达到上限或已无新依据则保留当前有效内容和未解决问题。用户编辑后的提示不自动启动这一生成循环。</p>
+<h4>6 · 需要补入数据结构的计算字段</h4>
+<div class="table-wrap"><table><thead><tr><th>结构</th><th>新增/细化字段</th><th>用途</th></tr></thead><tbody><tr><td>DayTimingPolicy</td><td>day_ready_at?、ready_at_source、return_buffer_s、buffer_source、departure_event_type</td><td>完整日08:00、返程缓冲3600秒为已确认默认；用户明确要求优先并保留来源。到达日就绪时刻及返程位置仍可未知。</td></tr><tr><td>Activity</td><td>duration_s、duration_source、duration_reason?</td><td>主智能体提供每次景点活动的时长；来源区分model/default/user，调整理由为规划判断，不冒充官方事实。后端检查正数和用户条件，缺省才补默认值。</td></tr><tr><td>ActivityTiming</td><td>depart_at?、arrive_at?、start_at?、end_at?、wait_s?、reference_shift_s?、status</td><td>分开移动、等待、活动；status区分estimated/unverified/conflict。</td></tr><tr><td>RouteQuery / RouteFact</td><td>effective_departure_at?、time_basis、query_signature</td><td>保证复用方向、方式、日期时间一致；非相邻段标reference而非scheduled。</td></tr><tr><td>ReturnConstraint</td><td>destination_poi_id?、latest_arrival_at?、route_fact_id?、latest_activity_end_at?、status</td><td>独立返程路段，不混入全天景点矩阵；缺终点不造数值。</td></tr><tr><td>DaySummary</td><td>stay_s、known_travel_s、wait_s?、elapsed_s?、unknown_leg_ids、return_status</td><td>分别展示已知量与完整跨度；日末回酒店是否包含必须明确。</td></tr><tr><td>ValidationReport</td><td>constraint_kind、evidence_refs、overrun_s?、triggers_repair、based_on_revision</td><td>让主智能体知道为什么冲突、差多少时间、该改哪一天。</td></tr></tbody></table></div>
+<p>本轮三项时间规则已确认，权威定义见<a href="../CONTEXT.md">CONTEXT</a>：模型可调整景点默认3小时的停留时长，完整日默认08:00从酒店出发，返程默认预留1小时且用户明确要求优先。参考窗口可顺延、缺返程终点不计算精确截止的边界继续保留。非相邻公共交通09:00参考查询、日末回酒店是否计入及具体字段/工程算法仍待确认；本轮没有将这些建议一并定案。</p></section>
+<section id="route-query-cache" class="choices" aria-labelledby="route-query-cache-title">
+<p class="eyebrow">ROUTE QUERY &amp; CACHE / CONFIRMED DEFAULTS / NOT IMPLEMENTED</p>
+<h3 id="route-query-cache-title">交通查询与缓存：先展示当前路线，备用路线后台补齐</h3>
+<p>已确认：先查询并展示当前安排实际经过的路线，其余已选地点之间的备用路线在后台补齐；三种方式仍是公共交通、骑行、步行。后端统一最多同时执行4个工具请求；同一行程内，步行/骑行成功结果缓存60分钟，公共交通成功结果15分钟，成功但无路线的结果60秒。保留模型及用户顺序，不设业务调用总量上限。这些是已确认的初始参数，尚未实现或经过性能验证；备用公共交通09:00参考时刻、连接池和字段结构仍为建议。沿用上海2026-10-10 09:00到达、12日19:00离开的输入；地点代码和查询数量只是设计演示，不是模型输出或真实服务记录。</p>
+<h4>1 · 查哪些地点对，上海三日有多少项</h4>
+<p>先按核实的poi_id和坐标去重。酒店、已选景点和已选餐馆进入当天集合；未采用候选、地图下方备用推荐以及没有具体地点的缺项不进入集合。对N个不同地点生成N×(N−1)个有向地点对，每对查询3种方式。A→B不等于B→A；同一景点的两次活动仍共享地点事实，连续相同地点的交通本地记0，不调用MCP。</p>
+<div class="table-wrap"><table><thead><tr><th>日期 / 演示分支</th><th>已选地点与顺序</th><th>不同地点数</th><th>基础查询规模</th></tr></thead><tbody>
+<tr><td>10日 · 到达日</td><td>酒店H → 午餐L1 → 下午景点A1 → 晚餐C1 → 外滩W。假设本分支午餐已具备安排条件。</td><td>5</td><td>5×4×3＝60项</td></tr>
+<tr><td>11日 · 完整日</td><td>酒店H → 早餐B → 博物馆M（上午） → 午餐L → 博物馆M（下午） → 晚餐D → 外滩W。</td><td>6（M重复不加点）</td><td>6×5×3＝90项；当前6段对应18项，其余24对对应72项</td></tr>
+<tr><td>12日 · 离开日</td><td>酒店H → 早餐B → 博物馆M → 午餐L → 下午景点A3。晚餐仍待返程条件评估，本分支尚无已选餐馆。</td><td>5</td><td>5×4×3＝60项；不编造返程终点</td></tr>
+</tbody></table></div>
+<p>三日合计210项是跨日去重前、每个地点对每种方式只取一组查询条件的规模说明，不是调用承诺或上限。有效缓存和重复请求合并会减少实发请求；公共交通的新出发时刻、新增地点及技术重试会增加请求。同一次查询可返回多个方案，不按方案条数计API调用。出入城接驳和返程有明确端点后单列必要路段，不将未知车站加入全量矩阵；日末回酒店的展示范围仍待定。</p>
+<h4>2 · 哪些可并行，哪些必须等前一步</h4>
+<div class="table-wrap"><table><thead><tr><th>工作</th><th>建议调度</th><th>原因</th></tr></thead><tbody>
+<tr><td>步行、骑行地点对</td><td>去重后可并行，优先当前相邻段，再补非相邻段。</td><td>按当前适配仅使用端点等请求条件，不依赖上一活动结束时刻。</td></tr>
+<tr><td>同一相邻段的3种方式</td><td>预计出发时刻已知时，可并行查询尚未命中的方式。</td><td>三种方式互不依赖；等待本轮每种方式返回或结束后，在已知有效方案中选择，失败不当0。</td></tr>
+<tr><td>同一天的相邻公共交通段</td><td>按活动顺序推进。</td><td>选定本段方式、算出活动结束时刻后，下一段的公共交通出发条件才确定；不能把整天都按08:00查询。</td></tr>
+<tr><td>不同日期的时间链</td><td>当天起点、顺序及时长已确定即可并行推进。</td><td>11日和12日无需等待10日的交通。10日酒店可出发时刻未知时可先查步行/骑行和参考矩阵，但实际公共交通时刻标未核实。</td></tr>
+<tr><td>非相邻公共交通</td><td>先按各日期09:00参考时刻独立排队补查。</td><td>沿用上一节的待确认建议；结果只对该查询时刻有效，变为当前路线后按新的预计时刻匹配或重查。</td></tr>
+</tbody></table></div>
+<p>示例：11日酒店08:00出发，H→B的3种方式并行；采用步行10分钟，早餐08:10—09:10，则B→M公共交通按09:10查询。与此同时，M→L、L→M等步行/骑行可预查，其他日期也可推进。某段交通全部未知时，下游公共交通不能获得已核实出发时刻；可保留09:00参考查询和时间未核实标记，不伪造时刻。该段结束于unknown不会使后端无限等待。</p>
+<p>已确认后端统一共用最多4个工具请求的并发名额，所有日期和交通方式合计受此限制。调度建议的优先级为“用户本次编辑需要的路段 → 生成当前相邻段及明确返程段 → 其余矩阵”。有限批次中穿插少量后台项，避免持续编辑让补齐任务一直排不到；删除后不再需要且尚未发出的查询可撤出队列。并发上限只限制同时运行数，不截断全量范围；每秒请求速率另按账号和接口配额配置，4并发不等于4 QPS。</p>
+<h4>3 · 当前路线先可用，其余地点对继续补齐</h4>
+<p>已确认各日当前相邻段及必要返程段本轮查询已结束（available/empty/error/unknown均有明确状态），且生成阶段缺项/冲突修正已结束后，即可交付可编辑初版；剩余地点对继续后台查询。用户无需等全部备用路线完成。后台补齐只更新事实和查询状态，不重新排序或替换用户活动；当前使用的路段若有新结果，仍按版本核对后更新计算。初版展示与备用路线补齐分别记录状态；后台仍在查询不阻止用户查看、编辑和导出当前规划。</p>
+<p>11日的18项当前路线查询优先于72项备用查询，不表示18项能同时完成。后台矩阵每项在当前条件下完成一次有结果或有错误的查询即记录状态；不因缓存到期不断重新全量刷新。矩阵一轮结束不代表所有路线都查到了，更不代表所有未来出发时刻都适用。</p>
+<h4>4 · 缓存什么，用什么判断能否复用</h4>
+<p>已确认缓存服务于同一行程的生成和后续编辑，条件匹配时可跨日期复用，跨行程暂不共享。建议以plan_id为作用域实现共享内存缓存与正在查询表，相同且进行中的请求合并等待同一结果；具体存储与会话实现仍待细化。它不在每次编辑时重新创建，也不将预览写成数据库最终结果。服务重启或缓存被回收后，已展示快照仍作为带查询时间的参考；下一次需要使用时查缺少的路线，不因缓存丢失重新调用模型。预览恢复的持久化实现另议。</p>
+<div class="table-wrap"><table><thead><tr><th>缓存项</th><th>已确认初始有效期 / 内容</th><th>复用规则</th></tr></thead><tbody>
+<tr><td>步行 / 骑行成功结果</td><td>查询完成起60分钟；保存各方案耗时、距离和同源路径、来源。</td><td>端点与实际接口参数相同且未过期，可跨11日、12日复用。60分钟指现实经过时间，不是旅行日相隔时长；不保证将来道路状态不变。</td></tr>
+<tr><td>公共交通成功结果</td><td>查询完成起15分钟；另保存实际出发日期、时刻与策略。</td><td>有效期和查询条件同时匹配。11日09:10结果不能给11日09:15或12日09:10直接用。</td></tr>
+<tr><td>成功但无路线</td><td>查询完成起60秒，键与成功结果相同。</td><td>同条件下避免立即重复；时间或端点变化就是另一条查询。只是此条件无返回，不是永久不可达。</td></tr>
+<tr><td>超时、限流、认证、解析错误</td><td>保留诊断状态，不写成成功或无路线缓存。</td><td>技术重试和冷却单独维护。重试预算用尽后当前一轮标错误，不被多个消费者再次自动重开；用户新编辑或显式刷新按恢复策略处理。</td></tr>
+<tr><td>正在执行的同条件查询</td><td>一个query_key对应一个进行中的请求，多个使用者等待同一结果。</td><td>避免相邻段和后台矩阵同时查两遍；某个使用者失效不取消其他使用者仍需要的请求。</td></tr>
+</tbody></table></div>
+<p>缓存键建议由plan_id作用域、供应商/接口及适配版本、坐标系、起终POI与实际发送坐标、起终城市、方式和实际请求参数组成；公共交通再含date/time、strategy、nightflag及返回详略等。不记录密钥，也不按地点名字匹配。不能只按poi_id匹配而忽略坐标更新；也不把行程revision放入路线事实键，避免每次拖动把全部缓存作废。业务规则版本影响计算；只有它改变了工具参数时才改变路线查询键。</p>
+<p>公共交通首版建议匹配接口实际接受的分钟精度，不先合并成15分钟时间桶。“缓存15分钟有效”不等于“前后15分钟出发都可复用”。若秒级时间需要向后对齐到整分钟，保留原预计时刻与实际发送时刻，将对齐等待计入时间链。reference/scheduled表示使用目的，放在路段引用上；实际参数相同可共用同一事实，不为用途不同重复查询。日期/时刻未被适配器发送或接口不支持时，明确time_basis=unspecified，不能当作已核实该时刻的路线。</p>
+<h4>5 · 用户改了什么，重算和重查分别做什么</h4>
+<div class="table-wrap"><table><thead><tr><th>用户操作</th><th>后端重新计算</th><th>需要新查询的部分</th></tr></thead><tbody>
+<tr><td>拖动排序，地点集合不变</td><td>重建相邻连接，从最早变化处向后推算；保持用户顺序。</td><td>新相邻段先查缓存；步行/骑行未过期可直接用；公共交通匹配新时刻，未命中才查。即使后面端点没变，出发时刻变了也要重新核对公共交通。</td></tr>
+<tr><td>切换某段交通方式</td><td>保留该段用户选择，更新地图和后续时刻、返程检查。</td><td>所选方式在该出发条件下有有效缓存时，本段零新查询；缺失、过期或条件不符才查。后续公共交通可能因时刻变化新查，步行/骑行通常可复用。</td></tr>
+<tr><td>新增一个不同地点X</td><td>创建活动并重建相邻段，后续重算。</td><td>N个旧地点增加X→旧点和旧点→X共2N个有向对、3种方式，即6N项基础增量；先查当前需要的，再补其余。旧地点之间不因X加入而全量刷新。</td></tr>
+<tr><td>同一POI新增另一时段活动</td><td>新增activity_id，重建连接及时刻。</td><td>不扩大全量地点集合；新公共交通出发时刻仍可能要查。重复活动不等于交通也一律为0。</td></tr>
+<tr><td>删除一次活动 / 删除地点</td><td>重接前后活动、更新时刻及缺项；仍尊重其他重复活动。</td><td>先复用新连接缓存；仅没有任何活动或酒店角色引用该地点时才从所需集合移除。旧缓存可等自然过期，不立即清除其他日期的共享事实。</td></tr>
+<tr><td>恢复上次成功保存</td><td>先恢复该快照和原提示。</td><td>不自动重查全矩阵；用户继续编辑或显式刷新时按所需路段复核。过期参考保留来源与日期。</td></tr>
+</tbody></table></div>
+<p>停止向后重算需要确认：后续活动顺序、停留时长、当前方式、计算出的出发时刻、已用事实和查询条件都未再改变；不能仅因端点相同就停止。否则逐段推进到当天末尾及返程。这个过程不调用主智能体改用户安排；冲突按既定编辑规则提示，生成阶段修正才使用每日三轮。</p>
+<h4>上海11日的三个编辑例子</h4>
+<p><strong>排序：</strong>将M的下午活动移到午餐L之前，序列由H→B→M上午→L→M下午→D→W，变为H→B→M上午→M下午→L→D→W。原M→L、L→M、M→D三个活动连接改变为M→M、M→L、L→D；M→M本地为0。地点集合仍是6个，不重建90项全量查询。M→L虽然物理方向相同，但出发时刻和活动引用已变；L→D可能只有09:00备用公共交通。D→W端点未变，出发时刻也可能改变，因此仍沿后续时间链核对。这个排序可能让午餐过晚，系统提示并保留用户顺序。</p>
+<p><strong>切换方式：</strong>假设B→M公共交通20分钟、骑行25分钟，两者缓存均有效，09:10出发。用户选骑行后本段不查接口，博物馆到达从09:30变成09:35；沿用3小时停留的分支，下一段M→L从12:30变成12:35出发，步行可复用，但公共交通需找12:35的事实，只有12:30则新查。即使M→L仍选步行，也应更新其公共交通备选，保持对比使用相同条件。后续等待可能吸收5分钟，不能给全天每项机械加5分钟。</p>
+<p><strong>新增地点：</strong>在6个不同地点中添加第7个新景点X，基础规模从90项变为7×6×3＝126项，仅增加36项，不是重查126项；公共交通时间变化的额外查询另计。若只是再安排一次已有博物馆M，地点集合不变，基础增量为0。三日共享酒店和餐馆时，相同条件的步行/骑行可跨日合并；不同日期的公共交通不合并。</p>
+<h4>6 · 过期、并发返回和失败怎样处理</h4>
+<ol><li>每次编辑先接纳用户改动并递增当前预览版本，再计算所需连接；这里不写数据库最终结果。建议连续拖动结束300毫秒后合并发起一次重算；输入反馈立即显示，不丢用户最后一次操作。</li><li>先复用当前计算批次的有效事实或查共享缓存；同query_key正在请求则加入等待。每次批次使用固定事实快照，TTL跨界不在同一批次里循环刷新；结束时保留实际查询时间。</li><li>结果进入缓存前检查工具响应和同源方案；写回预览时另查base_revision、calculation_id和当前路段绑定。旧版本请求可留下可复用事实，但不能直接覆盖新顺序或新选择；新版本仍需要时显式重新绑定。</li><li>相同活动端点连接保留用户选定方式；新连接默认推荐最快有效方式。手动选择绑定day_id＋from/to活动或酒店引用，不存入按POI缓存的路线事实，也不自动传给反向路段或另一次重复活动。</li><li>过期或失败时保留用户编辑。旧耗时和地图若继续展示，必须标“上次查询参考 / 待更新”，不拿旧条件的数据声称当前最快或已核实可行；本轮有效方案不足则显示未知，仍可导出当前内容及提示。</li></ol>
+<p>建议只在本次生成、相关编辑或显式刷新时查询，不按时钟定时刷新全矩阵。重算只刷新实际需要且条件不匹配/已过期的路段；未受影响的旧内容可继续作为带查询时间的参考。短暂故障沿用D-10的有限技术重试建议，认证/参数错误不机械重试，限流尊重服务端等待提示并降低实发速率。无新增请求触发时，TTL到期只改变可复用性，不自动花费调用。</p>
+<h4>7 · 建议补充的结构与观测</h4>
+<div class="table-wrap"><table><thead><tr><th>对象</th><th>字段建议</th><th>职责</th></tr></thead><tbody>
+<tr><td>RouteQueryKey</td><td>plan_id作用域、provider/api/adapter_version、endpoint_signature、mode、effective_parameters</td><td>决定是否为同一个实际查询；日期、时刻、方向及策略不同就不同。</td></tr>
+<tr><td>RouteCacheEntry</td><td>query_key、fact_id、fetched_at、expires_at、result_status</td><td>索引不可变RouteFact；不存用户选择、活动顺序或最终数据库保存状态。</td></tr>
+<tr><td>InFlightQuery</td><td>query_key、tool_call_id、consumer_refs、priority、attempt_state</td><td>合并重复请求；工具调用ID与每个消费方的计算版本分开。</td></tr>
+<tr><td>DayRouteCoverage</td><td>day_id、place_set_signature、pair_mode_status、reference_policy</td><td>表示全量地点对本轮覆盖；available/empty/error/unknown分开，不称全部成功。</td></tr>
+<tr><td>LegCalculation</td><td>base_revision、calculation_id、from/to活动引用、requested_departure_at、effective_departure_at、fact_refs、selected_mode、selection_source、freshness</td><td>把查询事实绑定当前安排；决定哪些下游计算失效、哪些用户选择保留。</td></tr>
+</tbody></table></div>
+<p>先记录实际HTTP/MCP尝试数、成功/空/错、缓存命中、同请求合并数、排队与服务耗时、当前路线可交付耗时、全矩阵结束耗时、编辑重算耗时、MCP会话启动次数和旧版本结果丢弃数。一次缓存命中不算一次外部查询；一次工具重试是新的尝试；API方案数量不是调用次数。先制作观测，不承诺按4并发缩短到四分之一，也不恢复80次业务截断。</p>
+<h4>8 · 对当前实现的改造位置与依据</h4>
+<p>只读核对：RouteOptionsService.options目前逐方式循环，实例字典键只有起点身份、终点身份和方式，没有TTL及日期时间条件；query_limit默认80。DayEditService.recalculate每次创建新的路线服务，_build_leg按端点身份复用旧路段，未检查查询时刻。PlanningMaps.run每次创建MCPClient并在调用结束关闭；amap_service的RLock用于工具初始化，不应误称全部路线请求都被这把锁串行化。</p>
+<p>建议后端增加统一路线调度与行程作用域缓存，替换上述逐次创建与粗粒度复用。MCP连接先采用小型可复用会话池（最多4个会话，每会话同一时刻1个调用），减少每次查询启动会话；用异步调度管理会话，不把同一个同步客户端直接丢给多个线程。MCP封装仍调用官方接口；会话生命周期、超时回收、服务端是否阻塞及池化的启动/内存代价需在实现时验证，本轮不声称现有客户端已经支持可靠并发。</p>
+<p>官方依据：高德<a href="https://developer.amap.com/api/webservice/guide/api/direction">路径规划文档</a>列出公共交通出发日期/时间与策略，并说明相同端点结果可能随道路数据变化；<a href="https://developer.amap.com/api/webservice/guide/tools/flowlevel">流量限制说明</a>要求在控制台查看账号QPS配额。<a href="https://modelcontextprotocol.io/specification/2025-06-18/basic">MCP请求与响应规范</a>以请求ID关联返回，但不因此保证本项目封装的并发能力。并发4、缓存60/15分钟及空结果60秒是用户接受的本项目初始参数，不是供应商规定，后续依据观测调整。本轮没有带密钥查询高德。</p>
+<p>确认范围已同步<a href="../CONTEXT.md">CONTEXT现行规则</a>：当前路线先交付，备用路线后台补齐；统一并发与路线缓存采用上表初始参数。公共交通缓存仍须匹配实际出发日期、时刻等条件。备用公共交通09:00参考时刻、连接池、查询字段、技术超时/重试及300毫秒编辑合并仍为建议；模型不参与用户排序/方式切换后的交通重算。设计确认不表示正式代码已实现。</p>
+</section>
+<section id="implementation-choices" class="choices" aria-labelledby="choices-title"><p class="eyebrow">DESIGN DECISIONS / NOT IMPLEMENTED</p><h3 id="choices-title">需要确定的实现方式、算法与成本控制</h3><p>到达日规则、默认时长、酒店起点、重复地点与活动删除、当天地点之间全量方式查询、先展示当前路线并后台补齐、统一工具并发与路线缓存初始参数、先不设业务调用上限已经确认；其余参数与工程实现仍是设计建议。原型和正式业务均未按这些新决定改造。</p><div class="table-wrap"><table><thead><tr><th>需要确定的事项</th><th>建议起点与可选方式</th><th>仍需决定 / 代价</th></tr></thead><tbody>
+<tr><td><span class="choice-id">D-01 / 职责</span>模型查询、模型规划、后端计算</td><td>已确认三阶段：模型根据需求决定查询内容，后端通过MCP执行并核实事实；模型根据候选位置、旅行日天气、可用价格及每日规则输出每日有序安排；后端保留顺序、查询交通、推荐方式并检查。模型不编造未查询到的事实。</td><td>已确认采用多智能体并明确各方输入输出；主智能体统筹并派发信息任务、汇总规划；子角色划分为景点、餐饮、住宿，天气直接使用工具已确认，后端执行委派并校验，具体职责见上方多智能体契约；查询阶段允许模型多次调用工具，规划阶段先一次输出整趟行程，只有缺项/已核实冲突才提交对应日期修正。沿用当前模型先验证效果，不为每一天或每家餐馆增加独立角色。模型只输出候选地点ID、日期、主题和活动安排（含景点建议停留时长）；后端用Pydantic校验。模型输入不含完整路径或原始工具大响应。建议新契约v4，地点ID与活动ID分离，统一事实来源、查询时间、缺失原因与编辑版本；旧v3只读兼容。</td></tr>
+<tr><td><span class="choice-id">D-02 / 排程</span>到达日与默认时长</td><td>上午到达从当天下午开始游览，下午到达从当天晚上开始，晚上到达从次日上午开始，凌晨到达从当天下午开始；极短游览时段不安排也不计缺项。用餐独立判断到达后是否足够安排1小时；景点默认停留3小时，模型可按景点和当天安排调整。完整日默认08:00从酒店出发，返程默认预留1小时，用户明确要求优先。一个景点可在上午和下午分别出现。</td><td>四块边界已确认，见上方到达判断表。建议餐次以实际可用范围与餐次参考窗口的交集判断，已知前往餐馆耗时也计入；不足1小时不安排。晚上窗口现为19:00—22:00，与默认3小时一致；离开日可用时间不足3小时不安排活动，保留返程时间，不视为缺项。离开日可用时间、返程交通与缓冲的推算及未知处理见<a href="#time-transport-algorithm">上海三日时间演算</a>。参考窗口可顺延，明确开放时间和到离冲突才进入修正，普通窗口越界提示即可。酒店作为日间路线起点；首尾接驳与末段回酒店是否进入展示和总时长，还需确定，建议有明确端点才计算，缺端点不编造。</td></tr>
+<tr><td><span class="choice-id">D-03 / 候选</span>酒店起点与候选推荐</td><td>酒店作为当天路线起点已确认。候选数量已确认：每个可用游览时段先给2个景点候选，每个需安排的餐次先1家合适餐馆，住宿区域内先1家合适酒店；必去或用户指定地点单独核实，不受普通候选数影响。候选池按POI去重，但活动可重复引用。同一轮各日期候选以精简摘要批量送给模型，扩搜由主智能体按缺项委派、子智能体选择查询，后端执行，不为每家餐馆新增一次模型调用。</td><td>建议景点围绕当天主题区域先搜5公里，不足再扩到10公里；餐馆围绕用餐前后活动先搜1公里，不足再扩到3公里。只有缺项或过滤后没有合适地点才扩搜，不为凑满候选数扩搜；不对未选候选查询两两路线。候选数量已确认，搜索半径按参考值执行的具体适配仍待实现。半径与返回数量由MCP透传官方搜索参数，依据<a href="https://developer.amap.com/api/webservice/guide/api-advanced/search">高德周边搜索文档</a>适配。用户未设定酒店时，由模型输出住宿区域及一家已核实推荐酒店；查询失败仍不编造。</td></tr>
+<tr><td><span class="choice-id">D-04 / 交通</span>公共交通、骑行、步行</td><td>已确认公交地铁合并为公共交通，三种方式分别提供查询耗时与同源路径。后端在有效方案中推荐逐段最快方式，用户可切换，顺序保持。</td><td>公共交通内部保留线路、接驳和换乘，不提供公交/地铁两个选项，不为分类追加查询。每种方式推荐保留最快有效方案；内部秒/米、页面小时＋分钟。</td></tr>
+<tr><td><span class="choice-id">D-05 / 算法</span>模型负责每天的活动顺序</td><td>顺序由模型在每日规划阶段输出。输入真实候选的位置、天气与可用费用、酒店起点、到离规则和六个参考窗口，输出每个日期的主题、有序景点/餐馆活动及景点建议停留时长。后端不枚举、交换或移动活动来优化顺序，只据查询选择每段最快的有效方式。</td><td>模型顺序追求合理、尽量顺路，不能承诺当天总交通耗时全局最短。子任务契约、事实引用和按日反馈职责已定案；具体提示词、最终行程字段类型及重复活动的编辑协议仍待细化；当前范围不引入整天排序求解器。</td></tr>
+<tr><td><span class="choice-id">D-06 / 查询成本</span>规划完成后查询交通</td><td>已确认覆盖当天已选不同地点的有向地点对及三类方式，后端保留模型顺序。已确认先查并展示当前相邻段及明确返程段，再在后台补齐备用矩阵；各日期可独立推进，日内相邻公共交通按推算时刻推进。</td><td>渐进交付与初始参数已确认，细节统一见<a href="#route-query-cache">交通查询与缓存</a>。上海11日6个不同地点对应90项基础查询，当前相邻段18项优先、其余72项后台补齐；新出发时刻可能增加公共交通查询，缓存可减少实发量。备用公共交通参考时刻与工程实现仍待定，未实施。</td></tr>
+<tr><td><span class="choice-id">D-07 / MCP 封装</span>继续MCP并补齐能力</td><td>方向已确认：已把固定0.1.11封装源放入项目工作区并保留许可，补齐工具参数、HTTP超时、来源/错误元数据、地点/天气/路线字段及后端typed适配；保留16个工具名和兼容参数。工作区改动尚未提交。</td><td>同一组真实样本已核对搜索、详情、天气、步行、骑行和公共交通返回；公共交通date/time/strategy已确认在脱敏HTTP有效参数中。缺营业时间和partial路线几何保留为缺失，不造字段。完整路线数据仍未接入正式v3规划主流程；时间算法、调度、缓存和前端保持后续范围。</td></tr>
+<tr><td><span class="choice-id">D-08 / 缓存</span>同一行程的共享缓存</td><td>路线查询键、有效期、空结果、进行中请求合并及编辑复用统一见<a href="#route-query-cache">交通查询与缓存</a>，路线缓存有效期已确认，具体结构仍为建议。缓存不存用户顺序/方式，也不等于最终数据库保存；不在每次编辑时重建整个缓存。</td><td>步行/骑行可按同条件跨日复用；公共交通还需匹配实际出发日期/时刻。过期不自动全量刷新；状态与同源路径保留。其他信息仍建议地点身份在预览内复用、天气30分钟有效、cost保留查询时间，新规划再核实；这些建议未获真实服务验证。</td></tr>
+<tr><td><span class="choice-id">D-09 / 总成本</span>先观测，不设业务总量上限</td><td>已确认当前阶段不按调用次数或Token总量停止业务查询。先记录每次规划、每天、每阶段、每轮补查的模型/MCP调用、输入输出Token、应用侧排队和请求耗时、总耗时、缓存命中、失败与重试；供应商内部排队没有证据时保持未知；实际供应商费用有可靠usage和单价才展示，否则仅展示用量。</td><td>现有地点36次、路线80次限制是当前代码事实，未来改造需移除或显式关闭，不能只添加观测却继续隐含截断。统一工具并发初始值4已确认，实际受账号限流及MCP客户端能力约束；单次超时与有限异常重试仍为建议；不属于业务总调用上限。暂沿用单活动规划任务，模型修正先串行，减少共享状态冲突。异步任务继续执行，前端以任务ID轮询进度，关闭页面不取消。每日期三轮缺项补查仍保留。</td></tr>
+<tr><td><span class="choice-id">D-10 / 补查与异常</span>补查与接口异常分别处理</td><td>每日缺项补查与已核实冲突修正合计最多三轮已确认，首次生成不计入；一轮可有多次MCP请求。超时、限流等接口异常的有限重试单独观测；同一个错误不无限重试。不重复查询已成功且仍有效的事实，三轮后仍缺项或有未解决冲突，则带提示交付可编辑草稿。</td><td>不再以新设业务总量额度提前停止。建议MCP单次沿用25秒超时，短暂网络错误或限流最多额外重试2次，指数退避并遵从服务端等待提示；参数错误及有效空结果不进行同参数重试。模型请求超时建议先120秒，格式错误最多定向修复1次；调用超时结果未知时不无条件重发。格式修复和接口重试单独计数，不重置每日补齐修正轮数。供应商限流不等于项目业务上限。没有可解析有效内容时保留真实错误，不编造地点或假草稿。</td></tr>
+<tr><td><span class="choice-id">D-11 / 局部编辑</span>重复活动与两处删除</td><td>同一景点可出现在多个时段，左侧增加删除活动的操作已确认。建议左侧删除只移除当前活动实例，保留另一时段对同一POI的安排；地图下方目的地去重展示，移除目的地时提示将移除当天引用它的全部活动。稳定活动ID与地点ID分开。</td><td>建议目的地列表对已选地点提供“安排到其他时段”，而备用推荐仍排除当天已选地点。删除形成缺项仅提示，不自动补回。具体增删交互及作用范围属于建议，尚未改原型；旧重算响应须按编辑版本丢弃；建议快速拖动合并300毫秒后重算，从最早变化处重算时间链，仅查询缓存未覆盖的路段/新出发条件，不调用模型；细则见<a href="#route-query-cache">交通查询与缓存</a>。新增地点默认末尾并允许指定时段，跨时段复用创建新活动ID。</td></tr>
+<tr><td><span class="choice-id">D-12 / 预览与保存</span>快照、恢复与最终结果</td><td>建议浏览器IndexedDB保存当前预览和编辑，首版支持同一浏览器恢复；后端用独立临时结果文件供页面断连后取回初版，建议24小时清理，临时写入失败仍允许内存结果交付并提示恢复受限。最终结果在导出时写入SQLite，按行程保留最近成功快照，不随观测清理；观测记录仍独立存储。这个临时存储方案及期限尚待确认。导出文件与最终数据库保存使用同一内容快照并分别反馈；保存失败不阻止导出。用版本及幂等标识处理重复保存，不增加历史列表。</td><td>建议导出时冻结同一快照供文件和保存并行使用；每次保存有请求ID及单调递增版本，重复请求返回原结果，旧版本不能覆盖较新成功版本。超时通过请求ID核对状态。服务端校验结构和事实引用，浏览器传回的金额不能直接采信；现有进程内签名需改为可跨重启验证，签名密钥作为服务端持久配置。详见预览状态图和导出时序图，不能直接沿用当前生成即存最终结果的流程。</td></tr>
+<tr><td><span class="choice-id">D-13 / 费用与验收</span>cost人均消费参考</td><td>景点、餐馆、酒店统一使用查询返回的cost，不再查询具体门票、房型及入住日期报价；未知不按零，不由模型估价。展示名称统一为人均消费参考。</td><td>后端保留cost原值、来源和查询时间。重复景点、每次用餐和住宿的汇总计次仍需确定；酒店cost不标成每晚房价，不未经说明乘晚数。已知参考小计不等于全程旅费。验证cost缺失、重复活动及三类交通与实际来源一致。</td></tr>
+</tbody></table></div><h4>第4—6项是同一段规划流程</h4><p>①模型根据需求调用工具查候选和事实 → ②模型结合天气、位置、可用价格及每日规则输出每天活动顺序 → ③后端按规划查询交通、推荐各段方式并检查 → ④展示初版，用户可以拖动、删除活动或切换方式。步骤③是程序查询、计算与检查，不重新排序。</p><div class="cost-note">例：模型输出酒店→A→餐馆→B，后端保留这个顺序，逐段查询交通。A→餐馆的公共交通20分钟、骑行25分钟、步行60分钟，则该段默认推荐公共交通；用户改选骑行后，用25分钟更新总时长和路径并保留其选择。上述数字仅为解释示例，不是查询事实。</div><h4>先区分地点排序与交通方式选择</h4><p>地点排序是模型依据每日规则给出的推荐，后端交通计算是基于真实查询的逐段选择与汇总。后端不实施原建议的排列枚举、局部交换或整天求解器。真实道路路径及方式耗时由MCP调用高德返回，后端组织相邻路段和地图数据；缺失不自行生成假路径。</p><div class="cost-note">举例：8个地点，对每个有方向的地点对查询3组接口方案，且没有批量或缓存时，完整矩阵需要 8×7×3＝168 次查询。当前统一查询公共交通、骑行、步行三类，不为拆分公交与地铁额外查询；实际次数取决于适配后的工具能力。用户已确认先不设业务调用上限、制作观测；当前代码的80次限制尚未移除。全量查询需要在后续改造中同时处理该旧限制。后端在取得的交通事实中选择方式和汇总，不重复调用模型排序；新增地点、补查与局部编辑仍需统一观测和计数；查询只覆盖当天已选地点，不覆盖整个候选池。</div><p>到达四块边界已确认，候选数量已接受，子任务契约已确定。planning_v4核心数据契约、引用校验、项目内MCP封装和后端字段适配已完成自检，并通过有限真实样本核对；正式v3规划主流程仍未接入。下一阶段接入完整规划流程、查询调度、时间/返程算法、编辑与预览保存，再用完整日期和缺项日期贯通验收。未定案参数继续标为建议。</p></section>
+<section class="matrix"><p class="eyebrow">04 / IMPLEMENT & VERIFY</p><h3>接入时复用这些图，用场景验收</h3><p class="meta">下表是建议验收方向，尚未实施验证。阶段四不再重复画一套流程。</p><div class="table-wrap"><table><thead><tr><th>场景</th><th>需要观察的行为</th><th>对应图</th><th>状态</th></tr></thead><tbody>
+<tr><td>生成初版</td><td>按六个参考窗口覆盖早中晚餐及三个游览时段；首尾日仅覆盖实际可用时段。跨参考窗口不单独判失败，餐馆具体、地点有依据；缺价格或部分交通可提示交付。</td><td>规划 / 数据</td><td>待实施验收</td></tr>
+<tr><td>到达日与默认时长</td><td>按四块判断游览开始；餐次另按是否足够1小时决定，极短时段不补查；景点默认3小时，模型可按景点和当天安排调整，后端采用该时长。完整日默认08:00酒店出发，返程默认1小时，用户明确要求优先。02:00到达当天下午开始，10:00到达当天下午开始，15:00到达当天晚上开始，20:00到达次日上午开始；离开日不足3小时不安排活动且不算缺项。</td><td>规划 / 数据</td><td>待实施验收</td></tr>
+<tr><td>酒店与地点对</td><td>酒店作为路线起点；当天已选不同地点的有向连接查询公共交通、骑行、步行三种方式，重复活动复用地点事实，不查询所有未选候选。</td><td>规划 / 数据</td><td>待实施验收</td></tr>
+<tr><td>不设业务上限的观测</td><td>旧36/80次限制不再隐含截断；逐次记录真实调用、耗时、Token、缓存、重试及错误，未知费用不补造；三轮缺项补查规则仍生效。</td><td>规划</td><td>待实施验收</td></tr>
+<tr><td>按日补查</td><td>缺项定向补齐、已核实开放/到离冲突局部修正，合计每个日期最多3轮，首次生成不计入；无问题或达上限即结束，不覆盖其他日期。</td><td>规划 / 数据</td><td>待实施验收</td></tr>
+<tr><td>三轮后仍有问题</td><td>在缺失位置或未解决冲突活动展示提示并交付草稿，保留有效安排；用户可补充调整并导出，不直接判定规划失败。</td><td>规划 / 状态</td><td>待实施验收</td></tr>
+<tr><td>交通耗时比较</td><td>模型输出符合每日规则且尽量顺路的顺序；后端保留顺序，在各相邻路段有效方案中推荐最快方式。用户调整后保持其选择，未知耗时不当零，不承诺整天最优。</td><td>规划 / 数据</td><td>待实施验收</td></tr>
+<tr><td>地图与交通</td><td>MCP封装及后端保留选中方案的耗时、距离、路径与分段，地图与耗时同源；酒店单独标记，未知方式不填假时间或直线路径。</td><td>数据</td><td>待实施验收</td></tr>
+<tr><td>拖动、重复及删除</td><td>同一POI可用于多个时段，删除单次活动保留其他引用；尊重用户顺序，只重算受影响路段；旧响应不覆盖最新编辑；推荐排除当天已加入地点。</td><td>数据 / 状态</td><td>待实施验收</td></tr>
+<tr><td>刷新与关闭</td><td>重新打开能恢复未导出的预览及编辑，无需进入后台工作台。</td><td>状态</td><td>待实施验收</td></tr>
+<tr><td>路线缺失或重算失败</td><td>保留当前编辑；导出包含当前内容及缺失提示。</td><td>状态 / 时序</td><td>待实施验收</td></tr>
+<tr><td>导出保存失败</td><td>文件导出继续进行；单独提示保存失败，不覆盖上次成功保存。</td><td>时序</td><td>待实施验收</td></tr>
+<tr><td>导出后继续编辑</td><td>本次保存对应点击导出时的快照；后续编辑不被保存响应覆盖。</td><td>状态 / 时序</td><td>待实施验收</td></tr>
+<tr><td>还原上次保存</td><td>只还原最近一次成功保存的结果，失败导出不改变来源；不新增历史列表。</td><td>状态</td><td>待实施验收</td></tr>
+</tbody></table></div></section>
+<footer class="footer">设计参考整理日期：2026-10-10 · 图形在本地生成，无外部脚本、账号或服务请求。<br>本页和“当前实现地图”分别维护目标设计与代码事实；技术验证、人工接受、提交及推送状态见 CHG-003。</footer>
+</main></div>
+<div id="toast" class="toast" role="status" hidden></div>
+<noscript>本页需要 JavaScript 绘制设计图；业务规则与待办可通过 CONTEXT 和 CHG-003 阅读。</noscript>
+<script>
+'use strict';
+// 统一维护区：每图的 nodes / edges / notes 是唯一图示来源。逻辑对象不等于数据库表。
+const node=(id,x,y,title,sub,status='proposal',details={})=>({id,x,y,w:250,h:88,title,sub,status,...details});
+const edge=(from,to,label='',optional=false,points=null,labelAt=null)=>({from,to,label,optional,points,labelAt});
+const designs={
+ planning:{title:'规划流程 · 谁做什么，何时结束',tab:'规划泳道图',hint:'模型 / 后端 / MCP',kicker:'01 / PLANNING FLOW',description:'本图展示常见依赖主线，实际委派可按已知信息跳过或并行，详见子任务派发图。六个参考窗口、对应位置的缺项提示、按日最多三轮补查和继续使用MCP已确认；模型查询与规划、后端交通计算的分工已确认，字段与调用成本见下方实现清单，正式业务未改造。',badge:'核心规则已确认 · 实现待设计',width:1320,height:1480,
+ lanes:[{x:20,label:'用户 / 前端',help:'输入需求、查看预览'},{x:342,label:'后端程序',help:'协调查询、计算、决定交付'},{x:664,label:'主智能体 / 子智能体',help:'主统筹规划，子处理信息'},{x:986,label:'MCP → 高德官方API',help:'提供可核实的事实'}],
+ nodes:[
+ node('request',42,110,'提交旅行需求','城市、日期、预算、完整备注','confirmed',{input:'用户明确输入。',output:'旅行需求及用户已提供住处等条件。',boundary:'预算是全程旅费；精细人群适配及海外能力不扩大到本轮。'}),
+ node('validate',364,110,'接收与校验','日期范围、到离时间、必要输入','proposal',{input:'旅行需求。',output:'有效需求或明确输入错误。',boundary:'校验拒绝不启动模型或地图查询。'}),
+ node('understand',686,110,'主智能体理解并派发','决定所需信息与子任务','confirmed',{input:'原始需求与完整备注。',output:'核心需求、固定条件、待核实信息，以及带依赖关系的子任务。',boundary:'主智能体决定委派对象及目标；后端执行，子智能体查工具并返回有依据的信息。固定景点、餐饮、住宿三个子角色；天气直接调用工具。详细分支见子任务派发图。'}),
+ node('collect',364,240,'执行子任务与工具查询','子智能体查信息并返回','proposal',{input:'首次搜索方向，或某日期缺失的餐次与游览时段。',output:'经核实的候选与缺失原因。',boundary:'补查只针对缺项，保留其他日期及有效安排；按官方API实际返回数据适配，费用与天气不由模型补写。'}),
+ node('facts',1008,240,'返回地点与天气事实','身份、位置、详情、覆盖日期','proposal',{input:'限定城市与关键词的查询。',output:'原始事实经后端标准化进入候选。',boundary:'模型提到的名字不能直接变成已核实地点。'}),
+ node('layout',686,370,'主智能体接收并续派','按已有位置补区域信息','proposal',{input:'已核实候选、用户需求及旅行日天气覆盖。',output:'需要继续查询的餐馆、住宿、消费等信息与搜索区域。',boundary:'属于第一步事实搜集，可并入查询循环；不是正式每日规划，不限定额外模型调用次数。'}),
+ node('support',364,500,'执行支撑信息查询','餐馆、酒店、寻找区域与价格','proposal',{input:'模型细化的查询方向、候选区域、用餐与住宿需求。',output:'支撑候选、可用消费、备用地点。',boundary:'首次由模型根据候选区域决定查询支撑信息；补查只处理对应日期缺项。推荐默认两个景点与一家餐馆，候选规模已确认；推荐复用已核实候选，排序规则待设计。'}),
+ node('supportfacts',1008,500,'返回支撑候选与详情','价格有数据才展示','proposal',{input:'与每日区域相关的查询。',output:'可定位餐馆、酒店及有依据的消费信息。',boundary:'酒店人均消费不能当作旅行日期每晚报价。'}),
+ node('draft',686,630,'主智能体汇总并规划','主题、时段、停留时长与顺序','confirmed',{input:'完整需求、真实候选位置、旅行日天气、可用价格及已定每日规则。',output:'全部日期的早中晚餐与上午、下午、晚上游览安排；首尾日仅覆盖实际可用时段。',boundary:'模型只引用核实候选，不生成假地点、假价格或交通耗时。'}),
+ node('route',364,760,'通过MCP查询地点对','当前路线优先，备用后台补齐','confirmed',{input:'当天已选酒店、景点与餐馆的去重地点坐标及查询参数。',output:'MCP返回的交通方案，保留对应耗时、距离、路径坐标与分段方式。',boundary:'项目内固定版本MCP封装与planning_v4适配器已实现并通过有限真实样本核对；默认v3规划流程仍未接入。官方HTTP请求在MCP工具内执行，业务层统一调用MCP。适配器保留同源路径与耗时、公交/地铁分段及步行接驳；当前路线优先、其余地点后台补齐和统一并发/缓存尚未实现。已确认参数和后续算法见route-query-cache。'}),
+ node('routefacts',1008,760,'返回交通事实','公共交通含接驳与换乘','proposal',{input:'路段起终点与方式。',output:'可用方案或明确缺失状态。',boundary:'路径缺失不画直线，查询失败不按零耗时处理。'}),
+ node('evaluate',364,890,'推荐交通方式并检查','保留模型顺序、汇总与缺项','confirmed',{input:'草稿、有效交通耗时、价格依据、用餐与到离约束。',output:'模型顺序下各相邻路段最快的有效方式、同源路径、参考时长、主要消费小计和每日缺项。',boundary:'酒店作为路线起点；到达日游览按四块开始规则，餐次独立判断是否够1小时，景点3小时仅为默认，后端采用模型按景点和当天安排给出的时长，允许同一景点跨时段。完整日默认08:00酒店出发，返程默认1小时，用户明确要求优先。六个参考窗口见下方窗口表。窗口是排程参考，不能单因跨界判定失败。后端保留模型顺序，不进行整天重排；用户调整后保留其顺序与方式。未知耗时不当零，不承诺整天最优。'}),
+ node('decision',364,1020,'检查每日缺项与冲突','对应日期补齐或局部修正','confirmed',{input:'每日实际可用时段及对应安排。',output:'安排完整且无已核实冲突则交付；有缺项或已核实开放/到离冲突则按日反馈模型。',boundary:'六个参考窗口已确认；缺价格或部分交通不单独触发完整性补查。到达日按四块规则决定游览开始，餐次独立判断是否够1小时；无须安排的时段不算缺项。同一POI可覆盖多个活动时段；离开日不足3小时不安排，未设定酒店由模型推荐；已核实开放/到离冲突与缺项共用按日三轮。工程细节稍后讨论。'}),
+ node('preview',42,1150,'交付可编辑预览','带事实、缺失提示与调整入口','confirmed',{input:'可交付初版。',output:'用户查看、拖动排序、删除单次活动、增删目的地及选交通方式。',boundary:'包含安排完整的初版和达到补查上限后的缺项草稿；两者都可编辑导出。当前路线查询结束并完成生成检查后先展示，备用路线继续在后台补齐，不阻止预览和导出。生成完成不代表最终结果保存，具体预览存储方式待设计。'}),
+ node('limit',364,1150,'检查该日补齐修正轮数','每个日期最多3轮','confirmed',{input:'存在缺项或已核实冲突的日期及该日已用轮数。',output:'未满3轮则定向补查；达到3轮则结束。',boundary:'首次生成不计入。针对该日一次补齐或冲突修正并重新检查算一轮，二者共用计数；不是单次API请求数或整份行程共用的次数。'}),
+ node('revise',686,1150,'主智能体补查与修正','按需委派，只改相关日期','confirmed',{input:'该日缺项、已核实冲突及本轮查询事实。',output:'模型补齐或修正对应安排，后端重新检查该日完整性与已核实冲突。',boundary:'完整即结束；仍不完整且未满3轮继续。其他日期及有效安排保留，具体局部更新协议待设计。'}),
+ node('stop',364,1300,'交付带提示的草稿','保留缺项或未解决冲突','confirmed',{input:'该日补齐与修正合计已达3轮，仍有缺项或已核实冲突。',output:'停止自动补齐修正，在对应缺失位置或冲突活动保留提示，交付可编辑草稿。',boundary:'不因补查后仍不完整直接判定规划失败。保留有效安排，未知不补造；草稿同属预览结果，用户可增删、排序、选交通方式及导出。'})],
+ edges:[edge('request','validate'),edge('validate','understand'),edge('understand','collect','搜索方向',false,[[810,198],[810,214],[489,214],[489,240]]),edge('collect','facts','地图查询'),edge('facts','layout','候选 + 天气',false,[[1133,328],[1133,347],[811,347],[811,370]]),edge('layout','support','细化事实查询',false,[[811,458],[811,475],[489,475],[489,500]]),edge('support','supportfacts'),edge('supportfacts','draft','核实信息',false,[[1133,588],[1133,609],[811,609],[811,630]]),edge('draft','route','模型有序活动',false,[[811,718],[811,737],[489,737],[489,760]]),edge('route','routefacts'),edge('routefacts','evaluate','同源路径与耗时',false,[[1133,848],[1133,866],[489,866],[489,890]]),edge('evaluate','decision'),edge('decision','preview','完整无冲突',false,[[364,1064],[318,1064],[318,1194],[292,1194]]),edge('decision','limit','该日有问题',true),edge('limit','revise','未满3轮',true),edge('limit','stop','该日已达3轮',true),edge('stop','preview','缺项草稿',false,[[364,1344],[318,1344],[318,1194],[292,1194]],[310,1295]),edge('revise','draft','改安排',true,[[936,1194],[956,1194],[956,674],[936,674]], [965,910]),edge('revise','collect','补事实',true,[[686,1194],[644,1194],[644,284],[614,284]], [646,945])],
+ notes:['离开日不足3小时不安排活动、未设定酒店时由模型推荐区域和一家酒店、已核实冲突共用按日三轮已经确认，不再待选。','候选数量已确认：景点每时段2个、餐馆每餐1家、酒店先1家，选不出或缺项时再补。','时间默认值、当前路线先展示/备用后台补齐、统一工具并发与路线缓存初始参数已确认；上海三日说明见route-query-cache，备用公共交通参考时刻和工程实现仍待细化。'],difference:'当前：已有景点搜集→天气→初步排程→住宿餐饮搜集→终稿→计算→至多两轮修改。新图不表示按日三轮补查或缺项草稿已实现。新决定的重复活动、活动删除、酒店起点、全量地点对查询及不设业务调用上限均未实现。现有地点36次、路线80次限制仍在。',sources:['backend/app/agents/route_planner.py · RouteTripPlanner.plan_trip','backend/app/services/route_options_service.py · RouteOptionsService._query'],defaultNode:'draft'},
+ delegation:{title:'子任务派发 · 决策、执行与结束',tab:'子任务派发图',hint:'主智能体 / 后端 / 子智能体',kicker:'05 / DELEGATION',description:'主智能体决定查什么和派给谁，后端校验依赖并执行，子智能体返回有依据的候选。详细字段见下方派发协议。',badge:'本轮设计确定 · 尚未实现',width:1320,height:1100,
+ lanes:[{x:20,label:'主智能体',help:'唯一整趟规划者'},{x:342,label:'后端执行器',help:'依赖、事实、版本与轮次'},{x:664,label:'子智能体',help:'景点 / 餐饮 / 住宿'},{x:986,label:'MCP / 官方接口',help:'事实查询；天气直接工具'}],
+ nodes:[
+ node('normalize',42,125,'整理需求与已有事实','固定条件、偏好、未知项','confirmed',{output:'需要的信息及任务依赖。',boundary:'不把模糊偏好变为硬条件。'}),
+ node('dispatch',42,280,'选择角色并委派','目标、范围、候选要求、依赖','confirmed',{input:'相关需求与已有事实。',output:'结构化委派工具请求。',boundary:'任务动态分批；同一角色可承接多个任务，天气无需子智能体。'}),
+ node('ready',364,280,'校验并派发就绪任务','独立任务并行，有依赖则等待','confirmed',{input:'任务请求和事实版本。',output:'隔离上下文的子任务。',boundary:'后端生成任务ID、校验输入和工具权限；不替模型决定旅行目标。'}),
+ node('search',686,280,'查询与筛选循环','复用事实，按目标选择查询','confirmed',{input:'限定范围、已有候选与排除项。',output:'MCP请求或任务结果。',boundary:'不改整趟计划，不相互转派；达到目标即停止。'}),
+ node('mcp',1008,280,'提供查询事实','地点、坐标、cost、开放信息','confirmed',{output:'有来源的数据或可分类错误。',boundary:'未知不当零；天气无覆盖不编造。'}),
+ node('finish',686,475,'达到目标或停止条件','complete / partial / failed','confirmed',{input:'查询结果与已查范围。',output:'候选引用、覆盖、缺失、停止原因。',boundary:'无匹配是partial；无可用结果的执行故障是failed；缺可选字段不无限重查。'}),
+ node('receive',364,475,'核验并收集任务结果','保存事实，关联任务和版本','confirmed',{input:'子任务返回。',output:'结果摘要与事实引用。',boundary:'过期结果不覆盖新安排；不向主智能体复制完整工具大响应。'}),
+ node('decide',42,475,'判断续派或汇总','新依赖已满足？事实足够？','confirmed',{input:'完成、部分或失败结果。',output:'有新依据则续派，否则规划并标缺项。',boundary:'不通过新任务ID反复原样查询；不等待不可能取得的数据。'}),
+ node('plan',42,665,'汇总每日规划','主题、时段、酒店与有序活动','confirmed',{output:'引用真实地点的初版或日期修正。',boundary:'主智能体是唯一整趟规划者。'}),
+ node('check',364,665,'补交通并检查日期','保留顺序，计算与完整性检查','confirmed',{output:'可交付结果或按日期问题。',boundary:'缺价格、天气或部分交通不单独触发补齐。'}),
+ node('repair',364,850,'按日期控制补齐修正','最多3轮；无进展不空转','confirmed',{input:'问题日期、已用轮数和停止原因。',output:'回主智能体修正或结束自动修正。',boundary:'首次不计；每日期一次修正及复核算一轮，非API次数。'}),
+ node('deliver',42,975,'交付可编辑预览','有效内容与缺项提示','confirmed',{input:'完整或停止补齐的有效草稿。',boundary:'无可解析结果的执行故障单独报错；缺项本身不判整趟失败。'})],
+ edges:[edge('normalize','dispatch'),edge('dispatch','ready'),edge('ready','search'),edge('search','mcp'),edge('mcp','finish','事实',false),edge('finish','search','继续查询',true,[[936,519],[972,519],[972,324],[936,324]],[976,420]),edge('finish','receive','任务结果'),edge('receive','decide'),edge('decide','dispatch','新任务',true),edge('decide','plan','可以规划'),edge('plan','check'),edge('check','repair','缺项或冲突'),edge('repair','decide','允许修正',true,[[364,894],[320,894],[320,519],[292,519]],[325,795]),edge('check','deliver','完整',false,[[364,709],[307,709],[307,1019],[292,1019]]),edge('repair','deliver','停止补齐')],
+ notes:['角色固定，任务及依赖动态确定；并行由后端实际执行。','输入输出字段与结束条件见同页“派发协议与结束条件”。','单次超时、并发与技术重试数值另议；先观测，不新增业务调用总上限。'],difference:'当前仍是后端固定阶段调用collector/planner/reviser；本图描述待实施的主从委派循环，不表示已经接入。',sources:['docs/planning-design.html#delegation-contract','backend/app/agents/route_planner.py'],defaultNode:'dispatch'},
+ data:{title:'数据关系 · 从需求到可编辑初版',tab:'数据关系图',hint:'需求 / 事实 / 安排 / 版本',kicker:'02 / DATA CONTRACT',description:'上海三日数据结构；核心契约模型和校验已实现，字段及阶段说明见下方“需求到初版”。逻辑对象不等于数据库表，也尚未接入正式规划主流程。',badge:'契约自检完成 · 主流程待接入',width:1320,height:1120,nodes:[
+ node("request",40,100,"用户需求 TripRequest","原文、城市、到离与偏好","proposal",{"input": "用户输入。", "output": "request_id及完整原文。", "boundary": "预算/端点/住宿未填保持null。"}),
+ node("input",360,100,"需求与规则 PlanningInput","需求依据 + 日期时段","proposal",{"input": "TripRequest。", "output": "RequirementSummary与DayConstraint。", "boundary": "规则由后端提供，模型不能覆盖明确输入。"}),
+ node("task",680,100,"子任务 Subtask","目标、范围、事实依赖","proposal",{"input": "需求与已有事实。", "output": "景点/餐饮/住宿任务。", "boundary": "task_id不同于工具请求ID；天气直接查询。"}),
+ node("result",1000,100,"子任务结果 TaskResult","候选引用、覆盖与缺失","proposal",{"input": "工具事实与任务目标。", "output": "complete/partial/failed。", "boundary": "模型推荐理由不混入官方事实。"}),
+ node("facts",1000,320,"查询事实 FactStore","地点、天气、路线与来源","proposal",{"input": "MCP返回及后端归一化。", "output": "不可变fact_id；官方poi_id。", "boundary": "同一地点多次查询有不同快照。"}),
+ node("draft",680,320,"初版安排 PlanDraft","plan_id + revision + days","proposal",{"input": "候选摘要和每日规则。", "output": "按日主题及有序活动。", "boundary": "由模型提案，经后端分配ID和结构核验。"}),
+ node("day",360,320,"每日安排 DayPlan","slots、activities、住宿","proposal",{"input": "PlanDraft的一天。", "output": "day_id、日期和有序活动。", "boundary": "主题、酒店区域、天气建议与事实引用分开。"}),
+ node("slot",40,320,"参考时段 Slot","required/skipped/conditional","proposal",{"input": "日期规则及时间条件。", "output": "slot_id、窗口、安排义务。", "boundary": "没有活动仍保留slot，用于缺项占位。"}),
+ node("activity",360,550,"活动 Activity","一次用餐或游览","proposal",{"input": "有序活动数组。", "output": "activity_id → poi_id/fact_id。", "boundary": "重复博物馆有两个活动ID；只保留一份地点事实。"}),
+ node("route",680,550,"路线事实 RouteFact","条件、方案、秒/米与路径","proposal",{"input": "已选地点有向连接。", "output": "RouteOption及同源segments。", "boundary": "三类交通；公共交通时间条件参与身份。"}),
+ node("leg",1000,550,"相邻路段 Leg","起终引用与当前选择","proposal",{"input": "活动顺序及路线事实。", "output": "三类方式状态、选中方案。", "boundary": "改顺序更新路段；保留用户选择及事实来源。"}),
+ node("report",40,770,"问题与修正 Validation","日期/时段/活动/路段定位","proposal",{"input": "安排、事实和后端计算。", "output": "Issue及每日期RepairState。", "boundary": "完整性与可行性分开；按日最多3轮。"}),
+ node("preview",360,770,"可编辑初版 Preview","三日安排、事实、提示","proposal",{"input": "当前有效版本的内容。", "output": "前端完整渲染与编辑输入。", "boundary": "生成不等于最终保存；版本沿用当前草稿。"}),
+ node("summary",680,770,"后端计算 DaySummary","已知耗时与未知项分开","proposal",{"input": "选定路段、活动时长。", "output": "时间/消费参考及可行性。", "boundary": "未知不当0；消费计次未定不强行求和。"}),
+ node("edit",360,980,"编辑请求 EditCommand","base_revision + operation","proposal",{"input": "用户排序、增删、选方式。", "output": "校验后升版本、重算影响项。", "boundary": "旧响应不覆盖新编辑；目的地批量删除另议。"}),
+ node("saved",1000,980,"上次保存引用","last_saved_ref，可为空","proposal",{"input": "导出时保存流程。", "output": "还原来源；本轮只保留接口位。", "boundary": "存储、保留期限与保存协议仍待讨论。"}),
+],edges:[edge("request","input","解释与规则"),edge("input","task","委派"),edge("task","result","执行返回"),edge("result","facts","事实引用"),edge('result','draft','候选摘要',false,[[1000,164],[978,164],[978,284],[805,284],[805,320]],[895,278]),edge("facts","draft","按需摘要"),edge("draft","day","1 → 3日"),edge("day","slot","6参考时段"),edge("day","activity","有序数组"),edge("draft","route","已选地点"),edge("route","leg","查询方案"),edge("activity","preview","当前安排"),edge("slot","report","完整性"),edge("report","preview","问题定位"),edge("leg","summary","选定方案"),edge("summary","preview","计算结果"),edge("preview","edit","用户操作"),edge('edit','preview','新revision',true,[[610,1024],[640,1024],[640,814],[610,814]],[635,925]),edge("preview","saved","保存后关联"), ],notes:['核心planning_v4输入、事实、提案、草稿、校验、预览和编辑对象已转为Pydantic契约；尚未接入TypeScript或正式v3规划流程。','身份、快照、活动、路段和版本分别维护，编辑不会改写官方事实。','时间算法见time-transport-algorithm；查询缓存及版本绑定见route-query-cache，均区分已确认规则与建议。消费汇总、删除目的地和保存机制仍待细化。'],difference:'当前默认正式规划仍走v3。本图中的planning_v4核心模型和MCP事实适配已独立实现；主从委派、按日三轮调度、完整预览保存链路和前端接入仍未完成。',sources:['docs/planning-design.html#data-walkthrough','backend/app/models/itinerary.py · 当前v3'],defaultNode:'preview'},
+ state:{title:'预览状态 · 编辑与上次保存分别变化',tab:'预览状态图',hint:'编辑 / 恢复 / 保存',kicker:'03 / PREVIEW STATE',description:'业务行为已确认，状态表达是设计建议。任务执行状态、预览状态与数据库保存状态分别管理。',badge:'行为已确认 · 表达待设计',width:1320,height:790,
+ groups:[{x:20,y:75,w:1280,h:290,label:'当前预览 · 用户一直可以继续编辑'},{x:20,y:395,w:1280,h:300,label:'上次成功保存 · 唯一还原来源'}],
+ nodes:[node('generated',60,145,'初版预览','生成完成，尚无最终保存','confirmed',{input:'初次生成。',output:'可查看、编辑、导出的预览，包括补查上限后的缺项草稿。',boundary:'刷新或关闭后应可恢复；持久化位置待定。'}),node('edited',500,145,'已编辑预览','当前修改独立保留','confirmed',{input:'拖动、增删、交通选择或导出后的继续编辑。',output:'最新预览及路线更新状态。',boundary:'正在重算或失败也不阻止编辑与导出，旧响应不能替换最新内容。'}),node('restored',980,145,'已还原预览','复制上次成功保存的内容','confirmed',{input:'用户确认还原；存在上次保存。',output:'当前预览变为保存快照。',boundary:'没有保存时入口不可用；确认后替换当前未保存调整。'}),node('none',60,485,'没有上次保存','还原入口不可用','confirmed',{input:'尚未成功保存过。',output:'仍可导出、编辑当前预览。',boundary:'保存失败不把它变成有上次保存。'}),node('saved',500,485,'有上次成功保存','保留最近一次成功快照','confirmed',{input:'某次导出触发的数据库保存成功。',output:'可还原这份快照。',boundary:'后续编辑不覆盖；失败保存不替换。'}),node('replace',980,485,'替换为新成功快照','保存成功才改变还原来源','confirmed',{input:'下一次导出的保存成功。',output:'最近成功保存被替换。',boundary:'不新增用户历史列表；若用户已继续编辑，当前预览仍保留新编辑。'})],
+ edges:[edge('generated','edited','用户编辑'),edge('edited','restored','确认还原'),edge('restored','edited','继续编辑',false,[[1105,233],[1105,294],[625,294],[625,233]],[835,294]),edge('edited','edited','继续编辑 / 路线更新或失败',false,[[625,145],[625,114],[818,114],[818,189],[750,189]],[720,114]),edge('none','saved','导出保存成功'),edge('saved','replace','下一次保存成功'),edge('none','none','保存失败：仍无保存',true,[[185,573],[185,635],[290,635],[290,573]],[187,662]),edge('saved','saved','保存失败：保持原内容',true,[[625,573],[625,635],[730,635],[730,573]],[627,662]),edge('saved','restored','还原只读保存内容',true,[[750,529],[948,529],[948,254],[1105,254],[1105,233]],[798,455])],
+ notes:['预览恢复采用本机、服务端或组合方式？关闭后恢复需要什么标识？','重算状态和未保存调整如何独立表达，避免枚举大量组合状态？','重复导出、并发保存及旧保存响应怎样避免覆盖较新的保存？','最终结果保留期与观测任务清理怎样分开？'],difference:'当前：后端生成完成即写task_results，编辑主要依赖浏览器sessionStorage及服务端签名。原型的专用本机缓存只验证交互，不代表正式恢复机制。',sources:['backend/app/services/task_service.py · TaskService._execute','backend/app/services/task_repository.py · TaskRepository.succeed','backend/app/services/day_edit_service.py · 当天编辑与快照校验'],defaultNode:'saved'},
+ export:{title:'导出时序 · 文件与数据库保存各自完成',tab:'导出时序图',hint:'快照 / 并行 / 失败',kicker:'03 / EXPORT SEQUENCE',description:'导出行为已确认，并行执行和快照协议是设计建议。保存响应不能覆盖点击后产生的新编辑。',badge:'行为已确认 · 协议待设计',width:1320,height:1000,
+ participants:[{x:130,label:'用户'},{x:470,label:'前端'},{x:820,label:'后端'},{x:1170,label:'数据库'}],
+ nodes:[node('snapshot',375,150,'固定本次导出快照','内容、版本及当前缺失提示','proposal',{input:'用户点击时所见预览。',output:'同一内容快照用于文件生成和最终保存。',boundary:'用户继续编辑时仍保留新编辑；价格、天气及交通状态也属于所见内容。',w:245,h:70}),node('image',375,295,'按快照生成导出文件','路线缺失或重算失败仍可导出','confirmed',{input:'本次导出快照。',output:'下载文件或单独图片生成错误。',boundary:'文件生成不等待数据库保存成功；导出文件自身失败也要提示。',w:245,h:70}),node('persist',735,500,'保存最终结果快照','内容校验 / 保存协议待定','proposal',{input:'同一快照和请求标识。',output:'保存成功或明确失败。',boundary:'程序核对来源与结构，不接受随意伪造查询价格；具体API与校验方案待定。',w:250,h:70}),node('commit',1050,635,'事务提交成功','更新上次成功保存来源','confirmed',{input:'有效快照。',output:'最近一次成功保存结果。',boundary:'并发顺序、幂等和版本判断待设计；客户端不能以发出请求即认定保存成功。',w:245,h:70}),node('failure',735,805,'保存失败 / 超时','确认失败时保持原保存','confirmed',{input:'写入异常或未确认保存成功。',output:'单独提示；文件生成及用户编辑继续。',boundary:'超时可能意味着结果未知；不能宣称必然未落盘，需要保存结果核对机制。',w:250,h:70})],
+ messages:[{from:0,to:1,y:120,text:'点击导出当前行程'},{from:1,to:0,y:405,text:'文件准备完成 → 下载；或单独提示文件生成失败'},{from:1,to:2,y:470,text:'提交同一快照（API名称、幂等及版本协议待定）'},{from:2,to:3,y:610,text:'校验后保存最终快照'},{from:3,to:2,y:735,text:'返回事务提交结果',back:true},{from:2,to:1,y:775,text:'保存成功 → 更新还原来源，保留新编辑',back:true},{from:2,to:1,y:925,text:'保存失败 / 未确认 → 单独提示与核对，导出不受阻',back:true}],
+ edges:[],notes:['确定导出快照包含哪些事实及待更新提示，服务器怎样核对？','重复点击和并发导出的保存顺序、幂等标识如何定义？','保存超时怎样确认服务端结果，避免成功保存与页面认知不一致？','文件生成失败但保存成功时，怎样清楚展示两个独立结果？'],difference:'当前：生成阶段保存失败会使任务失败；正式导出只生成文件。新目标需要独立的最终保存流程，并把两项结果分别反馈给用户。',sources:['backend/app/services/task_service.py · TaskService._execute','backend/app/services/task_repository.py · TaskRepository.succeed','frontend/src/views/TripResultPrototype.vue · exportTrip（交互演示）'],defaultNode:'snapshot'}
+};
+const statusNames={confirmed:'已确认行为',proposal:'建议 · 待讨论',current:'当前实现'};
+const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+let current='planning',selected='',scale=1,fitMode=true,toastTimer;
+const byId=id=>document.getElementById(id);
+function defaultPoints(a,b){if(a.id===b.id)return [[a.x+a.w/2,a.y],[a.x+a.w/2,a.y-30],[a.x+a.w+20,a.y-30],[a.x+a.w+20,a.y+a.h/2],[a.x+a.w,a.y+a.h/2]];if(Math.abs(a.y-b.y)<30)return a.x<b.x?[[a.x+a.w,a.y+a.h/2],[b.x,b.y+b.h/2]]:[[a.x,a.y+a.h/2],[b.x+b.w,b.y+b.h/2]];const start=[a.x+a.w/2,a.y+(b.y>a.y?a.h:0)],end=[b.x+b.w/2,b.y+(b.y>a.y?0:b.h)],mid=(start[1]+end[1])/2;return [start,[start[0],mid],[end[0],mid],end]}
+function renderSVG(design){
+ let out=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${design.width} ${design.height}" width="${design.width}" height="${design.height}" style="font-family:system-ui,sans-serif" role="group" aria-label="${esc(design.title)}"><title>${esc(design.title)}</title><desc>${esc(design.description)}</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#829488"/></marker></defs><text x="26" y="30" class="diagram-title">${esc(design.title)}</text><text x="26" y="54" class="diagram-note">${esc(design.badge)} · 2026-10-10</text>`;
+ for(const lane of design.lanes||[])out+=`<rect class="lane" x="${lane.x}" y="75" width="300" height="${design.height-125}" rx="10"/><text class="lane-label" x="${lane.x+20}" y="99">${esc(lane.label)}</text><text class="lane-help" x="${lane.x+20}" y="${design.height-50}">${esc(lane.help)}</text>`;
+ for(const group of design.groups||[])out+=`<rect class="lane" x="${group.x}" y="${group.y}" width="${group.w}" height="${group.h}" rx="10"/><text class="lane-label" x="${group.x+20}" y="${group.y+30}">${esc(group.label)}</text>`;
+ if(design.participants){for(const p of design.participants)out+=`<rect class="lane" x="${p.x-72}" y="75" width="144" height="34" rx="6"/><text class="lane-label" x="${p.x}" y="99" text-anchor="middle">${esc(p.label)}</text><path d="M${p.x} 110V965" stroke="#bcc9b7" stroke-dasharray="5 6"/>`;out+=`<rect x="25" y="245" width="1270" height="710" fill="none" stroke="#b2c1a8"/><text x="42" y="273" class="lane-label">并行分支（建议）：A 文件生成　／　B 最终保存</text><path d="M25 435H1295" stroke="#b2c1a8" stroke-dasharray="5 6"/><text x="42" y="458" class="lane-help">B 保存分支：成功与失败为互斥结果；未确认时单独提示并核对</text>`;for(const m of design.messages){const a=design.participants[m.from].x,b=design.participants[m.to].x;out+=`<path class="edge${m.back?' optional':''}" d="M${a} ${m.y}H${b}"/><text x="${(a+b)/2}" y="${m.y-10}" text-anchor="middle" class="edge-label">${esc(m.text)}</text>`}}
+ const nodes=new Map(design.nodes.map(n=>[n.id,n]));
+ for(const e of design.edges){const a=nodes.get(e.from),b=nodes.get(e.to),points=e.points||defaultPoints(a,b);out+=`<path class="edge${e.optional?' optional':''}" d="${points.map((p,i)=>(i?'L':'M')+p.join(' ')).join(' ')}"/>`;if(e.label){const mid=e.labelAt||points[Math.floor(points.length/2)];let x=mid[0],y=mid[1]-9;if(points.length===2){x=(points[0][0]+points[1][0])/2;y=(points[0][1]+points[1][1])/2-10}out+=`<text x="${x}" y="${y}" text-anchor="middle" class="edge-label">${esc(e.label)}</text>`}}
+ for(const n of design.nodes)out+=`<g class="node${n.id===selected?' active':''}" data-node="${esc(n.id)}" data-status="${n.status}" role="button" tabindex="0" aria-label="查看说明：${esc(n.title)}" aria-pressed="${n.id===selected}"><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="8"/><text class="node-tag" x="${n.x+15}" y="${n.y+19}">${statusNames[n.status]}</text><text class="node-title" x="${n.x+15}" y="${n.y+44}">${esc(n.title)}</text><text class="node-sub" x="${n.x+15}" y="${n.y+66}">${esc(n.sub)}</text></g>`;
+ return out+'</svg>';
+}
+function showNode(id){selected=id;const n=designs[current].nodes.find(n=>n.id===id);if(!n)return;document.querySelectorAll('[data-node]').forEach(el=>{const active=el.dataset.node===id;el.classList.toggle('active',active);el.setAttribute('aria-pressed',String(active))});byId('node-detail').innerHTML=`<p class="eyebrow">SELECTED STEP / ${esc(statusNames[n.status])}</p><h3>${esc(n.title)}</h3><dl class="detail-grid"><dt>输入 / 来源</dt><dd>${esc(n.input||'设计结构，具体字段待讨论。')}</dd><dt>输出 / 用途</dt><dd>${esc(n.output||n.sub)}</dd><dt>边界</dt><dd>${esc(n.boundary||'尚未定案，不表示正式实现。')}</dd></dl>`}
+function setScale(value){scale=Math.max(.35,Math.min(2,value));const d=designs[current],svg=byId('canvas').querySelector('svg');svg.style.width=d.width*scale+'px';svg.style.height=d.height*scale+'px';byId('zoom-label').textContent=Math.round(scale*100)+'%'}
+function fit(){fitMode=true;const d=designs[current];setScale(Math.min(1,(byId('canvas').clientWidth-(innerWidth<900?24:44))/d.width))}
+function selectDiagram(id,updateHash=true){current=id;const d=designs[id];selected=d.defaultNode;document.querySelectorAll('[role=tab]').forEach(el=>{const active=el.dataset.diagram===id;el.setAttribute('aria-selected',String(active));el.tabIndex=active?0:-1});byId('diagrams').setAttribute('aria-labelledby','tab-'+id);byId('diagram-kicker').textContent=d.kicker;byId('diagram-title').textContent=d.title;byId('diagram-description').textContent=d.description;byId('diagram-badge').textContent=d.badge;byId('canvas').innerHTML=renderSVG(d);byId('canvas').scrollTo(0,0);byId('questions').innerHTML=d.notes.map(n=>'<li>'+esc(n)+'</li>').join('');byId('difference').textContent=d.difference;byId('code-sources').textContent='源码核对入口：'+d.sources.join('；');byId('diagram-source').textContent=JSON.stringify({status:d.badge,nodes:d.nodes,edges:d.edges,participants:d.participants,messages:d.messages},null,2);showNode(selected);fit();if(updateHash)history.replaceState(null,'','#'+id)}
+function notify(text){byId('toast').textContent=text;byId('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>byId('toast').hidden=true,3500)}
+byId('tabs').innerHTML=Object.entries(designs).map(([id,d],i)=>`<button id="tab-${id}" role="tab" aria-controls="diagrams" aria-selected="false" data-diagram="${id}"><b>0${i+1}</b><span>${d.tab}<small>${d.hint}</small></span></button>`).join('');
+byId('tabs').addEventListener('click',e=>{const button=e.target.closest('[data-diagram]');if(button)selectDiagram(button.dataset.diagram)});
+byId('tabs').addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey)return;if(!['ArrowDown','ArrowUp','ArrowRight','ArrowLeft','Home','End'].includes(e.key))return;e.preventDefault();const keys=Object.keys(designs),index=keys.indexOf(current),target=e.key==='Home'?0:e.key==='End'?keys.length-1:(index+(['ArrowDown','ArrowRight'].includes(e.key)?1:-1)+keys.length)%keys.length;selectDiagram(keys[target]);byId('tab-'+keys[target]).focus()});
+byId('canvas').addEventListener('click',e=>{const n=e.target.closest('[data-node]');if(n)showNode(n.dataset.node)});
+byId('canvas').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){const n=e.target.closest('[data-node]');if(n){e.preventDefault();showNode(n.dataset.node)}}});
+byId('zoom-in').addEventListener('click',()=>{fitMode=false;setScale(scale+.15)});byId('zoom-out').addEventListener('click',()=>{fitMode=false;setScale(scale-.15)});byId('fit').addEventListener('click',fit);
+byId('download').addEventListener('click',()=>{const svg=byId('canvas').querySelector('svg').cloneNode(true);svg.style.width='';svg.style.height='';svg.querySelectorAll('.node').forEach(n=>{n.classList.remove('active');n.removeAttribute('tabindex');n.removeAttribute('role');n.removeAttribute('aria-pressed')});const css=document.createElementNS('http://www.w3.org/2000/svg','style');css.textContent=document.querySelector('style').textContent;svg.insertBefore(css,svg.firstChild);const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='旅行规划设计_'+current+'.svg';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);notify('已生成当前图的 SVG 下载。')});
+byId('print').addEventListener('click',()=>window.print());addEventListener('resize',()=>{if(fitMode)fit()});addEventListener('hashchange',()=>{const id=location.hash.slice(1);if(designs[id]&&id!==current)selectDiagram(id)});
+selectDiagram(designs[location.hash.slice(1)]?location.hash.slice(1):'planning',false);
+</script>
+</body>
+</html>

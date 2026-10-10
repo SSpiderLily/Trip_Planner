@@ -267,14 +267,20 @@ class AmapInitializationIntegrationTest(unittest.TestCase):
             class Tool:
                 def __init__(self, **kwargs):
                     self.server_command = kwargs["server_command"]
+                    self.env = kwargs["env"]
                     self._available_tools = [{"name": "maps_text_search"}]
 
-            with patch.object(amap_service, "_amap_mcp_tool", None), \
-                 patch.object(amap_service, "get_settings", return_value=SimpleNamespace(amap_api_key="fake-key")), \
+            with patch.dict(amap_service.os.environ, {"UV_CACHE_DIR": "/private/tmp/amap-cache-test"}), \
+                 patch.object(amap_service, "_amap_mcp_tool", None), \
+                 patch.object(amap_service, "get_settings", return_value=SimpleNamespace(
+                     amap_api_key="fake-key", planner_tool_timeout_seconds=45)), \
                  patch.object(amap_service.shutil, "which", return_value=None), \
                  patch.object(amap_service.Path, "home", return_value=Path(temporary)), \
                  patch.object(amap_service, "MCPTool", Tool):
-                self.assertEqual(amap_service.get_amap_mcp_tool().server_command[0], str(local_uvx))
+                tool = amap_service.get_amap_mcp_tool()
+                self.assertEqual(tool.server_command[0], str(local_uvx))
+                self.assertEqual(tool.env["AMAP_HTTP_TIMEOUT_SECONDS"], "45")
+                self.assertEqual(tool.env["UV_CACHE_DIR"], "/private/tmp/amap-cache-test")
 
             class EmptyTool(Tool):
                 def __init__(self, **kwargs):
@@ -282,7 +288,8 @@ class AmapInitializationIntegrationTest(unittest.TestCase):
                     self._available_tools = []
 
             with patch.object(amap_service, "_amap_mcp_tool", None), \
-                 patch.object(amap_service, "get_settings", return_value=SimpleNamespace(amap_api_key="fake-key")), \
+                 patch.object(amap_service, "get_settings", return_value=SimpleNamespace(
+                     amap_api_key="fake-key", planner_tool_timeout_seconds=45)), \
                  patch.object(amap_service.shutil, "which", return_value=str(local_uvx)), \
                  patch.object(amap_service, "MCPTool", EmptyTool):
                 with self.assertRaisesRegex(RuntimeError, "未发现可用地图工具"):

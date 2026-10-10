@@ -2,7 +2,7 @@
 
 
 def main():
-    from amap_mcp_server import server
+    from vendor import amap_mcp_server_0_1_11 as server
 
     def diagnostic_print(*args, **kwargs):
         # 供应商原始响应可能包含路线等数据，既不写 stdout，也不转存 stderr。

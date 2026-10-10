@@ -35,10 +35,18 @@ def get_amap_mcp_tool() -> MCPTool:
                 raise RuntimeError("未找到 uvx，请安装 uv 并将 uvx 加入 PATH 或放在 ~/.local/bin/uvx")
             # MCP 1.8.1依赖Pydantic内部接口，与2.14不兼容；约束独立uvx环境。
             try:
+                server_env = {
+                    "AMAP_MAPS_API_KEY": settings.amap_api_key,
+                    "AMAP_HTTP_TIMEOUT_SECONDS": str(settings.planner_tool_timeout_seconds),
+                }
+                # uv 支持用环境变量选择缓存目录；透传显式设置以便沙箱和部署环境指定可写位置。
+                if os.environ.get("UV_CACHE_DIR"):
+                    server_env["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
                 tool = MCPTool(name="amap", description="高德地图服务", server_command=[uvx, "--from", "amap-mcp-server==0.1.11",
                                    "--with", "pydantic==2.13.5", "python",
                                    str(Path(__file__).resolve().parents[2] / "scripts" / "amap_stdio.py")],
-                               env={"AMAP_MAPS_API_KEY": settings.amap_api_key}, auto_expand=True)
+                               env=server_env,
+                               auto_expand=True)
             except Exception:
                 # MCPTool currently hides discovery exceptions; never expose exception text that may contain secrets.
                 raise RuntimeError("地图工具初始化失败，请检查 uvx、MCP缓存和网络配置") from None

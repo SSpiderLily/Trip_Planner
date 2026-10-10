@@ -10,6 +10,7 @@ import Home from './views/Home.vue'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    ...(import.meta.env.DEV ? [{ path: '/prototype/result', name: 'TripResultPrototype', component: () => import('./views/TripResultPrototype.vue') }] : []),
     { path: '/observability', name: 'Observability', component: () => import('./views/Observability.vue') },
     {
       path: '/',

@@ -30,7 +30,37 @@ must_visit_requests 只放用户明确要求到访的具体地点（景点或餐
 景点阶段只搜 sightseeing，结合全部偏好、必去需求与天数，每次最多3个精准搜索词。
 住宿餐饮阶段依据已有日程分布搜 lodging 和 meal，推荐商圈/美食街/住宿区域，不强制酒店。
 用户已填住处则优先用该住处原文搜索，不能换成其他酒店。支持阶段最多3个查询。
-查询失败可在剩余额度内换搜索词；候选足够时 searches=[]。不得请求超出额度的调用。'''
+查询失败可在剩余额度内换搜索词；候选足够时 searches=[]。不得请求超出额度的调用。
+
+以下仅为结构示例。城市、日期、备注、需求ID和搜索词须按本次输入填写，不得照抄示例。
+示例展示可选字段；可省略有默认值的字段，但不能省略用户条件或丢失用户备注。
+首次搜集（此例用户备注为“必须去示例公园”，未填预算和到离地点）：
+```json
+{
+  "conditions": {
+    "city": "示例城市", "start_date": "2030-05-01", "end_date": "2030-05-01", "travel_days": 1,
+    "preferences": [], "transportation": "transit", "daily_time_budget_minutes": 600,
+    "must_visit_requests": [{"requirement_id": "r1", "text": "示例公园"}],
+    "budget_per_adult": null, "budget_per_person": null, "remarks": "必须去示例公园",
+    "interpretation_notes": [], "reminder_only_requests": [],
+    "arrival_at": "2030-05-01T09:00:00+08:00", "departure_at": "2030-05-01T19:00:00+08:00",
+    "arrival_place_id": null, "departure_place_id": null, "arrival_place": null, "departure_place": null
+  },
+  "searches": [{"keywords": "示例公园", "category": "sightseeing"}]
+}
+```
+已有条件，补充景点查询（conditions=null，不重复解释用户意图）：
+```json
+{"conditions": null, "searches": [{"keywords": "另一处景点", "category": "sightseeing"}]}
+```
+已有条件，住宿餐饮阶段查询（只能依据当前日程和用户住处选择搜索词）：
+```json
+{"conditions": null, "searches": [{"keywords": "顺路用餐区域", "category": "meal"}, {"keywords": "附近住宿区域", "category": "lodging"}]}
+```
+候选足够，停止查询（空列表不是null）：
+```json
+{"conditions": null, "searches": []}
+```'''
 
 PLAN_PROMPT = '''你是旅行行程安排专家。只输出给定 schema 的完整 JSON。
 使用已核实候选，place 必须携带 source_id 及完整名称、地址、经纬度；不可创造候选以外的地点。
@@ -41,16 +71,98 @@ sightseeing 游览，meal 用餐，free_time 自由活动；活动按实际先�
 第一次 stage=layout 时先组合景点形成日程分布，住宿与餐饮可以暂缺；stage=final 时补齐已有候选中的住处和餐饮。
 候选不足用 free_time 保留自由活动，不重复景点填满。自由活动 place=null。
 已核实必去景点尽量全部保留，并用 requirement_ids 关联已提供的需求；无法核实的必去不编造地点。
-用户住宿 source=user，user_input 原文；无法唯一核实时 place=null。否则推荐一个区域作为全程基点，source=recommended，说明区域与理由；最终版从已核实住宿候选中选择 place 作为区域参考点。当天往返且没有住宿候选时可以留空。
-只参考地图已查到的开放时间；营业时间、预约条件未知时不声称开放或可预约。价格只能使用高德查询到的真实数值，查不到时留空，不估价。
+用户住宿 source=user，user_input 原文；无法唯一核实时 place=null。否则推荐一个区域作为全程基点，source=recommended，说明区域与理由；最终版从已核实住宿候选中选择 place 作为区域参考点。当天往返且没有住宿候选时仍保留 lodging_base 对象，其区域、理由和 place 可以为null。
+只参考地图已查到的开放时间；营业时间、预约条件未知时不声称开放或可预约。费用数值由程序从高德查询结果填入；模型只输出下述未知费用结构，不估价。
 同一景点不重复；每天交通游玩加两餐和休息总时长以600分钟为上限，内容不必排满。
 地点选择、室内外安排参考给定的日期天气。开放/预约条件未知时不得声称确定开放。
-费用不允许估价，模型不得生成任何价格数值。只给活动参考游玩时长，交通与合计由程序查询和计算。description 用一句话说明当天安排依据。
-预算不足优先调整普通景点与餐饮，保留必去；所有备注均需阅读，程序不会为你理解开放意图。'''
+费用不允许估价，模型不得生成任何价格数值。lodging_base.reference_cost 必须是对象，未知时 amount=null、status=missing；不能将整个对象写成null。
+活动 estimated_cost 必须是对象，未知时 amount=null、basis=未知；不能将整个对象写成null。活动 reference_cost 可以为null，与住宿 reference_cost 的规则不同。
+只给活动参考游玩时长，交通与合计由程序查询和计算。description 用一句话说明当天安排依据。
+预算不足优先调整普通景点与餐饮，保留必去；所有备注均需阅读，程序不会为你理解开放意图。
+
+以下是完整行程草稿的结构示例，修改和结构修复也返回此结构，不返回局部补丁或最终接口的交通、天气、费用汇总。
+示例地点、ID、地址和坐标均为虚构占位；实际 place 必须复制本次 candidates 中已核实地点的字段，requirement_ids 必须来自本次 conditions。
+日期、活动数量、时段、区域和时长按本次条件安排，不照抄示例。可省略有默认值的字段；若显式输出，仍须遵守其类型。[]表示空列表，null只用于schema允许为空的字段。
+stage=layout 初步排程（未选住宿，先排景点）：
+```json
+{
+  "lodging_base": {
+    "source": "recommended", "user_input": null, "area_name": null, "recommendation_reason": null, "place": null,
+    "reference_cost": {"amount": null, "currency": "CNY", "unit": null, "source": null, "status": "missing"}
+  },
+  "days": [{
+    "date": "2030-05-01", "description": "先围绕已核实必去景点安排",
+    "activities": [{
+      "activity_id": "a1", "type": "sightseeing", "period": "morning", "title": "游览示例公园",
+      "description": "优先安排必去景点", "duration_minutes": 90,
+      "place": {"source": "amap", "source_id": "example_sight", "name": "示例公园", "address": "示例地址", "longitude": 120.0, "latitude": 30.0},
+      "estimated_cost": {"amount": null, "basis": "未知"}, "reference_cost": null,
+      "requirement_ids": ["r1"], "opening_hours": null, "photos": []
+    }]
+  }]
+}
+```
+stage=final 完整排程（示例展示游览、午餐、自由活动和晚餐，数量按实际条件决定）：
+```json
+{
+  "lodging_base": {
+    "source": "recommended", "user_input": null, "area_name": "示例住宿区域", "recommendation_reason": "靠近已选活动",
+    "place": {"source": "amap", "source_id": "example_lodging", "name": "示例住宿区域参考点", "address": "示例住宿地址", "longitude": 120.0, "latitude": 30.0, "is_area_reference": true},
+    "reference_cost": {"amount": null, "currency": "CNY", "unit": null, "source": null, "status": "missing"}
+  },
+  "days": [{
+    "date": "2030-05-01", "description": "围绕必去景点安排顺路用餐并预留休息",
+    "activities": [
+      {
+        "activity_id": "a1", "type": "sightseeing", "period": "morning", "title": "游览示例公园", "description": "保留必去景点", "duration_minutes": 90,
+        "place": {"source": "amap", "source_id": "example_sight", "name": "示例公园", "address": "示例地址", "longitude": 120.0, "latitude": 30.0},
+        "estimated_cost": {"amount": null, "basis": "未知"}, "reference_cost": null, "requirement_ids": ["r1"], "opening_hours": null, "photos": []
+      },
+      {
+        "activity_id": "a2", "type": "meal", "period": "lunch", "title": "顺路午餐", "description": "在附近用餐区域选择当地餐饮", "duration_minutes": 60,
+        "place": {"source": "amap", "source_id": "example_meal", "name": "示例用餐区域参考点", "address": "示例用餐地址", "longitude": 120.01, "latitude": 30.01, "is_area_reference": true},
+        "estimated_cost": {"amount": null, "basis": "未知"}, "reference_cost": null, "requirement_ids": [], "opening_hours": null, "photos": []
+      },
+      {
+        "activity_id": "a3", "type": "free_time", "period": "afternoon", "title": "附近自由活动", "description": "在上一地点附近自行安排", "duration_minutes": 30,
+        "place": null, "estimated_cost": {"amount": null, "basis": "未知"}, "reference_cost": null, "requirement_ids": [], "opening_hours": null, "photos": []
+      },
+      {
+        "activity_id": "a4", "type": "meal", "period": "dinner", "title": "附近晚餐", "description": "在附近用餐区域选择晚餐", "duration_minutes": 60,
+        "place": {"source": "amap", "source_id": "example_meal", "name": "示例用餐区域参考点", "address": "示例用餐地址", "longitude": 120.01, "latitude": 30.01, "is_area_reference": true},
+        "estimated_cost": {"amount": null, "basis": "未知"}, "reference_cost": null, "requirement_ids": [], "opening_hours": null, "photos": []
+      }
+    ]
+  }]
+}
+```
+以下仅为可替换的子结构示例，输出时必须嵌入完整 lodging_base、days 草稿，不能单独返回片段。
+用户住处无法唯一定位（保留用户原文，不能换酒店）：
+```json
+{"source": "user", "user_input": "用户填写的住处原文", "area_name": null, "recommendation_reason": null, "place": null, "reference_cost": {"amount": null, "currency": "CNY", "unit": null, "source": null, "status": "missing"}}
+```
+晚到或早离没有活动窗口（保留当天，activities为空列表，不为null）：
+```json
+{"date": "2030-05-01", "description": "可用时间不足，当天不安排活动", "activities": []}
+```'''
 
 REVISE_PROMPT = PLAN_PROMPT + '''\n你是修改专家：依据 problems 修改完整行程，仅使用已有候选，不能请求新的地点查询。
 用户住处固定，推荐区域可从已有候选调整。保留已核实必去景点，尽量保持未改变活动的 ID。
-只修改必要部分，解决超时、重复、超预算等问题；不要引入新的已知冲突。'''
+只修改必要部分，解决超时、重复、超预算等问题；不要引入新的已知冲突。
+输出沿用上面的完整行程草稿示例：保留 lodging_base 和全部日期的 days，返回修改后的完整 activities，不只返回被修改的活动。'''
+
+REPAIR_PROMPT = '''前次输出结构校验失败，请严格按 schema 和系统提示词中的完整行程草稿示例返回完整 JSON。
+修复字段类型并保留有效安排，不通过删除活动、日期或用户条件绕过校验。住宿 reference_cost 和活动 estimated_cost 不能为null。
+未知费用的正确字段值如下；嵌入完整草稿，不单独返回这些片段。
+lodging_base.reference_cost 的值：
+```json
+{"amount": null, "currency": "CNY", "unit": null, "source": null, "status": "missing"}
+```
+每个活动 estimated_cost 的值：
+```json
+{"amount": null, "basis": "未知"}
+```
+活动 reference_cost 允许为null。错误类型：'''
 
 
 def parse_json(text):
@@ -268,7 +380,7 @@ class RouteTripPlanner:
                 raise
             state['repair_used'] = True
             # 一次结构修复，不重新搜索，不把第三方异常或模型响应拼入日志。
-            data['repair'] = '前次输出结构校验失败，请严格按 schema 返回完整 JSON；错误类型：' + type(exc).__name__
+            data['repair'] = REPAIR_PROMPT + type(exc).__name__
             return self.model(self.planner, 'repair_' + stage, data, Draft)
 
     def ground(self, place, state):
