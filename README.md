@@ -424,6 +424,8 @@ Production deployment test.
 `DESTINATION_CANDIDATE_DB_PATH`默认`backend/data/destination_candidates.sqlite3`，必须与预览/观测库分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。
 
 
+每日安排初版与单日修订的结构校验会在观测中保留安全字段路径、错误类型及固定修复指引；超出8条时保留总数和截断标记，不保存完整模型回答。格式修复仍最多一次，不替代按日业务补查。验收见[安全校验诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-plan-validation-diagnostics)。
+
 v4中已查到有效天气但模型漏写出行建议时，会保留预报并显示建议尚未生成，不因此让整个规划失败；真实地点引用错误仍会拒绝。真实失败与修复验证见[天气建议缺失](docs/changes/CHG-003-planning-performance-observability.md#v4-weather-advice-fallback)。
 
 
