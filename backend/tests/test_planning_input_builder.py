@@ -80,6 +80,28 @@ def slot_map(day):
 
 
 class PlanningInputBuilderTests(unittest.TestCase):
+    def test_request_return_buffer_zero_is_distinct_from_default(self):
+        default_request = make_request(
+            "2026-10-10T09:00:00+08:00", "2026-10-12T19:00:00+08:00",
+        )
+        explicit_request = default_request.model_copy(update={"explicit_return_buffer_s": 0})
+
+        defaulted = build_planning_input(PlanningInputBuildRequest(
+            request=default_request,
+            requirements=make_summary(default_request),
+            rules=make_rules(),
+        ))
+        explicit_zero = build_planning_input(PlanningInputBuildRequest(
+            request=explicit_request,
+            requirements=make_summary(explicit_request),
+            rules=make_rules(),
+        ))
+
+        self.assertEqual(defaulted.boundary_facts.effective_return_buffer_s, 3600)
+        self.assertEqual(defaulted.boundary_facts.return_buffer_source, "default")
+        self.assertEqual(explicit_zero.boundary_facts.effective_return_buffer_s, 0)
+        self.assertEqual(explicit_zero.boundary_facts.return_buffer_source, "explicit_user")
+
     def test_shanghai_three_day_reference(self):
         result = make_input()
 

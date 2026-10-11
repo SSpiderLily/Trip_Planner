@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import time
+from threading import Event
 from uuid import uuid4
 
 from pydantic import ValidationError, model_validator
@@ -51,6 +53,7 @@ SYSTEM_PROMPT = """你是旅行规划的主智能体，当前只整理用户需�
 - core_goals 只概括用户明确表达的旅行体验。unknowns 记录对后续规划有影响但未提供的信息。assumptions 只记录确实需要且明确标出的工作假设；没有依据时留空。
 - 不得捏造人数、机场/车站、酒店、预算金额或硬性要求。预算是全程预算；人数未指定时必须保持未指定。
 - TripRequest 是只读原始记录。不要输出或改写城市、到离时间、预算和备注；后端会原样保留这些字段，并绑定 request_id 与 requirements_id。
+- explicit_return_buffer_s 是用户表单中的秒数约束；不要推测、改写或转换它。后端原样保留，并将显式值（包括0）交给 F02；未填写时才使用规则默认值。
 
 理解示例：
 - “必须去外滩”是 must_visit，引用原句；“不要去动物园”是 must_avoid，引用原句。
@@ -88,10 +91,23 @@ class RequirementInterpreter:
         self.last_usage = None
         self.model_calls = 0
 
-    def interpret(self, request: TripRequest) -> RequirementSummary:
+    def interpret(
+        self,
+        request: TripRequest,
+        *,
+        deadline_monotonic: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> RequirementSummary:
         self._reset_usage()
         if not isinstance(request, TripRequest):
             raise TypeError("request 必须是 planning_v4.TripRequest")
+        local_deadline = time.monotonic() + self.timeout_seconds
+        if deadline_monotonic is not None:
+            if (isinstance(deadline_monotonic, bool)
+                    or not isinstance(deadline_monotonic, (int, float))
+                    or not math.isfinite(deadline_monotonic)):
+                raise ValueError("deadline_monotonic 必须是有限时间戳")
+            local_deadline = min(local_deadline, float(deadline_monotonic))
 
         if self.llm is not None:
             llm = self.llm
@@ -113,7 +129,19 @@ class RequirementInterpreter:
         with span("agent.requirement_interpretation", "agent", safe_context) as agent_record:
             messages = list(base_messages)
             for attempt in range(MAX_FORMAT_REPAIRS + 1):
-                draft, response_or_repair = self._invoke_and_validate(llm, messages, attempt + 1)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise PlanningError(
+                        "REQUIREMENT_MODEL_CANCELLED", "需求整理已取消", step="requirement_model_call",
+                    )
+                remaining = local_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PlanningError(
+                        "REQUIREMENT_MODEL_TIMEOUT", "需求整理模型调用超时", step="requirement_model_call",
+                    )
+                draft, response_or_repair = self._invoke_and_validate(
+                    llm, messages, attempt + 1,
+                    request_timeout=min(self.timeout_seconds, remaining),
+                )
                 if draft is None:
                     messages = response_or_repair
                     continue
@@ -151,12 +179,12 @@ class RequirementInterpreter:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
-    def _invoke_and_validate(self, llm, messages, attempt: int):
+    def _invoke_and_validate(self, llm, messages, attempt: int, *, request_timeout: float):
         model_name = getattr(llm, "model", None)
-        safe_context = {"model": model_name, "attempt": attempt, "timeout_seconds": self.timeout_seconds}
+        safe_context = {"model": model_name, "attempt": attempt, "timeout_seconds": request_timeout}
         with span("llm.requirement_interpretation", "llm", safe_context) as llm_record:
             try:
-                response, usage = self._invoke(llm, messages)
+                response, usage = self._invoke(llm, messages, request_timeout=request_timeout)
                 self.model_calls += 1
                 llm_record.usage = token_usage(usage)
                 self._accumulate_usage(usage)
@@ -195,7 +223,7 @@ class RequirementInterpreter:
             llm_record.output = {"status": "valid", "hard_requirement_count": len(draft.hard_requirements)}
             return draft, response
 
-    def _invoke(self, llm, messages):
+    def _invoke(self, llm, messages, *, request_timeout: float):
         invoke_with_usage = getattr(llm, "invoke_with_usage", None)
         if not callable(invoke_with_usage):
             raise TypeError("注入的 LLM 必须提供 invoke_with_usage")
@@ -203,7 +231,7 @@ class RequirementInterpreter:
             messages,
             temperature=0,
             max_tokens=MAX_MODEL_TOKENS,
-            request_timeout=self.timeout_seconds,
+            request_timeout=request_timeout,
             max_retries=0,
         )
 

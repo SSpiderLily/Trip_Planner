@@ -30,6 +30,11 @@ from app.models.planning_v4.decision import (
     TaskSpec,
 )
 from app.models.planning_v4.facts import FactStore, MapCoordinate, PlaceFact
+from app.models.planning_v4.dispatch_scope import (
+    DispatchScope,
+    derived_dispatch_anchors,
+    dispatch_scope_supports_area,
+)
 from app.models.planning_v4.input import PlanningInput, validate_requirement_sources
 from app.models.planning_v4.plan import AreaHint
 from app.models.planning_v4.tasks import CandidateRef, Subtask, TaskDependency, TaskResult, TaskScope
@@ -55,6 +60,7 @@ _SYSTEM_PROMPT = """你是旅行规划的主智能体，只决定继续收集信
 - task.day_ids 只能使用 role_time_scopes[role].allowed_day_ids；task.slot_ids 只能使用 role_time_scopes[role].available_slots 中的 slot_id，且 slot 的 day_id 必须同时出现在 task.day_ids 中。role_time_scopes 是任务日期/时段的权威投影；完整 planning_input 中出现的其他时段不能被改角色复用。
 - attractions 只能绑定可用的 morning、afternoon、evening 游览时段；dining 只能绑定可用的 breakfast、lunch、dinner 餐次；lodging 必须令 slot_ids=[] 且不得绑定 meal_areas。skipped 时段不在任何角色的 available_slots 中。conditional 时段可以使用，但必须遵守输入中的条件说明。
 - 一个餐饮任务必须为每个指定餐次提供 meal_areas：餐次绑定一个 area_ref 和该来源化区域内的已核实 anchor_poi_id。没有真实位置事实时，先派发可独立执行的景点任务，不能编造区域或锚点。
+- 在定向补查中，同一目标日、当前 scope 内景点子任务新返回且已验证的候选地点，也可作为下一批区域锚点；不能引用其他日期或其他角色取得的地点。
 - 必吃指定餐馆要在 must_eat_restaurants 中给出原文中的明确馆名和 requirement_id；名称必须来自该硬性要求的原文。
 - 推荐住宿时使用有来源的区域。用户填写了住宿时，优先核实并使用该原文，不要另换住宿。必去景点和指定餐馆要引用对应 requirement_id。
 - 候选目标数由后端根据已验证的任务范围计算；不要输出 candidate_target。景点任务有 must_visit requirement_ids 时按必去要求数计算；普通景点按每个可用游览时段2个候选计算。餐饮按餐次、命名餐馆要求数和至少1个计算，住宿为1个。cost、营业时间和部分天气字段可以未知，不能要求它们齐全后才继续或 plan。
@@ -81,6 +87,7 @@ class MasterDecisionContext(ContractModel):
     weather_attempted_dates: tuple[date, ...] = ()
     endpoint_attempted: tuple[Literal["arrival", "departure"], ...] = ()
     direct_query_summaries: tuple["DirectQuerySummary", ...] = ()
+    dispatch_scope: DispatchScope | None = None
 
     @model_validator(mode="after")
     def validate_request_identity(self):
@@ -201,6 +208,7 @@ class MasterDecider:
         started = time.monotonic()
         self._validate_context_identity(context)
         validated = self._validate_context_data(context)
+        self._validate_dispatch_scope_context(context, validated)
         self._raise_if_cancelled(cancel_event)
         messages = self._messages(context, validated)
         model_calls = 0
@@ -408,6 +416,15 @@ class MasterDecider:
 
     def _messages(self, context: MasterDecisionContext, validated: _ValidatedContext):
         visible_place_fact_ids = self._model_visible_place_fact_ids(context, validated)
+        visible_task_ids = self._model_visible_task_ids(context)
+        query_sources = None
+        if context.dispatch_scope is not None:
+            query_sources = {
+                source_id
+                for place in context.fact_store.places
+                if place.fact_id in visible_place_fact_ids
+                for source_id in (*place.source_refs, *place.field_sources.values())
+            }
         payload = {
             "identity": {
                 "request_id": context.request_id,
@@ -420,17 +437,49 @@ class MasterDecider:
             "planning_input": context.planning_input.model_dump(mode="json"),
             "role_time_scopes": self._role_time_scopes(context),
             "backend_query_capabilities": self._backend_query_capabilities(context),
-            "fact_store": self._fact_store_prompt_data(context.fact_store, visible_place_fact_ids),
-            "candidates": [item.model_dump(mode="json") for item in validated.candidate_refs],
-            "area_hints": [item.model_dump(mode="json") for item in context.area_hints],
-            "existing_tasks": [item.model_dump(mode="json") for item in context.existing_tasks],
-            "task_results": [self._task_result_prompt_data(item) for item in context.task_results],
+            "fact_store": self._fact_store_prompt_data(
+                context.fact_store,
+                visible_place_fact_ids,
+                include_nonplace_facts=context.dispatch_scope is None,
+            ),
+            "candidates": [
+                item.model_dump(mode="json")
+                for item in self._model_visible_candidate_refs(context, validated)
+            ],
+            "area_hints": [
+                item.model_dump(mode="json")
+                for item in self._model_visible_area_hints(context)
+            ],
+            "existing_tasks": [
+                item.model_dump(mode="json") for item in context.existing_tasks
+                if item.task_id in visible_task_ids
+            ],
+            "task_results": [
+                self._task_result_prompt_data(item) for item in context.task_results
+                if item.task_id in visible_task_ids
+            ],
             "backend_query_history": {
                 "weather_attempted_dates": [item.isoformat() for item in context.weather_attempted_dates],
                 "endpoint_attempted": list(context.endpoint_attempted),
                 "safe_result_summaries": [item.model_dump(mode="json") for item in context.direct_query_summaries],
-                "executed_tool_queries": self._query_history_prompt_data(context.fact_store),
+                "executed_tool_queries": self._query_history_prompt_data(
+                    context.fact_store, source_ids=query_sources,
+                ),
             },
+            "targeted_collection_scope": (
+                None if context.dispatch_scope is None else {
+                    "targets": [item.model_dump(mode="json") for item in context.dispatch_scope.targets],
+                    "existing_activities": [
+                        item.model_dump(mode="json")
+                        for item in context.dispatch_scope.existing_activities
+                    ],
+                    "verified_anchors": [
+                        item.model_dump(mode="json")
+                        for item in MasterDecider._dispatch_scope_anchors(context)
+                    ],
+                    "instruction": "只为这些目标缺项派发，不查询天气或到离端点，不扩展到其他日期、时段或硬性要求。",
+                }
+            ),
             "decision_json_schema": self._decision_schema(context, visible_place_fact_ids),
             "valid_output_examples": self._decision_examples(context),
             "decision_rules": {
@@ -454,6 +503,11 @@ class MasterDecider:
                 "collection_priority": "优先覆盖尚未尝试且依赖已就绪的必需类别；已有来源化区域依据时，可并行派发互不依赖的餐饮和住宿任务，再根据结果补充已尝试类别。模型仍负责决定具体任务，不要求为了类别覆盖而派发不可执行任务。",
                 "dining_requirement_ids": "只列出有原文指定餐馆名且在 must_eat_restaurants 中完整绑定的 must_include 要求；笼统饮食要求不列入。",
                 "plan_fields": ["action", "reason", "missing_information"],
+                "targeted_collection": (
+                    "当前是目标缺项的定向补查。角色、日期、时段和硬性要求必须属于 targeted_collection_scope.targets；"
+                    "areas 只能使用目标范围内已有区域，或依据 verified_anchors 中真实事实创建的区域。"
+                    if context.dispatch_scope is not None else None
+                ),
             },
         }
         return [
@@ -475,14 +529,12 @@ class MasterDecider:
             fact for fact in context.fact_store.places if fact.fact_id in visible_place_fact_ids
         )
         visible_fact_ids = set(visible_place_fact_ids)
-        visible_fact_ids.update(fact.fact_id for fact in context.fact_store.weather)
-        visible_fact_ids.update(fact.fact_id for fact in context.fact_store.routes)
+        if context.dispatch_scope is None:
+            visible_fact_ids.update(fact.fact_id for fact in context.fact_store.weather)
+            visible_fact_ids.update(fact.fact_id for fact in context.fact_store.routes)
         visible_candidate_poi_ids = {
             candidate.poi_id
-            for candidate in (
-                *context.candidates,
-                *(candidate for result in context.task_results for candidate in result.candidates),
-            )
+            for candidate in MasterDecider._model_visible_candidate_refs(context, None)
         }
         eligible_area_poi_ids = {
             fact.poi_id for fact in visible_places
@@ -492,6 +544,15 @@ class MasterDecider:
             fact.fact_id for fact in visible_places
             if fact.location is not None and _city_matches(request.city, fact.city)
         }
+        if context.dispatch_scope is not None:
+            scoped_anchor_fact_ids = MasterDecider._dispatch_scope_anchor_fact_ids(context)
+            eligible_area_fact_ids.intersection_update(scoped_anchor_fact_ids)
+            eligible_area_poi_ids = {
+                fact.poi_id for fact in visible_places
+                if fact.fact_id in scoped_anchor_fact_ids
+                and fact.location is not None
+                and _city_matches(request.city, fact.city)
+            }
         has_area_basis = any(
             fact.location is not None and _city_matches(request.city, fact.city)
             for fact in visible_places
@@ -501,6 +562,8 @@ class MasterDecider:
             roles.append("dining")
         if has_area_basis or (request.lodging_query and request.lodging_query.strip()):
             roles.append("lodging")
+        if context.dispatch_scope is not None:
+            roles = sorted({target.role for target in context.dispatch_scope.targets})
         schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"] = roles
         task_schema = schema["$defs"]["TaskSpec"]
         task_schema["properties"].pop("candidate_target", None)
@@ -512,6 +575,8 @@ class MasterDecider:
                 task_schema.pop("required")
         MasterDecider._set_schema_array_enum(task_schema["properties"]["known_fact_ids"], visible_fact_ids)
         MasterDecider._set_schema_array_enum(task_schema["properties"]["excluded_poi_ids"], visible_candidate_poi_ids)
+        if context.dispatch_scope is not None:
+            MasterDecider._restrict_task_schema_to_dispatch_scope(task_schema, context.dispatch_scope)
         area_schema = schema["$defs"]["AreaSpec"]["properties"]
         MasterDecider._set_schema_array_enum(area_schema["basis_fact_ids"], eligible_area_fact_ids)
         MasterDecider._set_schema_array_enum(area_schema["anchor_poi_ids"], eligible_area_poi_ids)
@@ -520,10 +585,10 @@ class MasterDecider:
         capabilities = MasterDecider._backend_query_capabilities(context)
         properties = schema["$defs"]["DelegatePayload"]["properties"]
         for field in ("verify_arrival_place", "verify_departure_place"):
-            if not capabilities[field]["allowed"]:
+            if context.dispatch_scope is not None or not capabilities[field]["allowed"]:
                 properties[field]["const"] = False
         dates = capabilities["allowed_weather_dates"]
-        if dates:
+        if dates and context.dispatch_scope is None:
             properties["weather_dates"]["items"]["enum"] = dates
         else:
             properties["weather_dates"]["maxItems"] = 0
@@ -534,8 +599,193 @@ class MasterDecider:
         property_schema["items"]["enum"] = sorted(values)
 
     @staticmethod
+    def _restrict_task_schema_to_dispatch_scope(task_schema: dict[str, Any], scope: DispatchScope) -> None:
+        targets_by_role = {
+            role: tuple(target for target in scope.targets if target.role == role)
+            for role in _ROLE_PERIODS
+        }
+        properties = task_schema["properties"]
+
+        def values_for(role: str, field: str) -> list[str]:
+            if field == "day_ids":
+                values = {target.day_id for target in targets_by_role[role]}
+            else:
+                values = {
+                    value
+                    for target in targets_by_role[role]
+                    for value in getattr(target, field)
+                }
+            return sorted(values)
+
+        for field in ("day_ids", "slot_ids", "requirement_ids"):
+            MasterDecider._set_schema_array_enum(
+                properties[field],
+                {
+                    value
+                    for role in _ROLE_PERIODS
+                    for value in values_for(role, field)
+                },
+            )
+        role_conditions = []
+        for role, targets in targets_by_role.items():
+            if not targets:
+                continue
+            role_conditions.append({
+                "if": {"properties": {"role": {"const": role}}, "required": ["role"]},
+                "then": {"properties": {
+                    field: {"items": {"enum": values_for(role, field)}}
+                    for field in ("day_ids", "slot_ids", "requirement_ids")
+                }},
+            })
+        task_schema["allOf"] = [*task_schema.get("allOf", []), *role_conditions]
+
+    @staticmethod
+    def _dispatch_scope_anchor_fact_ids(context: MasterDecisionContext) -> set[str]:
+        scope = context.dispatch_scope
+        if scope is None:
+            return set()
+        fact_ids = {item.place_fact_id for item in MasterDecider._dispatch_scope_anchors(context)}
+        target_area_ids = {
+            area_id for target in scope.targets for area_id in target.area_hint_ids
+        }
+        for area in context.area_hints:
+            if area.area_hint_id in target_area_ids:
+                fact_ids.update(area.basis_fact_ids)
+        return fact_ids
+
+    @staticmethod
+    def _dispatch_scope_anchor_poi_ids(context: MasterDecisionContext) -> set[str]:
+        scope = context.dispatch_scope
+        if scope is None:
+            return set()
+        poi_ids = {item.poi_id for item in MasterDecider._dispatch_scope_anchors(context)}
+        target_area_ids = {
+            area_id for target in scope.targets for area_id in target.area_hint_ids
+        }
+        for area in context.area_hints:
+            if area.area_hint_id in target_area_ids:
+                poi_ids.update(area.anchor_poi_ids)
+        return poi_ids
+
+    @staticmethod
+    def _dispatch_scope_anchors(context: MasterDecisionContext):
+        scope = context.dispatch_scope
+        if scope is None:
+            return ()
+        merged = {
+            (item.day_id, item.place_fact_id): item
+            for item in scope.anchors
+        }
+        for item in derived_dispatch_anchors(
+            scope,
+            context.planning_input,
+            context.fact_store,
+            context.candidates,
+            context.existing_tasks,
+            context.task_results,
+            run_id=context.run_id,
+            context_revision=context.context_revision,
+            base_revision=context.base_revision,
+        ):
+            merged.setdefault((item.day_id, item.place_fact_id), item)
+        return tuple(merged[key] for key in sorted(merged))
+
+    @staticmethod
+    def _dispatch_scope_area_hint_ids(context: MasterDecisionContext) -> set[str]:
+        scope = context.dispatch_scope
+        if scope is None:
+            return {item.area_hint_id for item in context.area_hints}
+        allowed = {area_id for target in scope.targets for area_id in target.area_hint_ids}
+        anchors = MasterDecider._dispatch_scope_anchors(context)
+        for area in context.area_hints:
+            if dispatch_scope_supports_area(
+                scope, anchors, area.basis_fact_ids, area.anchor_poi_ids,
+            ):
+                allowed.add(area.area_hint_id)
+        return allowed
+
+    @staticmethod
+    def _model_visible_task_ids(context: MasterDecisionContext) -> set[str]:
+        scope = context.dispatch_scope
+        if scope is None:
+            return {item.task_id for item in context.existing_tasks}
+        visible: set[str] = set()
+        for task in context.existing_tasks:
+            targets = tuple(target for target in scope.targets if target.role == task.role)
+            if not targets or not set(task.scope.day_ids).issubset({item.day_id for item in targets}):
+                continue
+            if not set(task.scope.slot_ids).issubset({slot for item in targets for slot in item.slot_ids}):
+                continue
+            if not set(task.requirement_ids).issubset({req for item in targets for req in item.requirement_ids}):
+                continue
+            has_target = any(
+                target.day_id in task.scope.day_ids
+                and (
+                    set(target.slot_ids) & set(task.scope.slot_ids)
+                    or set(target.requirement_ids) & set(task.requirement_ids)
+                    or target.role == "lodging"
+                )
+                for target in targets
+            )
+            if has_target:
+                visible.add(task.task_id)
+        return visible
+
+    @staticmethod
+    def _model_visible_candidate_refs(
+        context: MasterDecisionContext,
+        validated: _ValidatedContext | None,
+    ) -> tuple[CandidateRef, ...]:
+        if validated is None:
+            candidate_by_id = {item.candidate_id: item for item in context.candidates}
+            for result in context.task_results:
+                candidate_by_id.update((item.candidate_id, item) for item in result.candidates)
+            candidates = tuple(candidate_by_id.values())
+        else:
+            candidates = validated.candidate_refs
+        scope = context.dispatch_scope
+        if scope is None:
+            return candidates
+        target_candidate_ids = {
+            candidate_id for target in scope.targets for candidate_id in target.candidate_ids
+        }
+        visible_task_ids = MasterDecider._model_visible_task_ids(context)
+        for result in context.task_results:
+            if result.task_id in visible_task_ids:
+                target_candidate_ids.update(item.candidate_id for item in result.candidates)
+        anchor_poi_ids = MasterDecider._dispatch_scope_anchor_poi_ids(context)
+        return tuple(
+            item for item in candidates
+            if item.candidate_id in target_candidate_ids or item.poi_id in anchor_poi_ids
+        )
+
+    @staticmethod
+    def _model_visible_area_hints(context: MasterDecisionContext) -> tuple[AreaHint, ...]:
+        if context.dispatch_scope is None:
+            return context.area_hints
+        allowed = MasterDecider._dispatch_scope_area_hint_ids(context)
+        return tuple(item for item in context.area_hints if item.area_hint_id in allowed)
+
+    @staticmethod
     def _backend_query_capabilities(context: MasterDecisionContext) -> dict[str, Any]:
         request = context.planning_input.request
+        if context.dispatch_scope is not None:
+            return {
+                "verify_arrival_place": {
+                    "allowed": False,
+                    "user_query": request.arrival_place_query,
+                    "already_attempted": False,
+                },
+                "verify_departure_place": {
+                    "allowed": False,
+                    "user_query": request.departure_place_query,
+                    "already_attempted": False,
+                },
+                "allowed_weather_dates": [],
+                "weather_attempted_dates": [
+                    item.isoformat() for item in context.weather_attempted_dates
+                ],
+            }
         attempted_endpoints = set(context.endpoint_attempted)
         attempted_weather = set(context.weather_attempted_dates)
         covered = {
@@ -583,6 +833,30 @@ class MasterDecider:
                             "period": slot.period,
                             "eligibility": slot.eligibility,
                         })
+        if context.dispatch_scope is not None:
+            targets_by_role: dict[str, list[Any]] = {role: [] for role in _ROLE_PERIODS}
+            for target in context.dispatch_scope.targets:
+                targets_by_role[target.role].append(target)
+            allowed_days_by_role: dict[str, list[str]] = {}
+            for role in _ROLE_PERIODS:
+                allowed_days = {target.day_id for target in targets_by_role[role]}
+                allowed_slots = {
+                    slot_id for target in targets_by_role[role] for slot_id in target.slot_ids
+                }
+                slots_by_role[role] = [
+                    item for item in slots_by_role[role]
+                    if item["day_id"] in allowed_days and item["slot_id"] in allowed_slots
+                ]
+                allowed_days_by_role[role] = [
+                    day.day_id for day in context.planning_input.days if day.day_id in allowed_days
+                ]
+            return {
+                role: {
+                    "allowed_day_ids": allowed_days_by_role[role],
+                    "available_slots": slots_by_role[role],
+                }
+                for role in _ROLE_PERIODS
+            }
         return {
             role: {
                 "allowed_day_ids": list(allowed_day_ids),
@@ -594,6 +868,13 @@ class MasterDecider:
     @staticmethod
     def _decision_examples(context: MasterDecisionContext) -> list[dict[str, Any]]:
         """按当前快照给出可通过结构及语义校验的最小输出示例。"""
+        if context.dispatch_scope is not None:
+            # 全局示例会引用目标范围之外的日期和时段；定向补查仅展示安全的收集终止结构。
+            return [PlanPayload(
+                action="plan",
+                reason="当前目标范围没有可执行的新增查询时，保留缺项并结束本轮补查。",
+                missing_information=[],
+            ).model_dump(mode="json")]
         examples: list[dict[str, Any]] = [
             PlanPayload(
                 action="plan",
@@ -657,14 +938,24 @@ class MasterDecider:
         validated: _ValidatedContext,
     ) -> set[str]:
         """只向模型投影候选、区域依据/锚点和已有任务显式依赖的地点事实。"""
-        visible = {candidate.place_fact_id for candidate in validated.candidate_refs}
+        visible = {
+            candidate.place_fact_id
+            for candidate in MasterDecider._model_visible_candidate_refs(context, validated)
+        }
         anchor_poi_ids: set[str] = set()
-        for hint in context.area_hints:
+        for hint in MasterDecider._model_visible_area_hints(context):
             visible.update(hint.basis_fact_ids)
             anchor_poi_ids.update(hint.anchor_poi_ids)
+        if context.dispatch_scope is not None:
+            visible.update(MasterDecider._dispatch_scope_anchor_fact_ids(context))
+            anchor_poi_ids.update(
+                item.poi_id for item in context.dispatch_scope.anchors
+            )
         for poi_id in anchor_poi_ids:
             visible.update(fact.fact_id for fact in validated.place_by_poi_id.get(poi_id, ()))
         for task in context.existing_tasks:
+            if task.task_id not in MasterDecider._model_visible_task_ids(context):
+                continue
             visible.update(
                 fact_id for fact_id in task.known_fact_ids if fact_id in validated.place_by_fact_id
             )
@@ -674,6 +965,8 @@ class MasterDecider:
     def _fact_store_prompt_data(
         fact_store: FactStore,
         visible_place_fact_ids: set[str] | frozenset[str],
+        *,
+        include_nonplace_facts: bool = True,
     ) -> dict[str, Any]:
         """投影模型可见地点；完整事实仍由后端保存和验证。"""
         places = [item for item in fact_store.places if item.fact_id in visible_place_fact_ids]
@@ -682,8 +975,9 @@ class MasterDecider:
             for place in places
             for source_id in (*place.source_refs, *place.field_sources.values())
         }
-        visible_source_ids.update(item.source.tool_call_id for item in fact_store.weather)
-        visible_source_ids.update(item.source.tool_call_id for item in fact_store.routes)
+        if include_nonplace_facts:
+            visible_source_ids.update(item.source.tool_call_id for item in fact_store.weather)
+            visible_source_ids.update(item.source.tool_call_id for item in fact_store.routes)
         sources = [
             source.model_dump(mode="json") for source in fact_store.sources
             if source.tool_call_id in visible_source_ids
@@ -707,7 +1001,7 @@ class MasterDecider:
                     "source_tool_call_id": item.source.tool_call_id,
                     "missing_dates": [value.isoformat() for value in item.missing_dates],
                 }
-                for item in fact_store.weather
+                for item in fact_store.weather if include_nonplace_facts
             ],
             "routes": [
                 {
@@ -731,12 +1025,16 @@ class MasterDecider:
                     "source_tool_call_id": route.source.tool_call_id,
                     "error_category": route.error_category,
                 }
-                for route in fact_store.routes
+                for route in fact_store.routes if include_nonplace_facts
             ],
         }
 
     @staticmethod
-    def _query_history_prompt_data(fact_store: FactStore) -> list[dict[str, Any]]:
+    def _query_history_prompt_data(
+        fact_store: FactStore,
+        *,
+        source_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         status_by_source: dict[str, set[str]] = {}
         for route in fact_store.routes:
             status_by_source.setdefault(route.source.tool_call_id, set()).add(route.status)
@@ -751,6 +1049,7 @@ class MasterDecider:
                 ),
             }
             for source in fact_store.sources
+            if source_ids is None or source.tool_call_id in source_ids
         ]
 
     @staticmethod
@@ -860,6 +1159,86 @@ class MasterDecider:
             area_by_id=area_by_id,
         )
 
+    def _validate_dispatch_scope_context(
+        self,
+        context: MasterDecisionContext,
+        validated: _ValidatedContext,
+    ) -> None:
+        scope = context.dispatch_scope
+        if scope is None:
+            return
+        days = {item.day_id: item for item in context.planning_input.days}
+        slots = {slot.slot_id: slot for day in context.planning_input.days for slot in day.slots}
+        requirements = {
+            item.requirement_id: item
+            for item in context.planning_input.requirements.hard_requirements
+        }
+        role_periods = {
+            "attractions": {"morning", "afternoon", "evening"},
+            "dining": {"breakfast", "lunch", "dinner"},
+            "lodging": set(),
+        }
+        target_days = {target.day_id for target in scope.targets}
+        for target in scope.targets:
+            if target.day_id not in days:
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标日期不在 PlanningInput 中")
+            if target.role == "lodging" and target.slot_ids:
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "住宿定向目标不能绑定时段")
+            if target.role != "lodging" and not (target.slot_ids or target.requirement_ids):
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标必须绑定时段或硬性要求")
+            if not set(target.area_hint_ids).issubset(validated.area_by_id):
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标区域引用不存在")
+            if not set(target.candidate_ids).issubset({item.candidate_id for item in validated.candidate_refs}):
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标候选引用不存在")
+            for slot_id in target.slot_ids:
+                slot = slots.get(slot_id)
+                if (slot is None or slot.day_id != target.day_id
+                        or slot.eligibility == "skipped"
+                        or slot.period not in role_periods[target.role]):
+                    self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标时段与日期或角色不匹配")
+            allowed_requirement_kinds = {
+                "attractions": {"must_visit"},
+                "dining": {"must_include"},
+                "lodging": set(),
+            }[target.role]
+            for requirement_id in target.requirement_ids:
+                requirement = requirements.get(requirement_id)
+                if requirement is None or requirement.kind not in allowed_requirement_kinds:
+                    self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向目标硬性要求与角色不匹配")
+
+        for activity in scope.existing_activities:
+            if activity.day_id not in target_days:
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "目标活动超出定向日期")
+            slot = slots.get(activity.slot_id)
+            if slot is None or slot.day_id != activity.day_id:
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "目标活动引用了其他日期的时段")
+            if activity.place_fact_id is not None:
+                place = validated.place_by_fact_id.get(activity.place_fact_id)
+                if place is None or place.poi_id != activity.poi_id:
+                    self._reject("MASTER_DISPATCH_SCOPE_INVALID", "目标活动地点引用与事实不匹配")
+                if activity.place_name is not None and activity.place_name != place.name:
+                    self._reject("MASTER_DISPATCH_SCOPE_INVALID", "目标活动名称与地点事实不匹配")
+            elif activity.poi_id is not None or activity.place_name is not None:
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "无地点事实的目标活动不能提供地点摘要")
+
+        allowed_area_ids = {
+            area_id for target in scope.targets for area_id in target.area_hint_ids
+        }
+        for anchor in scope.anchors:
+            place = validated.place_by_fact_id.get(anchor.place_fact_id)
+            if (anchor.day_id not in target_days or place is None
+                    or place.poi_id != anchor.poi_id
+                    or place.name != anchor.place_name
+                    or place.location is None
+                    or not _city_matches(context.planning_input.request.city, place.city)):
+                self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向锚点缺少匹配的同城来源位置事实")
+            if anchor.area_hint_id is not None:
+                area = validated.area_by_id.get(anchor.area_hint_id)
+                if (anchor.area_hint_id not in allowed_area_ids or area is None
+                        or anchor.poi_id not in area.anchor_poi_ids
+                        or anchor.place_fact_id not in area.basis_fact_ids):
+                    self._reject("MASTER_DISPATCH_SCOPE_INVALID", "定向锚点与目标区域不匹配")
+
     def _resolve_plan(self, context: MasterDecisionContext, payload: PlanPayload) -> MasterDecisionOutcome:
         missing = tuple(item.strip() for item in payload.missing_information)
         if any(not item for item in missing) or len(missing) != len(set(missing)):
@@ -883,6 +1262,10 @@ class MasterDecider:
     ) -> MasterDecisionOutcome:
         if not payload.tasks and not payload.weather_dates and not payload.verify_arrival_place and not payload.verify_departure_place:
             self._reject("MASTER_DELEGATE_EMPTY", "delegate 必须包含任务或后端直接查询标记")
+        if context.dispatch_scope is not None and (
+            payload.weather_dates or payload.verify_arrival_place or payload.verify_departure_place
+        ):
+            self._reject("MASTER_DISPATCH_SCOPE_DIRECT_QUERY", "定向补查不能请求天气或到离端点查询")
         request = context.planning_input.request
         day_by_id = {item.day_id: item for item in context.planning_input.days}
         slot_by_id = {slot.slot_id: slot for day in context.planning_input.days for slot in day.slots}
@@ -895,6 +1278,8 @@ class MasterDecider:
         new_area_refs: set[str] = set()
         new_areas: list[AreaHint] = []
         new_area_by_ref: dict[str, AreaHint] = {}
+        scoped_anchor_fact_ids = self._dispatch_scope_anchor_fact_ids(context)
+        scoped_anchor_poi_ids = self._dispatch_scope_anchor_poi_ids(context)
         used_ids = (
             {item.area_hint_id for item in context.area_hints}
             | set(validated.task_by_id)
@@ -909,6 +1294,10 @@ class MasterDecider:
                 self._reject("MASTER_AREA_DUPLICATE", "新区域引用重复或与已有区域 ID 冲突")
             new_area_refs.add(area.local_ref)
             cited: list[PlaceFact] = []
+            if context.dispatch_scope is not None and not set(area.basis_fact_ids).issubset(
+                scoped_anchor_fact_ids,
+            ):
+                self._reject("MASTER_DISPATCH_SCOPE_AREA_INVALID", "定向补查新区域只能依据目标日期的真实锚点")
             for fact_id in area.basis_fact_ids:
                 fact = validated.place_by_fact_id.get(fact_id)
                 if fact is None or fact.location is None or not _city_matches(request.city, fact.city):
@@ -922,6 +1311,18 @@ class MasterDecider:
             if area.anchor_poi_ids and not set(area.anchor_poi_ids).issubset(cited_pois):
                 self._reject("MASTER_AREA_ANCHOR_INVALID", "区域锚点必须能由所列来源事实证明")
             anchor_pois = tuple(area.anchor_poi_ids or sorted(cited_pois))
+            if context.dispatch_scope is not None and not set(anchor_pois).issubset(scoped_anchor_poi_ids):
+                self._reject("MASTER_DISPATCH_SCOPE_AREA_INVALID", "定向补查新区域锚点必须属于目标日期")
+            if context.dispatch_scope is not None and not dispatch_scope_supports_area(
+                context.dispatch_scope,
+                self._dispatch_scope_anchors(context),
+                area.basis_fact_ids,
+                anchor_pois,
+            ):
+                self._reject(
+                    "MASTER_DISPATCH_SCOPE_AREA_INVALID",
+                    "定向补查区域的来源与锚点必须属于同一个目标日期",
+                )
             if not anchor_pois:
                 self._reject("MASTER_AREA_ANCHOR_INVALID", "新区域至少需要一个真实地点锚点")
             points: dict[str, MapCoordinate] = {}
@@ -953,6 +1354,13 @@ class MasterDecider:
             if task.local_ref in local_tasks or task.local_ref in validated.task_by_id:
                 self._reject("MASTER_TASK_DUPLICATE", "本批任务引用重复或与已有 task_id 冲突")
             self._validate_task_spec(task, context, validated, day_by_id, slot_by_id, requirement_by_id, area_ref_map)
+            self._validate_task_dispatch_scope(
+                task,
+                context,
+                slot_by_id,
+                existing_areas,
+                new_area_by_ref,
+            )
             signature = (
                 task.role,
                 tuple(sorted(task.day_ids)),
@@ -1031,6 +1439,90 @@ class MasterDecider:
             verify_arrival_place=payload.verify_arrival_place,
             verify_departure_place=payload.verify_departure_place,
         )
+
+    def _validate_task_dispatch_scope(
+        self,
+        task: TaskSpec,
+        context: MasterDecisionContext,
+        slots: dict[str, Any],
+        existing_areas: dict[str, AreaHint],
+        new_areas: dict[str, AreaHint],
+    ) -> None:
+        scope = context.dispatch_scope
+        if scope is None:
+            return
+        targets = tuple(target for target in scope.targets if target.role == task.role)
+        if not targets:
+            self._reject("MASTER_DISPATCH_SCOPE_ROLE_INVALID", "子任务角色不属于当前定向目标")
+        allowed_days = {target.day_id for target in targets}
+        allowed_slots = {slot_id for target in targets for slot_id in target.slot_ids}
+        allowed_requirements = {
+            requirement_id for target in targets for requirement_id in target.requirement_ids
+        }
+        if not set(task.day_ids).issubset(allowed_days):
+            self._reject("MASTER_DISPATCH_SCOPE_DAY_INVALID", "子任务日期超出当前定向目标")
+        if not set(task.slot_ids).issubset(allowed_slots):
+            self._reject("MASTER_DISPATCH_SCOPE_SLOT_INVALID", "子任务时段超出当前定向目标")
+        if not set(task.requirement_ids).issubset(allowed_requirements):
+            self._reject("MASTER_DISPATCH_SCOPE_REQUIREMENT_INVALID", "子任务硬性要求超出当前定向目标")
+        for slot_id in task.slot_ids:
+            slot = slots[slot_id]
+            if not any(
+                target.day_id == slot.day_id and slot_id in target.slot_ids
+                for target in targets
+            ):
+                self._reject("MASTER_DISPATCH_SCOPE_SLOT_INVALID", "子任务时段与目标日期不匹配")
+        for requirement_id in task.requirement_ids:
+            if not any(
+                target.day_id in task.day_ids
+                and requirement_id in target.requirement_ids
+                and (not target.slot_ids or set(target.slot_ids) & set(task.slot_ids))
+                for target in targets
+            ):
+                self._reject("MASTER_DISPATCH_SCOPE_REQUIREMENT_INVALID", "子任务要求与目标日期或时段不匹配")
+        if task.slot_ids or task.requirement_ids:
+            if not any(
+                target.day_id in task.day_ids
+                and (
+                    set(target.slot_ids) & set(task.slot_ids)
+                    or set(target.requirement_ids) & set(task.requirement_ids)
+                )
+                for target in targets
+            ):
+                self._reject("MASTER_DISPATCH_SCOPE_EMPTY", "子任务没有覆盖任何定向缺项")
+
+        scoped_days = set(task.day_ids)
+        scoped_anchor_facts = {
+            item.place_fact_id for item in self._dispatch_scope_anchors(context)
+            if item.day_id in scoped_days
+        }
+        scoped_anchor_pois = {
+            item.poi_id for item in self._dispatch_scope_anchors(context)
+            if item.day_id in scoped_days
+        }
+        allowed_existing_areas = {
+            area_id for target in targets
+            if target.day_id in scoped_days
+            for area_id in target.area_hint_ids
+        }
+        for area in context.area_hints:
+            if area.area_hint_id in allowed_existing_areas:
+                scoped_anchor_facts.update(area.basis_fact_ids)
+                scoped_anchor_pois.update(area.anchor_poi_ids)
+            if (area.basis_fact_ids
+                    and set(area.basis_fact_ids).issubset(scoped_anchor_facts)
+                    and set(area.anchor_poi_ids).issubset(scoped_anchor_pois)):
+                allowed_existing_areas.add(area.area_hint_id)
+        for area_ref in task.area_refs:
+            if area_ref in existing_areas and area_ref not in allowed_existing_areas:
+                self._reject("MASTER_DISPATCH_SCOPE_AREA_INVALID", "子任务区域超出当前定向目标")
+            if area_ref in new_areas:
+                new_area = new_areas[area_ref]
+                if (not set(new_area.basis_fact_ids).issubset(scoped_anchor_facts)
+                        or not set(new_area.anchor_poi_ids).issubset(scoped_anchor_pois)):
+                    self._reject("MASTER_DISPATCH_SCOPE_AREA_INVALID", "子任务引用了目标日期以外的新区域")
+        if any(item.anchor_poi_id not in scoped_anchor_pois for item in task.meal_areas):
+            self._reject("MASTER_DISPATCH_SCOPE_ANCHOR_INVALID", "餐次锚点不属于当前定向目标")
 
     def _validate_task_spec(
         self,

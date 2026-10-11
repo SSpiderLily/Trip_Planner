@@ -41,6 +41,7 @@ from app.services.llm_service import LLMCompletion
 from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
+from app.services.planning_v4_pipeline import PlanningV4Pipeline
 from test_planning_v4_validation import make_facts_and_candidates, make_filled_draft, make_input, requirement
 
 
@@ -324,6 +325,151 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result.repair_states[1].completed_rounds, 1)
         self.assertEqual(result.repair_states[1].stop_reason, "complete")
+
+    async def test_route_timeout_keeps_revised_meal_and_continues_to_next_date(self):
+        planning_input, facts, candidates, draft, timing, report, first_missing = setup_missing_dinner()
+        second_day = planning_input.days[2]
+        second_missing = next(slot for slot in second_day.slots if slot.period == "dinner")
+        second_draft_day = next(day for day in draft.days if day.day_id == second_day.day_id)
+        second_activities = tuple(
+            activity for activity in second_draft_day.activities
+            if activity.slot_id != second_missing.slot_id
+        ) + (DraftActivity(
+            activity_id="second-free-dinner",
+            slot_id=second_missing.slot_id,
+            kind="free_time",
+            duration_s=1800,
+            duration_source="model",
+        ),)
+        draft = draft.model_copy(update={
+            "days": tuple(
+                second_draft_day.model_copy(update={"activities": second_activities})
+                if day.day_id == second_day.day_id else day
+                for day in draft.days
+            ),
+        })
+        timing = calculate_plan_timing(planning_input, draft, facts)
+        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+
+        source = FactSource(
+            tool_call_id="two-date-meal-source",
+            tool_name="offline_fixture",
+            api_version="v4",
+            queried_at=datetime.fromisoformat("2026-10-09T10:00:00+08:00"),
+            effective_params={"query": "补查餐馆"},
+        )
+        place = PlaceFact(
+            fact_id="two-date-meal-fact",
+            poi_id="two-date-meal-poi",
+            name="补查餐馆",
+            city="上海市",
+            type_name="中餐厅",
+            typecode="050000",
+            location=MapCoordinate(lng=121.48, lat=31.23),
+            source_refs=(source.tool_call_id,),
+        )
+        candidate = CandidateRef(
+            candidate_id="two-date-meal-candidate",
+            category="meal",
+            poi_id=place.poi_id,
+            place_fact_id=place.fact_id,
+            slot_ids=(first_missing.slot_id, second_missing.slot_id),
+        )
+        recalc_days = []
+        fallback_days = []
+
+        async def collect(request):
+            return DayRepairCollectionResult(
+                stop_reason="target_met",
+                fact_store=FactStore(
+                    sources=(*request.fact_store.sources, source),
+                    places=(*request.fact_store.places, place),
+                ),
+                candidates=(*request.candidates, candidate),
+                area_hints=request.area_hints,
+                task_results=request.task_results,
+            )
+
+        async def revise(request):
+            target_constraint = next(
+                day for day in planning_input.days if day.day_id == request.day.day_id
+            )
+            target_slot = next(
+                slot.slot_id for slot in target_constraint.slots if slot.period == "dinner"
+            )
+            return DayRevision(
+                day_id=request.day.day_id,
+                base_revision=request.draft.revision,
+                revision=request.draft.revision + 1,
+                based_on_report_revision=request.report.based_on_revision,
+                replacement_day=proposal_day_from_current(
+                    request.day,
+                    added_candidate=candidate,
+                    added_slot=target_slot,
+                ),
+                preserve_activity_ids=request.preserve_activity_ids,
+                source_issue_ids=tuple(issue.issue_id for issue in request.issues),
+            )
+
+        async def recalculate(request):
+            recalc_days.append(request.day_id)
+            if request.day_id == planning_input.days[1].day_id:
+                fallback_days.append(request.day_id)
+                recalculated = PlanningV4Pipeline._failed_day_route_recalculation(
+                    request, None, error_category="timeout",
+                )
+                self.assertEqual(
+                    tuple(
+                        day for day in recalculated.draft.days
+                        if day.day_id != request.day_id
+                    ),
+                    tuple(
+                        day for day in request.draft.days
+                        if day.day_id != request.day_id
+                    ),
+                )
+                return recalculated
+            next_timing = calculate_plan_timing(
+                request.planning_input, request.draft, request.facts,
+            )
+            next_report = validate_daily_plan(
+                request.planning_input, request.draft, request.facts,
+                request.candidates, next_timing,
+                repair_states=request.repair_states,
+            )
+            return DayRepairRecalculation(
+                draft=request.draft, facts=request.facts,
+                timing=next_timing, report=next_report,
+            )
+
+        result = await DayRepairService(
+            collect=collect, revise=revise, recalculate=recalculate,
+            id_factory=lambda: f"route-timeout-{len(recalc_days) + 1}",
+        ).run_async(
+            planning_input, draft, facts, candidates, (), (), timing, report,
+        )
+
+        self.assertEqual(recalc_days, [planning_input.days[1].day_id, planning_input.days[2].day_id])
+        self.assertEqual(fallback_days, [planning_input.days[1].day_id])
+        self.assertEqual(result.status, "complete")
+        self.assertTrue(any(
+            activity.candidate_ref == candidate.candidate_id
+            for activity in result.draft.days[1].activities
+        ))
+        self.assertTrue(any(
+            activity.candidate_ref == candidate.candidate_id
+            for activity in result.draft.days[2].activities
+        ))
+        failed_day_legs = [
+            leg for leg in result.draft.legs if leg.day_id == planning_input.days[1].day_id
+        ]
+        self.assertTrue(failed_day_legs)
+        self.assertTrue(any(mode.status == "error" for leg in failed_day_legs for mode in leg.mode_results))
+        self.assertTrue(all(
+            mode.status == "error" and mode.error_category == "timeout"
+            for leg in failed_day_legs for mode in leg.mode_results
+            if mode.status == "error"
+        ))
 
     async def test_no_progress_collection_still_attempts_revision_three_times(self):
         planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()

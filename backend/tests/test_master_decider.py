@@ -17,6 +17,9 @@ from app.agents.master_decider import _DECISION_ADAPTER, MasterDecisionContext, 
 from app.models.planning_v4 import (
     AreaHint,
     CandidateRef,
+    DispatchAnchorSummary,
+    DispatchScope,
+    DispatchTarget,
     DayConstraint,
     FactSource,
     FactStore,
@@ -135,6 +138,7 @@ def make_context(*, planning_input=None, facts=None, candidates=(), areas=(), ta
         weather_attempted_dates=tuple(identity.get("weather_attempted_dates", ())),
         endpoint_attempted=tuple(identity.get("endpoint_attempted", ())),
         direct_query_summaries=tuple(identity.get("direct_query_summaries", ())),
+        dispatch_scope=identity.get("dispatch_scope"),
     )
 
 
@@ -196,6 +200,247 @@ class MasterDeciderTests(unittest.TestCase):
         decider = MasterDecider(llm=llm, request_timeout_seconds=timeout,
                                 id_factory=lambda: f"generated-{next(counter)}")
         return decider, llm
+
+    def test_targeted_dispatch_schema_and_prompt_limit_collection_to_requested_scope(self):
+        day_id = f"day-{DATES[1].isoformat()}"
+        slot_id = f"slot-{DATES[1].isoformat()}-morning"
+        scope = DispatchScope(targets=(DispatchTarget(
+            target_id="issue-missing-morning",
+            issue_code="missing_sightseeing",
+            issue_ids=("missing-sightseeing-d2",),
+            issue_message="D2 上午缺少景点安排。",
+            role="attractions",
+            day_id=day_id,
+            slot_ids=(slot_id,),
+        ),))
+        context = make_context(dispatch_scope=scope)
+        decider, _ = self.make_decider([])
+        validated = decider._validate_context_data(context)
+        payload = json.loads(decider._messages(context, validated)[1]["content"])
+        scopes = payload["role_time_scopes"]
+        schema = payload["decision_json_schema"]
+        task_schema = schema["$defs"]["TaskSpec"]
+
+        self.assertEqual(scopes["attractions"]["allowed_day_ids"], [day_id])
+        self.assertEqual([item["slot_id"] for item in scopes["attractions"]["available_slots"]], [slot_id])
+        self.assertEqual(scopes["dining"]["allowed_day_ids"], [])
+        self.assertEqual(task_schema["properties"]["role"]["enum"], ["attractions"])
+        self.assertEqual(task_schema["properties"]["day_ids"]["items"]["enum"], [day_id])
+        self.assertEqual(task_schema["properties"]["slot_ids"]["items"]["enum"], [slot_id])
+        self.assertEqual(schema["$defs"]["DelegatePayload"]["properties"]["weather_dates"]["maxItems"], 0)
+        self.assertFalse(payload["backend_query_capabilities"]["verify_departure_place"]["allowed"])
+        self.assertEqual(payload["targeted_collection_scope"]["targets"][0]["target_id"], "issue-missing-morning")
+        self.assertEqual(
+            payload["targeted_collection_scope"]["targets"][0]["issue_ids"],
+            ["missing-sightseeing-d2"],
+        )
+        self.assertIn("不扩展到其他日期", payload["targeted_collection_scope"]["instruction"])
+
+    def test_targeted_dispatch_prompt_projects_only_target_candidates_areas_and_anchor_facts(self):
+        selected_store, selected_fact = place_fact()
+        other_store, other_fact = place_fact(
+            fact_id="fact-other", poi_id="poi-other", name="其他景点",
+        )
+        facts = FactStore(
+            sources=selected_store.sources,
+            places=(selected_fact, other_fact),
+        )
+        selected_candidate = CandidateRef(
+            candidate_id="candidate-target",
+            category="sightseeing",
+            poi_id=selected_fact.poi_id,
+            place_fact_id=selected_fact.fact_id,
+        )
+        other_candidate = CandidateRef(
+            candidate_id="candidate-other",
+            category="sightseeing",
+            poi_id=other_fact.poi_id,
+            place_fact_id=other_fact.fact_id,
+        )
+        target_area = AreaHint(
+            area_hint_id="area-target",
+            label="目標区域",
+            anchor_poi_ids=(selected_fact.poi_id,),
+            center=selected_fact.location,
+            basis_fact_ids=(selected_fact.fact_id,),
+        )
+        unrelated_area = AreaHint(
+            area_hint_id="area-other",
+            label="其他区域",
+            anchor_poi_ids=(other_fact.poi_id,),
+            center=other_fact.location,
+            basis_fact_ids=(other_fact.fact_id,),
+        )
+        day_id = f"day-{DATES[1].isoformat()}"
+        scope = DispatchScope(
+            targets=(DispatchTarget(
+                target_id="issue-target",
+                issue_code="missing_sightseeing",
+                role="attractions",
+                day_id=day_id,
+                slot_ids=(f"slot-{DATES[1].isoformat()}-morning",),
+                candidate_ids=(selected_candidate.candidate_id,),
+                area_hint_ids=(target_area.area_hint_id,),
+            ),),
+            anchors=(DispatchAnchorSummary(
+                day_id=day_id,
+                poi_id=selected_fact.poi_id,
+                place_fact_id=selected_fact.fact_id,
+                place_name=selected_fact.name,
+                area_hint_id=target_area.area_hint_id,
+            ),),
+        )
+        context = make_context(
+            facts=facts,
+            candidates=(selected_candidate, other_candidate),
+            areas=(target_area, unrelated_area),
+            dispatch_scope=scope,
+        )
+        decider, _ = self.make_decider([])
+        validated = decider._validate_context_data(context)
+
+        payload = json.loads(decider._messages(context, validated)[1]["content"])
+
+        self.assertEqual([item["candidate_id"] for item in payload["candidates"]], ["candidate-target"])
+        self.assertEqual([item["area_hint_id"] for item in payload["area_hints"]], ["area-target"])
+        self.assertEqual([item["fact_id"] for item in payload["fact_store"]["places"]], ["fact-bund"])
+        self.assertEqual(payload["fact_store"]["unselected_place_count"], 1)
+
+    def test_targeted_second_batch_can_use_new_same_day_attraction_as_area_anchor(self):
+        planning_input = make_planning_input()
+        day_id = f"day-{DATES[1].isoformat()}"
+        attraction_slot = f"slot-{DATES[1].isoformat()}-morning"
+        meal_slot = f"slot-{DATES[1].isoformat()}-lunch"
+        facts, place = place_fact()
+        candidate = CandidateRef(
+            candidate_id="candidate-new-attraction",
+            category="sightseeing",
+            poi_id=place.poi_id,
+            place_fact_id=place.fact_id,
+            slot_ids=(attraction_slot,),
+        )
+        previous_task = Subtask(
+            task_id="task-target-attractions",
+            run_id="run-1",
+            context_revision=4,
+            base_revision=None,
+            role="attractions",
+            objective="补查目标日景点",
+            scope=TaskScope(
+                city="上海", day_ids=(day_id,), slot_ids=(attraction_slot,),
+            ),
+            candidate_target=2,
+        )
+        previous_result = TaskResult(
+            task_id=previous_task.task_id,
+            run_id="run-1",
+            context_revision=4,
+            base_revision=None,
+            request_id=planning_input.request.request_id,
+            status="partial",
+            stop_reason="no_progress",
+            candidates=(candidate,),
+        )
+        scope = DispatchScope(targets=(
+            DispatchTarget(
+                target_id="missing-attraction",
+                issue_code="missing_sightseeing",
+                role="attractions",
+                day_id=day_id,
+                slot_ids=(attraction_slot,),
+            ),
+            DispatchTarget(
+                target_id="missing-meal",
+                issue_code="missing_meal",
+                role="dining",
+                day_id=day_id,
+                slot_ids=(meal_slot,),
+            ),
+        ))
+        context = make_context(
+            planning_input=planning_input,
+            facts=facts,
+            candidates=(candidate,),
+            tasks=(previous_task,),
+            results=(previous_result,),
+            dispatch_scope=scope,
+        )
+        payload = {
+            "action": "delegate",
+            "reason": "目标日新核实的景点可以作为餐饮区域锚点。",
+            "areas": [{
+                "local_ref": "new-day-area",
+                "label": "景点附近",
+                "anchor_poi_ids": [place.poi_id],
+                "basis_fact_ids": [place.fact_id],
+            }],
+            "tasks": [{
+                "local_ref": "target-day-lunch",
+                "role": "dining",
+                "objective": "为目标日午餐核实附近餐馆",
+                "day_ids": [day_id],
+                "slot_ids": [meal_slot],
+                "area_refs": ["new-day-area"],
+                "known_fact_ids": [place.fact_id],
+                "candidate_target": 1,
+                "meal_areas": [{
+                    "slot_id": meal_slot,
+                    "area_ref": "new-day-area",
+                    "anchor_poi_id": place.poi_id,
+                }],
+            }],
+        }
+        decider, llm = self.make_decider([json.dumps(payload, ensure_ascii=False)])
+
+        result = decider.run(context)
+
+        self.assertEqual(result.decision.action, "delegate")
+        self.assertEqual(result.decision.tasks[0].subtask.role, "dining")
+        self.assertEqual(result.decision.tasks[0].meal_areas[0].anchor_poi_id, place.poi_id)
+        self.assertEqual(result.decision.areas[0].basis_fact_ids, (place.fact_id,))
+        prompt = json.loads(llm.calls[0][0][1]["content"])
+        self.assertEqual(prompt["targeted_collection_scope"]["verified_anchors"][0]["place_fact_id"], place.fact_id)
+
+    def test_targeted_dispatch_rejects_valid_global_slot_outside_target(self):
+        day_id = f"day-{DATES[1].isoformat()}"
+        target_slot = f"slot-{DATES[1].isoformat()}-morning"
+        scope = DispatchScope(targets=(DispatchTarget(
+            target_id="issue-missing-morning",
+            issue_code="missing_sightseeing",
+            role="attractions",
+            day_id=day_id,
+            slot_ids=(target_slot,),
+        ),))
+        outside = task_spec("outside", DATES[1], "afternoon")
+        decider, _ = self.make_decider([json.dumps({
+            "action": "delegate", "reason": "查找景点", "tasks": [outside],
+        }, ensure_ascii=False)])
+
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(make_context(dispatch_scope=scope))
+
+        self.assertEqual(raised.exception.code, "MASTER_DISPATCH_SCOPE_SLOT_INVALID")
+
+    def test_targeted_dispatch_rejects_direct_weather_and_endpoint_queries(self):
+        day_id = f"day-{DATES[1].isoformat()}"
+        scope = DispatchScope(targets=(DispatchTarget(
+            target_id="issue-missing-morning",
+            issue_code="missing_sightseeing",
+            role="attractions",
+            day_id=day_id,
+            slot_ids=(f"slot-{DATES[1].isoformat()}-morning",),
+        ),))
+        payload = {
+            "action": "delegate", "reason": "补查", "tasks": [],
+            "weather_dates": [DATES[1].isoformat()],
+            "verify_arrival_place": True,
+        }
+        decider, _ = self.make_decider([json.dumps(payload, ensure_ascii=False)])
+
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(make_context(dispatch_scope=scope))
+
+        self.assertEqual(raised.exception.code, "MASTER_DISPATCH_SCOPE_DIRECT_QUERY")
 
     def test_first_batch_can_delegate_independent_attractions_and_weather(self):
         payload = {

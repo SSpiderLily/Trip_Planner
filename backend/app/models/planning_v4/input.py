@@ -39,6 +39,7 @@ class TripRequest(ContractModel):
     arrival_place_query: str | None = None
     departure_place_query: str | None = None
     lodging_query: str | None = None
+    explicit_return_buffer_s: int | None = Field(default=None, ge=0)
     budget: TripBudget = Field(default_factory=TripBudget)
     remarks: str = ""
 
@@ -67,6 +68,7 @@ class RequirementSource(ContractModel):
         "arrival_place_query",
         "departure_place_query",
         "lodging_query",
+        "explicit_return_buffer_s",
         "budget",
         "remarks",
     ]

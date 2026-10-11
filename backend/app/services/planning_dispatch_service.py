@@ -20,6 +20,11 @@ from app.agents.candidate_identity import version_candidate_ref
 from app.models.planning_v4.base import ContractModel
 from app.models.planning_v4.facts import FactSource, FactStore, PlaceFact, RouteFact, WeatherFact
 from app.models.planning_v4.input import PlanningInput
+from app.models.planning_v4.dispatch_scope import (
+    DispatchScope,
+    derived_dispatch_anchors,
+    dispatch_scope_supports_area,
+)
 from app.models.planning_v4.plan import AreaHint
 from app.models.planning_v4.tasks import CandidateRef, Subtask, TaskResult
 from app.services.endpoint_verification_service import (
@@ -75,6 +80,7 @@ class PlanningDispatchContext(ContractModel):
     area_hints: tuple[AreaHint, ...] = ()
     existing_tasks: tuple[Subtask, ...] = ()
     task_results: tuple[TaskResult, ...] = ()
+    dispatch_scope: DispatchScope | None = None
 
     @property
     def request_id(self) -> str:
@@ -293,7 +299,12 @@ class PlanningDispatchService:
                     reason=decision.reason,
                 )
 
-            self._validate_delegate_identity(state.context, decision)
+            self._validate_delegate_identity(
+                state.context,
+                decision,
+                area_hints=tuple(state.area_hints),
+                live_context=self._make_decision_context(state),
+            )
             self._merge_areas(state, decision.areas)
             ran, timed_out = await self._run_delegate(state, decision, deadline)
             if timed_out:
@@ -371,6 +382,7 @@ class PlanningDispatchService:
             "weather_attempted_dates": tuple(sorted(state.weather_attempted_dates)),
             "endpoint_attempted": tuple(sorted(state.endpoint_attempted)),
             "direct_query_summaries": query_summaries,
+            "dispatch_scope": state.context.dispatch_scope,
         }
         factory = self.decision_context_factory
         if factory is not None:
@@ -400,9 +412,22 @@ class PlanningDispatchService:
             raise _DispatchFault("MASTER_DECISION_INVALID", "master_decision", "主智能体决策类型无效。")
 
     @staticmethod
-    def _validate_delegate_identity(context: PlanningDispatchContext, decision: Any) -> None:
+    def _validate_delegate_identity(
+        context: PlanningDispatchContext,
+        decision: Any,
+        *,
+        area_hints: tuple[AreaHint, ...] = (),
+        live_context: Any | None = None,
+    ) -> None:
         valid_dates = {item.day_date for item in context.planning_input.days}
         dates = tuple(decision.weather_dates)
+        if context.dispatch_scope is not None and (
+            dates or decision.verify_arrival_place or decision.verify_departure_place
+        ):
+            raise _DispatchFault(
+                "DISPATCH_SCOPE_DIRECT_QUERY_INVALID", "master_decision",
+                "定向补查不能包含天气或到离端点查询。",
+            )
         if len(dates) != len(set(dates)) or not set(dates).issubset(valid_dates):
             raise _DispatchFault("MASTER_WEATHER_SCOPE_INVALID", "master_decision", "天气任务超出旅行日期范围。")
         request = context.planning_input.request
@@ -410,6 +435,31 @@ class PlanningDispatchService:
             raise _DispatchFault("MASTER_ENDPOINT_SCOPE_INVALID", "master_decision", "决策要求核实未填写的到达地点。")
         if decision.verify_departure_place and not request.departure_place_query:
             raise _DispatchFault("MASTER_ENDPOINT_SCOPE_INVALID", "master_decision", "决策要求核实未填写的离开地点。")
+        if context.dispatch_scope is not None:
+            live_anchors = list(context.dispatch_scope.anchors)
+            if live_context is not None:
+                live_anchors.extend(derived_dispatch_anchors(
+                    context.dispatch_scope,
+                    context.planning_input,
+                    live_context.fact_store,
+                    tuple(live_context.candidates),
+                    tuple(live_context.existing_tasks),
+                    tuple(live_context.task_results),
+                    run_id=context.run_id,
+                    context_revision=context.context_revision,
+                    base_revision=context.base_revision,
+                ))
+            for area in decision.areas:
+                if not dispatch_scope_supports_area(
+                    context.dispatch_scope,
+                    tuple(live_anchors),
+                    area.basis_fact_ids,
+                    area.anchor_poi_ids,
+                ):
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_AREA_INVALID", "master_decision",
+                        "新区域的全部事实依据必须属于同一个定向目标日期。",
+                    )
         local_refs: set[str] = set()
         task_ids: set[str] = set()
         for resolved in decision.tasks:
@@ -421,6 +471,141 @@ class PlanningDispatchService:
                 raise _DispatchFault("MASTER_TASK_DUPLICATE_ID", "master_decision", "派发子任务标识重复。")
             local_refs.add(resolved.local_ref)
             task_ids.add(task.task_id)
+            if context.dispatch_scope is not None:
+                live_anchors = list(context.dispatch_scope.anchors)
+                if live_context is not None:
+                    live_anchors.extend(derived_dispatch_anchors(
+                        context.dispatch_scope,
+                        context.planning_input,
+                        live_context.fact_store,
+                        tuple(live_context.candidates),
+                        tuple(live_context.existing_tasks),
+                        tuple(live_context.task_results),
+                        run_id=context.run_id,
+                        context_revision=context.context_revision,
+                        base_revision=context.base_revision,
+                    ))
+                live_anchors_by_key = {
+                    (item.day_id, item.place_fact_id): item for item in live_anchors
+                }
+                targets = tuple(
+                    target for target in context.dispatch_scope.targets
+                    if target.role == task.role
+                )
+                if not targets:
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_ROLE_INVALID", "master_decision",
+                        "子任务角色超出当前定向目标。",
+                    )
+                allowed_days = {target.day_id for target in targets}
+                allowed_slots = {slot_id for target in targets for slot_id in target.slot_ids}
+                allowed_requirements = {
+                    requirement_id for target in targets for requirement_id in target.requirement_ids
+                }
+                if (not set(task.scope.day_ids).issubset(allowed_days)
+                        or not set(task.scope.slot_ids).issubset(allowed_slots)
+                        or not set(task.requirement_ids).issubset(allowed_requirements)):
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_TASK_INVALID", "master_decision",
+                        "子任务日期、时段或硬性要求超出当前定向目标。",
+                    )
+                slot_by_id = {
+                    slot.slot_id: slot
+                    for day in context.planning_input.days
+                    for slot in day.slots
+                }
+                for day_id in task.scope.day_ids:
+                    if not any(target.day_id == day_id for target in targets):
+                        raise _DispatchFault(
+                            "DISPATCH_SCOPE_DAY_INVALID", "master_decision",
+                            "子任务日期没有对应的定向缺项。",
+                        )
+                for slot_id in task.scope.slot_ids:
+                    slot = slot_by_id.get(slot_id)
+                    if (slot is None or slot.day_id not in task.scope.day_ids
+                            or slot.period not in _ROLE_PERIODS[task.role]
+                            or slot.eligibility == "skipped"
+                            or not any(
+                                target.day_id == slot.day_id and slot_id in target.slot_ids
+                                for target in targets
+                            )):
+                        raise _DispatchFault(
+                            "DISPATCH_SCOPE_SLOT_INVALID", "master_decision",
+                            "子任务时段与定向目标日期不匹配。",
+                        )
+                for requirement_id in task.requirement_ids:
+                    if not any(
+                        target.day_id in task.scope.day_ids
+                        and requirement_id in target.requirement_ids
+                        and (not target.slot_ids or set(target.slot_ids) & set(task.scope.slot_ids))
+                        for target in targets
+                    ):
+                        raise _DispatchFault(
+                            "DISPATCH_SCOPE_REQUIREMENT_INVALID", "master_decision",
+                            "子任务硬性要求与定向日期或时段不匹配。",
+                        )
+                if task.scope.slot_ids or task.requirement_ids:
+                    if not any(
+                        target.day_id in task.scope.day_ids
+                        and (
+                            set(target.slot_ids) & set(task.scope.slot_ids)
+                            or set(target.requirement_ids) & set(task.requirement_ids)
+                        )
+                        for target in targets
+                    ):
+                        raise _DispatchFault(
+                            "DISPATCH_SCOPE_EMPTY", "master_decision",
+                            "子任务没有覆盖任何定向缺项。",
+                        )
+                elif not any(
+                    target.role == "lodging" and target.day_id in task.scope.day_ids
+                    for target in targets
+                ):
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_EMPTY", "master_decision",
+                        "子任务没有覆盖任何定向缺项。",
+                    )
+
+                scoped_days = set(task.scope.day_ids)
+                scoped_anchor_facts = {
+                    anchor.place_fact_id for anchor in live_anchors_by_key.values()
+                    if anchor.day_id in scoped_days
+                }
+                scoped_anchor_pois = {
+                    anchor.poi_id for anchor in live_anchors_by_key.values()
+                    if anchor.day_id in scoped_days
+                }
+                allowed_area_ids = {
+                    area_id for target in targets if target.day_id in scoped_days
+                    for area_id in target.area_hint_ids
+                }
+                area_by_id = {
+                    item.area_hint_id: item for item in (*area_hints, *decision.areas)
+                }
+                for area_id in tuple(allowed_area_ids):
+                    area = area_by_id.get(area_id)
+                    if area is not None:
+                        scoped_anchor_facts.update(area.basis_fact_ids)
+                        scoped_anchor_pois.update(area.anchor_poi_ids)
+                for area in area_by_id.values():
+                    if (area.basis_fact_ids
+                            and set(area.basis_fact_ids).issubset(scoped_anchor_facts)
+                            and set(area.anchor_poi_ids).issubset(scoped_anchor_pois)):
+                        allowed_area_ids.add(area.area_hint_id)
+                if not set(task.scope.area_hint_ids).issubset(allowed_area_ids):
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_AREA_INVALID", "master_decision",
+                        "子任务区域超出当前定向锚点。",
+                    )
+                if any(
+                    binding.anchor_poi_id not in scoped_anchor_pois
+                    or binding.area_hint_id not in allowed_area_ids
+                    for binding in resolved.meal_areas
+                ):
+                    raise _DispatchFault(
+                        "DISPATCH_SCOPE_ANCHOR_INVALID", "master_decision",
+                        "餐次区域或锚点超出当前定向范围。",
+                    )
 
     async def _run_delegate(self, state: _MutableState, decision: Any, deadline: float) -> tuple[bool, bool]:
         pending: dict[str, Any] = {}

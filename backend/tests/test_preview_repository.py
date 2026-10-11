@@ -143,6 +143,21 @@ class PreviewRepositoryTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertNotEqual(stored_hash, self.created.access_token)
 
+    def test_current_plan_revision_tracks_preview_replacements(self):
+        plan_id = self.preview.draft.plan_id
+        self.assertEqual(self.repo.current_plan_revision(plan_id), self.preview.draft.revision)
+        self.assertIsNone(self.repo.current_plan_revision("missing-plan"))
+
+        self.repo.replace_preview(
+            self.created.access_token,
+            revised_preview(self.preview, self.preview.draft.revision + 1, "revision-2"),
+            expected_store_version=1,
+            expected_plan_revision=self.preview.draft.revision,
+            command_id="advance-revision",
+        )
+
+        self.assertEqual(self.repo.current_plan_revision(plan_id), self.preview.draft.revision + 1)
+
     def test_invalid_token_does_not_reveal_preview_or_final(self):
         self.assertIsNone(self.repo.get_preview("wrong-token"))
         self.assertIsNone(self.repo.read_final("wrong-token"))

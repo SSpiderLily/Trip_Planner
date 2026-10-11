@@ -363,7 +363,7 @@ Production deployment test.
 
 预览库通过`PREVIEW_DB_PATH`配置，默认`backend/data/previews.sqlite3`，必须与`TASK_DB_PATH`分开。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
 
-目前这是可注入`PlanningV4Pipeline`的基础接口，完整规划链尚未接入默认应用，未配置pipeline时提交返回503；首页仍使用既有入口。实施、故障验收与后续接线见[CHG-003 F10a](docs/changes/CHG-003-planning-performance-observability.md#f10a-preview-task)。
+默认应用已注册`PlanningV4Pipeline`，v4接口运行需求整理→派发→每日安排→路线/时间→按日修正→预览；首页仍使用既有v3入口，完整在线验收后再切换。独立测试应用未注册pipeline时返回503。实施、故障验收与后续接线见[CHG-003 F10a](docs/changes/CHG-003-planning-performance-observability.md#f10a-preview-task)。
 
 
 ### v4用户预览页面
@@ -390,3 +390,10 @@ Production deployment test.
 `/preview`的“导出全部日期”固定当前所见快照，生成逐日PNG，长日自动分页。文件准备完成后发起下载，再尝试保存最终结果；保存失败会单独提示，仍可使用逐张下载链接。后台已更新服务端版本时，本次图片可下载，但不会把其他版本当作本次结果保存。
 
 “还原上次保存”仅在存在可还原快照时启用。成功后显示新预览版本，失败时保留当前内容。验证命令：`cd frontend && node tests/v4PreviewExportController.test.mjs`；浏览器及存储故障证据见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-export-ui)。
+
+
+### v4规划流程与技术截止
+
+应用启动注册`PlanningV4Pipeline`并使用已确认的六个参考窗口；`TripRequest.explicit_return_buffer_s`可显式覆盖默认返程1小时，未填写时沿用默认。`PLANNER_V4_TOTAL_TIMEOUT_SECONDS`默认1800秒，`PLANNER_V4_INITIAL_COLLECTION_TIMEOUT_SECONDS`默认600秒；它们是停止等待的技术截止，不是业务查询额度。单日期最多修正3轮，耗尽后保留带缺项草稿；交通故障保留已验证活动。
+
+完整接线与独立离线验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-planning-pipeline)。当前配置模型配额不足，在线验收未完成；不要把离线回放当作真实旅行方案质量证据。

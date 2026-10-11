@@ -59,7 +59,11 @@ def build_planning_input(source: PlanningInputBuildRequest) -> PlanningInput:
     return_buffer_s = (
         source.explicit_return_buffer_s
         if source.explicit_return_buffer_s is not None
-        else source.rules.return_buffer_default_s
+        else (
+            request.explicit_return_buffer_s
+            if request.explicit_return_buffer_s is not None
+            else source.rules.return_buffer_default_s
+        )
     )
     latest_return_arrival = _subtract_elapsed(departure, return_buffer_s, zone)
 
@@ -178,7 +182,10 @@ def build_planning_input(source: PlanningInputBuildRequest) -> PlanningInput:
         boundary_facts=PlanningBoundaryFacts(
             effective_return_buffer_s=return_buffer_s,
             return_buffer_source=(
-                "explicit_user" if source.explicit_return_buffer_s is not None else "default"
+                "explicit_user"
+                if source.explicit_return_buffer_s is not None
+                or request.explicit_return_buffer_s is not None
+                else "default"
             ),
             day_ready_at=ready,
             arrival_start_optimistic_at=arrival,

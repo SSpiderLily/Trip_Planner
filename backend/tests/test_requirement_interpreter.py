@@ -1,11 +1,13 @@
 import json
 import io
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -105,6 +107,50 @@ class RequirementInterpreterTests(unittest.TestCase):
         self.assertIsNone(request.budget.party_size)
         self.assertFalse(hasattr(summary, "budget"))
 
+    def test_explicit_return_buffer_is_preserved_as_a_user_form_value(self):
+        request = shanghai_request().model_copy(update={"explicit_return_buffer_s": 0})
+        llm = FakeLLM([json.dumps(sample_summary(), ensure_ascii=False)])
+
+        RequirementInterpreter(llm=llm).interpret(request)
+
+        sent = json.loads(llm.calls[0]["messages"][1]["content"])["trip_request"]
+        self.assertEqual(sent["explicit_return_buffer_s"], 0)
+        self.assertEqual(request.explicit_return_buffer_s, 0)
+
+    def test_expired_pipeline_deadline_prevents_requirement_model_call(self):
+        llm = FakeLLM([json.dumps(sample_summary(), ensure_ascii=False)])
+
+        with self.assertRaises(PlanningError) as raised:
+            RequirementInterpreter(llm=llm).interpret(
+                shanghai_request(), deadline_monotonic=time.monotonic() - 1,
+            )
+
+        self.assertEqual(raised.exception.code, "REQUIREMENT_MODEL_TIMEOUT")
+        self.assertEqual(llm.calls, [])
+
+    def test_cancellation_after_invalid_output_prevents_format_repair_request(self):
+        cancel_event = Event()
+
+        class CancellingLLM:
+            model = "offline-fixture"
+
+            def __init__(self):
+                self.calls = 0
+
+            def invoke_with_usage(self, messages, **kwargs):
+                self.calls += 1
+                cancel_event.set()
+                return "not-json", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+
+        llm = CancellingLLM()
+        with self.assertRaises(PlanningError) as raised:
+            RequirementInterpreter(llm=llm).interpret(
+                shanghai_request(), cancel_event=cancel_event,
+            )
+
+        self.assertEqual(raised.exception.code, "REQUIREMENT_MODEL_CANCELLED")
+        self.assertEqual(llm.calls, 1)
+
     def test_hard_requirement_source_must_match_original_field_and_semantic_errors_are_not_repaired(self):
         llm = FakeLLM([json.dumps(sample_summary(source_quote="外滩一定要去"), ensure_ascii=False)])
         with self.assertRaises(PlanningError) as raised:
@@ -150,7 +196,11 @@ class RequirementInterpreterTests(unittest.TestCase):
         self.assertEqual(len(llm.calls), 2)
         self.assertEqual(summary.request_id, "DEMO_REQ")
         self.assertFalse(hasattr(summary, "city"))
-        self.assertTrue(all(call["kwargs"]["request_timeout"] == 45 for call in llm.calls))
+        timeouts = [call["kwargs"]["request_timeout"] for call in llm.calls]
+        self.assertGreater(timeouts[0], 0)
+        self.assertLessEqual(timeouts[0], 45)
+        self.assertGreater(timeouts[1], 0)
+        self.assertLessEqual(timeouts[1], timeouts[0])
         self.assertTrue(all(call["kwargs"]["max_retries"] == 0 for call in llm.calls))
         self.assertEqual(interpreter.model_calls, 2)
         self.assertEqual(interpreter.last_usage, {"input_tokens": 200, "output_tokens": 60, "total_tokens": 260})

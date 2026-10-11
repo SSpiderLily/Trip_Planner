@@ -39,6 +39,12 @@ from .decision import (
     ResolvedTask,
     TaskSpec,
 )
+from .dispatch_scope import (
+    DispatchActivitySummary,
+    DispatchAnchorSummary,
+    DispatchScope,
+    DispatchTarget,
+)
 from .input import (
     ArrivalBlockRule,
     DayConstraint,
@@ -89,5 +95,6 @@ __all__ = [
     "PlanningBoundaryFacts", "PlanningInput", "ReferenceCost", "RequirementSummary", "RouteFact", "RouteLeg",
     "RouteModeResult", "RouteOption", "RouteSegment", "RuleSet", "SelectLegMode", "SlotConstraint", "Subtask", "TaskCoverage", "TransitLine", "TransitStop",
     "NamedRestaurantSpec", "PlanPayload", "PreviewCalculation", "RepairState", "ReorderActivities", "RequirementResult", "ResolvedMealArea", "ResolvedNamedRestaurant", "ResolvedTask", "TaskResult", "TaskSpec", "ToolError", "ToolResult", "TripBudget", "TripRequest", "ValidationIssue",
+    "DispatchActivitySummary", "DispatchAnchorSummary", "DispatchScope", "DispatchTarget",
     "ValidationReport", "WeatherFact", "WeatherForecast",
 ]
