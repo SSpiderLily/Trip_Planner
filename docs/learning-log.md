@@ -987,6 +987,14 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - 复用固定上海三日输入与各阶段脱敏事实，程序验证确定结果，模型验证约束与来源；不要求重复生成相同日程，不以串并输出一致作为验收。编辑、最终保存和消费汇总继续拆开，预览接入必须避开旧生成完成即保存最终结果的语义。设计页补充方案入口并清理过时的未提交说明。
 - 文档检查：设计页50个唯一ID、47个链接、11份JSON及5图56节点62连线检查通过，时间与路线数量推演保持有效；新方案锚点、既有工作区INDEX入口及Git差异检查通过。本轮仅文档，未启动应用或重跑业务测试。
 
+<a id="f04c-weather-query-2026-10-11"></a>
+## F04c 天气查询实现与验收（2026-10-11）
+
+- 问题与取舍：工具成功不代表旅行日均有预报；城市回填、纯日期行或重复日期也不能当作核实天气。独立服务保留诊断ToolResult，将城市与日期核实后的天气放进FactStore，未知有原因且不补零；日夜描述齐全与字段部分可用分别呈现。适配器仅增加city/not_returned标记，不改变其他工具。
+- 验证：主对话在codex/weather-query执行`PYTHONPATH=. venv/bin/python -m unittest discover -s tests -q`通过208项（含15项新增），另通过6项独立上海日期、错城、重复/空数据、NaN/Inf与异步入口检查。审查修正了异步取消参数和混合有效天气/无效温度投影。实现与回归分别见`backend/app/services/weather_query_service.py`、`backend/tests/test_weather_query_service.py`和`test_amap_contract_adapter.py`。
+- 真实专项：2026-10-11一次高德MCP maps_weather，输入上海及原三日日期，不调用模型。耗时2.600秒，参数city=上海、extensions=all；供应商上海市，report_time=2026-10-11T13:01:17+08:00。返回11—14日预报，10日标out_of_coverage，11/12日available；没有用13/14日替代缺失的10日。源码哈希在调用前后相同；未改数据库、启动或重启业务服务。
+- 边界：这是一次天气工具和日期投影核验，未证明整趟规划、天气建议质量或总体性能。版本仅回显供后续调度校验；本模块不承担全局过期结果拒收、天气缓存或自动补查。当前交付状态见CHG-003 F04c。
+
 ## F01 需求整理（2026-10-10）
 
 - 主对话组合验收：临时整合三个功能分支的源码后，167项后端测试通过；F01单次真实摘要接入F02形成上海3日18时段，原始需求、默认缓冲及JSON往返核对通过。未修改main或启动正式规划。

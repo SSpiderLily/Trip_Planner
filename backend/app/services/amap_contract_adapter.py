@@ -409,15 +409,20 @@ class AmapContractAdapter:
                     report_at = report_at.replace(tzinfo=ZoneInfo(timezone_name))
             except (ValueError, TypeError):
                 missing_fields.append(MissingField(field="report_time", reason="unparseable"))
+        provider_city = _provider_text(raw.get("city"))
+        if provider_city is not None and not provider_city.strip():
+            provider_city = None
         fact = WeatherFact(
             fact_id=f"weather:{call.tool_call_id}",
-            city=_text(raw.get("city")) or city_or_adcode,
+            city=provider_city or city_or_adcode,
             adcode=str(raw["adcode"]) if raw.get("adcode") is not None else None,
             report_time=report_at,
             forecasts=tuple(forecasts),
             source=call.source,
             missing_dates=missing_dates,
         )
+        if provider_city is None:
+            missing_fields.append(MissingField(field="city", reason="not_returned"))
         invalid = call.status != "error" and not has_forecast_container
         status = "error" if call.status == "error" or invalid else "ok" if forecasts else "empty"
         error = call.error or (_tool_error("invalid_response") if invalid else None)
