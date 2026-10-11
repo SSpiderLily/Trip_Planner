@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
 import math
 import re
 from threading import Event, Lock
@@ -11,6 +12,13 @@ from time import monotonic
 from typing import Any, Callable, Mapping
 
 from .observation_service import span
+from .tool_priority import (
+    PriorityLease,
+    ToolPriority,
+    current_priority_lease,
+    reset_priority_lease,
+    set_priority_lease,
+)
 
 
 ToolCallable = Callable[[str, dict[str, Any]], Any]
@@ -20,6 +28,16 @@ _SAFE_ARGUMENT_KEYS = {
     "keywords", "city", "citylimit", "types", "page", "offset", "extensions",
     "location", "radius", "sortrule", "id",
 }
+
+
+def _set_explicit_priority(priority: ToolPriority):
+    if priority not in {"interactive", "background"}:
+        raise ValueError("priority 必须是 interactive 或 background")
+    return set_priority_lease(PriorityLease(priority))
+
+
+def _reset_explicit_priority(token) -> None:
+    reset_priority_lease(token)
 
 
 def _safe_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -49,6 +67,7 @@ class _CallState:
         self._started = False
         self._cancelled = False
         self._cancel_event = cancel_event
+        self.ticket: _AdmissionTicket | None = None
 
     def cancel_before_start(self) -> None:
         with self._lock:
@@ -74,8 +93,134 @@ class _CallState:
             return True
 
 
+@dataclass(eq=False, slots=True)
+class _AdmissionTicket:
+    sequence: int
+    priority: PriorityLease
+    ready: Future[None]
+    state: str = "waiting"
+    wake: Callable[[], None] | None = None
+
+
+class _PriorityAdmission:
+    """在线程池前按优先级准入；待办请求不会占用4个worker。"""
+
+    def __init__(self, capacity: int):
+        self._capacity = capacity
+        self._lock = Lock()
+        self._next_sequence = 0
+        self._active = 0
+        self._tickets: list[_AdmissionTicket] = []
+
+    def enqueue(self, priority: PriorityLease) -> _AdmissionTicket:
+        with self._lock:
+            ticket = _AdmissionTicket(self._next_sequence, priority, Future())
+            self._next_sequence += 1
+            self._tickets.append(ticket)
+        # Promotion can happen while the ticket waits behind interactive work.
+        # Register before draining so a concurrent promotion either wakes this
+        # queue or is observed by the drain below.
+        ticket.wake = self._drain
+        priority.add_waker(ticket.wake)
+        self._drain()
+        return ticket
+
+    def has_interactive_work(self) -> bool:
+        with self._lock:
+            return any(
+                ticket.priority.priority == "interactive"
+                and ticket.state in {"waiting", "granted", "dispatched"}
+                for ticket in self._tickets
+            )
+
+    def has_interactive_waiter(self) -> bool:
+        with self._lock:
+            return any(
+                ticket.priority.priority == "interactive" and ticket.state == "waiting"
+                for ticket in self._tickets
+            )
+
+    def mark_dispatched(self, ticket: _AdmissionTicket) -> bool:
+        with self._lock:
+            if ticket.state != "granted":
+                return False
+            ticket.state = "dispatched"
+            return True
+
+    def cancel_before_dispatch(self, ticket: _AdmissionTicket) -> None:
+        should_drain = False
+        with self._lock:
+            if ticket.state == "waiting":
+                ticket.state = "cancelled"
+                self._tickets.remove(ticket)
+                should_drain = True
+            elif ticket.state == "granted":
+                ticket.state = "cancelled"
+                self._tickets.remove(ticket)
+                self._active -= 1
+                should_drain = True
+        ticket.ready.cancel()
+        self._remove_waker(ticket)
+        if should_drain:
+            self._drain()
+
+    def release(self, ticket: _AdmissionTicket) -> None:
+        should_drain = False
+        with self._lock:
+            if ticket.state in {"granted", "dispatched"}:
+                ticket.state = "released"
+                self._tickets.remove(ticket)
+                self._active -= 1
+                should_drain = True
+        self._remove_waker(ticket)
+        if should_drain:
+            self._drain()
+
+    @staticmethod
+    def _remove_waker(ticket: _AdmissionTicket) -> None:
+        wake = ticket.wake
+        if wake is not None:
+            ticket.priority.remove_waker(wake)
+            ticket.wake = None
+
+    def _drain(self) -> None:
+        granted: list[_AdmissionTicket] = []
+        with self._lock:
+            while self._active < self._capacity:
+                waiting = [ticket for ticket in self._tickets if ticket.state == "waiting"]
+                if not waiting:
+                    break
+                interactive_active = any(
+                    ticket.state in {"granted", "dispatched"}
+                    and ticket.priority.priority == "interactive"
+                    for ticket in self._tickets
+                )
+                interactive_waiting = [
+                    ticket for ticket in waiting if ticket.priority.priority == "interactive"
+                ]
+                if interactive_waiting:
+                    selected = min(interactive_waiting, key=lambda item: item.sequence)
+                elif interactive_active:
+                    # Backfill waits until the interactive route batch is idle.
+                    break
+                else:
+                    selected = min(waiting, key=lambda item: item.sequence)
+                selected.state = "granted"
+                self._active += 1
+                granted.append(selected)
+        for ticket in granted:
+            self._remove_waker(ticket)
+        for ticket in granted:
+            try:
+                ticket.ready.set_result(None)
+            except Exception:
+                # A cancelled waiter may race a grant. Its state/slot is released
+                # by cancel_before_dispatch; no worker is submitted here.
+                pass
+
+
 class MCPToolExecutor:
-    """工作线程拥有并发名额；等待方超时或取消不会提前释放名额。"""
+    """最多4个实际调用并发；等待方取消不会提前释放已准入的调用名额。"""
 
     def __init__(
         self, tool_callable: ToolCallable, *, max_workers: int = 4, defer_start: bool = False,
@@ -85,6 +230,12 @@ class MCPToolExecutor:
         self._tool_callable = tool_callable
         self._defer_start = defer_start
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="planning-mcp")
+        self._admission = _PriorityAdmission(max_workers)
+
+    @property
+    def has_interactive_work(self) -> bool:
+        """是否存在已准入或排队的交互MCP工作。"""
+        return self._admission.has_interactive_work()
 
     def _run_actual(self, tool_name: str, arguments: dict[str, Any], deadline: float, state: _CallState) -> Any:
         if self._defer_start:
@@ -118,15 +269,62 @@ class MCPToolExecutor:
         if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
                 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
             raise ValueError("timeout_seconds 必须是有限正数")
-        # Copy the caller's observation context into the worker so the MCP span
-        # stays open until the real synchronous operation exits, even if its
-        # caller has already timed out.
+        # Copy the caller's observation context through priority admission and
+        # into the worker. Pending requests do not occupy a pool worker.
         context = copy_context()
         deadline = monotonic() + float(timeout_seconds)
         state = _CallState(cancel_event)
-        future = self._pool.submit(
-            context.run, self._run_actual, tool_name, dict(arguments), deadline, state,
-        )
+        lease = current_priority_lease() or PriorityLease("interactive")
+        ticket = self._admission.enqueue(lease)
+        state.ticket = ticket
+        future: Future[Any] = Future()
+
+        def dispatch(_ready: Future[None]) -> None:
+            if _ready.cancelled():
+                self._admission.cancel_before_dispatch(ticket)
+                return
+            if future.cancelled():
+                self._admission.cancel_before_dispatch(ticket)
+                return
+            if not self._admission.mark_dispatched(ticket):
+                if not future.done():
+                    future.set_exception(TimeoutError("地图工具调用已超时或取消，未启动"))
+                return
+            if not state.can_start(deadline):
+                self._admission.release(ticket)
+                if not future.done():
+                    future.set_exception(TimeoutError("地图工具调用已超时或取消，未启动"))
+                return
+            try:
+                actual = self._pool.submit(
+                    context.run, self._run_actual, tool_name, dict(arguments), deadline, state,
+                )
+            except BaseException as exc:
+                self._admission.release(ticket)
+                if not future.done():
+                    future.set_exception(exc)
+                return
+
+            def transfer_result(completed: Future[Any]) -> None:
+                try:
+                    if completed.cancelled():
+                        if not future.done():
+                            future.cancel()
+                    else:
+                        error = completed.exception()
+                        if error is not None:
+                            if not future.done():
+                                future.set_exception(error)
+                        elif not future.done():
+                            future.set_result(completed.result())
+                finally:
+                    # The synchronous MCP operation has exited before the
+                    # global slot can be reused.
+                    self._admission.release(ticket)
+
+            actual.add_done_callback(transfer_result)
+
+        ticket.ready.add_done_callback(dispatch)
         return future, deadline, state
 
     def run(
@@ -136,21 +334,32 @@ class MCPToolExecutor:
         *,
         timeout_seconds: float,
         cancel_event: Event | None = None,
+        priority: ToolPriority | None = None,
     ) -> Any:
-        future, deadline, state = self._submit(
-            tool_name, arguments, timeout_seconds, cancel_event,
-        )
+        token = None
+        if priority is not None:
+            token = _set_explicit_priority(priority)
+        try:
+            future, deadline, state = self._submit(
+                tool_name, arguments, timeout_seconds, cancel_event,
+            )
+        finally:
+            if token is not None:
+                _reset_explicit_priority(token)
+        ticket = state.ticket
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 state.cancel_before_start()
-                # Cancelling a queued future prevents a late provider call.
-                # A running provider call keeps its worker slot until it exits.
                 future.cancel()
+                if ticket is not None:
+                    self._admission.cancel_before_dispatch(ticket)
                 raise TimeoutError("地图工具调用已取消")
             remaining = deadline - monotonic()
             if remaining <= 0:
                 state.cancel_before_start()
                 future.cancel()
+                if ticket is not None:
+                    self._admission.cancel_before_dispatch(ticket)
                 raise TimeoutError("地图工具调用超时")
             try:
                 return future.result(timeout=min(0.05, remaining))
@@ -164,9 +373,31 @@ class MCPToolExecutor:
 
     async def run_async(
         self, tool_name: str, arguments: dict[str, Any], *, timeout_seconds: float,
+        priority: ToolPriority | None = None,
     ) -> Any:
-        future, deadline, state = self._submit(tool_name, arguments, timeout_seconds)
+        token = None
+        if priority is not None:
+            token = _set_explicit_priority(priority)
+        try:
+            future, deadline, state = self._submit(tool_name, arguments, timeout_seconds)
+        finally:
+            if token is not None:
+                _reset_explicit_priority(token)
+        ticket = state.ticket
         wrapped = asyncio.wrap_future(future)
+
+        def consume_unawaited(done: asyncio.Future[Any]) -> None:
+            if done.cancelled():
+                return
+            try:
+                done.exception()
+            except asyncio.CancelledError:
+                pass
+
+        # Cancellation can detach the caller after the worker has already
+        # completed with an exception. Retrieving it here suppresses only the
+        # event-loop warning; an active awaiter still receives the exception.
+        wrapped.add_done_callback(consume_unawaited)
         try:
             return await asyncio.wait_for(
                 asyncio.shield(wrapped), timeout=max(0.0, deadline - monotonic()),
@@ -176,10 +407,14 @@ class MCPToolExecutor:
                 return future.result()
             state.cancel_before_start()
             future.cancel()
+            if ticket is not None:
+                self._admission.cancel_before_dispatch(ticket)
             raise TimeoutError("地图工具调用超时") from exc
         except asyncio.CancelledError:
             state.cancel_before_start()
             future.cancel()
+            if ticket is not None:
+                self._admission.cancel_before_dispatch(ticket)
             raise
 
     def close(self, *, wait: bool = True) -> None:

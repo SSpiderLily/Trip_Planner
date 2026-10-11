@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from app.models.planning_v4.facts import (
@@ -28,6 +29,8 @@ from app.services.route_fact_cache import (
     RouteQueryKey,
 )
 from app.services.amap_contract_adapter import AmapContractAdapter
+from app.services.mcp_tool_executor import MCPToolExecutor
+from app.services.tool_priority import current_priority_lease
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -352,6 +355,105 @@ class RouteFactCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(cache.stats.external_loads, 1)
         await cache.aclose()
+
+    async def test_interactive_join_promotes_inflight_background_priority(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        observed_priority = []
+
+        async def loader(key: RouteQueryKey) -> LoadedRouteFact:
+            lease = current_priority_lease()
+            self.assertIsNotNone(lease)
+            observed_priority.append(lease)
+            started.set()
+            await release.wait()
+            return loaded(key)
+
+        cache = RouteFactCache("shanghai-plan", loader)
+        key = make_key()
+        background = asyncio.create_task(cache.get_or_load(key, priority="background"))
+        await started.wait()
+        self.assertEqual(observed_priority[0].priority, "background")
+        interactive = asyncio.create_task(cache.get_or_load(key, priority="interactive"))
+        await asyncio.sleep(0)
+        self.assertEqual(observed_priority[0].priority, "interactive")
+        release.set()
+        first, second = await asyncio.gather(background, interactive)
+        self.assertEqual(first.fact_id, second.fact_id)
+        self.assertEqual(cache.stats.external_loads, 1)
+        self.assertEqual(cache.stats.inflight_joins, 1)
+        await cache.aclose()
+
+    async def test_interactive_cache_join_wakes_promoted_executor_ticket(self) -> None:
+        interactive_started = threading.Event()
+        release_interactive = threading.Event()
+        backfill_started = threading.Event()
+
+        def actual_tool(_name: str, arguments: dict[str, object]) -> dict[str, str]:
+            if arguments["id"] == "interactive-active":
+                interactive_started.set()
+                release_interactive.wait(2)
+            else:
+                backfill_started.set()
+            return {"result_status": "ok"}
+
+        executor = MCPToolExecutor(actual_tool)
+        callers = ThreadPoolExecutor(max_workers=1)
+        active = callers.submit(
+            executor.run, "maps_text_search", {"id": "interactive-active"},
+            timeout_seconds=3,
+        )
+        cache: RouteFactCache | None = None
+        background: asyncio.Task | None = None
+        interactive: asyncio.Task | None = None
+        try:
+            self.assertTrue(await asyncio.to_thread(interactive_started.wait, 1))
+
+            async def loader(key: RouteQueryKey) -> LoadedRouteFact:
+                await executor.run_async(
+                    "maps_text_search", {"id": "promoted-backfill"}, timeout_seconds=3,
+                )
+                return loaded(key)
+
+            cache = RouteFactCache("shanghai-plan", loader)
+            key = make_key()
+            background = asyncio.create_task(cache.get_or_load(key, priority="background"))
+
+            # Wait until the background ticket is queued behind the active
+            # interactive call. The cache join must wake its admission.
+            for _ in range(200):
+                if any(
+                    ticket.state == "waiting" and ticket.priority.priority == "background"
+                    for ticket in executor._admission._tickets
+                ):
+                    break
+                await asyncio.sleep(0.005)
+            else:
+                self.fail("后台MCP请求未进入待准入队列")
+
+            interactive = asyncio.create_task(cache.get_or_load(key, priority="interactive"))
+            self.assertTrue(await asyncio.wait_for(
+                asyncio.to_thread(backfill_started.wait, 1), timeout=1.2,
+            ))
+            self.assertFalse(release_interactive.is_set())
+            release_interactive.set()
+            first, second = await asyncio.gather(background, interactive)
+            self.assertEqual(first.fact_id, second.fact_id)
+        finally:
+            release_interactive.set()
+            if cache is not None:
+                await cache.aclose()
+            for task in (background, interactive):
+                if task is not None and not task.done():
+                    task.cancel()
+            if background is not None or interactive is not None:
+                await asyncio.gather(
+                    *(task for task in (background, interactive) if task is not None),
+                    return_exceptions=True,
+                )
+            active.result(timeout=2)
+            callers.shutdown(wait=True)
+            executor.close(wait=True)
 
     async def test_error_result_is_shared_only_while_inflight_and_not_cached(self) -> None:
         started = asyncio.Event()

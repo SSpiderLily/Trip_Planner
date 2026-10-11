@@ -16,6 +16,7 @@ from typing import Awaitable, Callable, Literal, Mapping, TypeAlias
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.planning_v4.facts import MapCoordinate, RouteFact
+from app.services.tool_priority import PriorityLease, ToolPriority, reset_priority_lease, set_priority_lease
 
 
 RouteMode: TypeAlias = Literal["walking", "bicycling", "transit"]
@@ -306,6 +307,7 @@ class RouteFactCache:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._entries: dict[RouteQueryKey, _CacheEntry] = {}
         self._inflight: dict[RouteQueryKey, asyncio.Task[RouteFact]] = {}
+        self._inflight_priorities: dict[RouteQueryKey, PriorityLease] = {}
         self._closed = False
         self._external_loads = 0
         self._hits = 0
@@ -337,11 +339,15 @@ class RouteFactCache:
             raise RuntimeError("单调时钟必须返回有限数值")
         return value
 
-    async def get_or_load(self, key: RouteQueryKey) -> RouteFact:
+    async def get_or_load(
+        self, key: RouteQueryKey, *, priority: ToolPriority = "interactive",
+    ) -> RouteFact:
         """读取未过期事实，或合并到同键正在进行的 loader。"""
         loop = self._check_loop()
         if not isinstance(key, RouteQueryKey):
             raise TypeError("key 必须是 RouteQueryKey")
+        if priority not in {"interactive", "background"}:
+            raise ValueError("priority 必须是 interactive 或 background")
         if key.plan_id != self.plan_id:
             raise RouteFactCacheError("查询键 plan_id 与缓存作用域不一致")
 
@@ -356,18 +362,26 @@ class RouteFactCache:
         task = self._inflight.get(key)
         if task is None:
             self._external_loads += 1
-            task = loop.create_task(self._load_and_cache(key))
+            request_priority = PriorityLease(priority)
+            task = loop.create_task(self._load_and_cache(key, request_priority))
             task.add_done_callback(self._consume_unobserved_exception)
             self._inflight[key] = task
+            self._inflight_priorities[key] = request_priority
         else:
             self._inflight_joins += 1
+            if priority == "interactive":
+                self._inflight_priorities[key].promote()
 
         fact = await asyncio.shield(task)
         return fact.model_copy(deep=True)
 
-    async def _load_and_cache(self, key: RouteQueryKey) -> RouteFact:
+    async def _load_and_cache(self, key: RouteQueryKey, priority: PriorityLease) -> RouteFact:
         try:
-            loaded = await self._loader(key)
+            token = set_priority_lease(priority)
+            try:
+                loaded = await self._loader(key)
+            finally:
+                reset_priority_lease(token)
             if self._closed:
                 raise asyncio.CancelledError
             completed_at = self._now()
@@ -389,6 +403,7 @@ class RouteFactCache:
             task = asyncio.current_task()
             if self._inflight.get(key) is task:
                 self._inflight.pop(key, None)
+                self._inflight_priorities.pop(key, None)
 
     def _validate_loaded(self, key: RouteQueryKey, loaded: LoadedRouteFact) -> RouteFact:
         if not isinstance(loaded, LoadedRouteFact) or not isinstance(loaded.fact, RouteFact):
@@ -493,3 +508,4 @@ class RouteFactCache:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._inflight.clear()
+        self._inflight_priorities.clear()

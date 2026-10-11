@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, time
 import math
 import unicodedata
-from threading import Event
-from typing import Literal
+from threading import Event, Lock
+from typing import Awaitable, Callable, Literal
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
@@ -105,6 +105,91 @@ class CurrentRouteExecution(ContractModel):
     fact_store: FactStore
     timing: PlanTimingResult
     leg_results: tuple[CurrentRouteLegOutcome, ...] = ()
+
+
+RouteContextLoader = Callable[[RouteQueryKey, PlaceFact, PlaceFact], Awaitable[LoadedRouteFact]]
+
+
+def _route_place_key(place: PlaceFact) -> tuple[str, str, float, float] | None:
+    if place.location is None:
+        return None
+    return (
+        place.poi_id,
+        place.location.coordinate_system,
+        float(place.location.lng),
+        float(place.location.lat),
+    )
+
+
+class PlanRouteContext:
+    """跨生成与编辑复用的路线缓存及地点事实索引。"""
+
+    def __init__(
+        self,
+        planning_input: PlanningInput,
+        plan_id: str,
+        loader: RouteContextLoader,
+        *,
+        cancel_event: Event | None = None,
+    ):
+        if not isinstance(planning_input, PlanningInput):
+            raise CurrentRouteError("input_type_invalid")
+        if not isinstance(plan_id, str) or not plan_id:
+            raise CurrentRouteError("plan_id_invalid")
+        self.plan_id = plan_id
+        self._planning_input_snapshot = planning_input.model_dump(mode="json")
+        self._loader = loader
+        self.cancel_event = cancel_event or Event()
+        self._lock = Lock()
+        self._places: dict[tuple[str, str, float, float], PlaceFact] = {}
+        self._alternative_sources: dict[tuple[str, str, float, float], set[str]] = {}
+        self.backfill_lock = asyncio.Lock()
+        self.route_cache = RouteFactCache(plan_id, self._load)
+
+    @property
+    def alternative_source_count(self) -> int:
+        with self._lock:
+            return len(self._alternative_sources)
+
+    def assert_binding(self, planning_input: PlanningInput, draft: PlanDraft) -> None:
+        if (
+            draft.plan_id != self.plan_id
+            or planning_input.model_dump(mode="json") != self._planning_input_snapshot
+        ):
+            raise CurrentRouteError("route_context_binding_mismatch")
+
+    def register_facts(self, facts: FactStore) -> None:
+        """保留首个已核实快照，并记录同一POI+坐标的替代来源。"""
+        with self._lock:
+            for place in facts.places:
+                key = _route_place_key(place)
+                if key is None:
+                    continue
+                previous = self._places.get(key)
+                if previous is None:
+                    self._places[key] = place.model_copy(deep=True)
+                elif previous.model_dump(mode="json") != place.model_dump(mode="json"):
+                    self._alternative_sources.setdefault(key, set()).update(
+                        (previous.fact_id, place.fact_id),
+                    )
+
+    def _resolve(self, poi_id: str, coordinate: tuple[float, float]) -> PlaceFact | None:
+        # RouteQueryKey stores (lng, lat); registry keys include coordinate system.
+        key = (poi_id, "GCJ-02", coordinate[0], coordinate[1])
+        with self._lock:
+            place = self._places.get(key)
+            return place.model_copy(deep=True) if place is not None else None
+
+    async def _load(self, key: RouteQueryKey) -> LoadedRouteFact:
+        origin = self._resolve(key.origin_poi_id, key.origin)
+        destination = self._resolve(key.destination_poi_id, key.destination)
+        if origin is None or destination is None:
+            raise _UncacheableRoute(None, error_category="invalid_response")
+        return await self._loader(key, origin, destination)
+
+    async def aclose(self) -> None:
+        self.cancel_event.set()
+        await self.route_cache.aclose()
 
 
 @dataclass(frozen=True, slots=True)
@@ -709,6 +794,34 @@ class CurrentRouteService:
         self.route_cache = route_cache
         self.tool_timeout_seconds = float(tool_timeout_seconds)
 
+    def create_route_context(
+        self, planning_input: PlanningInput, plan_id: str,
+    ) -> PlanRouteContext:
+        """创建可由F08当前查询与F11b后台查询共同持有的plan上下文。"""
+        cancel_event = Event()
+
+        async def load(key: RouteQueryKey, origin: PlaceFact, destination: PlaceFact) -> LoadedRouteFact:
+            raw_strategy = key.params_dict().get("strategy")
+            strategy = int(raw_strategy) if raw_strategy is not None else None
+            fact, cacheable, valid = await self._load_route_fact(
+                planning_input,
+                key.mode,
+                origin,
+                destination,
+                transit_departure_at=key.requested_departure_at,
+                strategy=strategy,
+                cancel_event=cancel_event,
+            )
+            if fact is None or not valid:
+                raise _UncacheableRoute(fact, error_category="invalid_response")
+            if not cacheable:
+                raise _UncacheableRoute(fact)
+            return LoadedRouteFact(adapter_version=key.adapter_version, fact=fact)
+
+        return PlanRouteContext(
+            planning_input, plan_id, load, cancel_event=cancel_event,
+        )
+
     async def run_async(
         self,
         planning_input: PlanningInput,
@@ -719,6 +832,7 @@ class CurrentRouteService:
         verified_departure_fact_id: str | None = None,
         current_context_revision: int | None = None,
         only_edge: tuple[str, str, str] | None = None,
+        route_context: PlanRouteContext | None = None,
     ) -> CurrentRouteExecution:
         _validate_plan_binding(planning_input, draft)
         merged_facts, departure_fact_id = _resolve_departure_fact(
@@ -745,11 +859,17 @@ class CurrentRouteService:
             if len(matches) != 1:
                 raise CurrentRouteError("requested_live_edge_not_unique")
 
-        cancel_event = Event()
-        owns_cache = self.route_cache is None
-        cache = self.route_cache or RouteFactCache(draft.plan_id, self._make_loader(
-            planning_input, draft, merged_facts, cancel_event,
-        ))
+        if route_context is not None and (self.route_cache is not None):
+            raise CurrentRouteError("route_context_and_route_cache_conflict")
+        owns_route_context = route_context is None and self.route_cache is None
+        if route_context is None and self.route_cache is None:
+            route_context = self.create_route_context(planning_input, draft.plan_id)
+        if route_context is not None:
+            route_context.assert_binding(planning_input, draft)
+            route_context.register_facts(merged_facts)
+            cache = route_context.route_cache
+        else:
+            cache = self.route_cache
         if cache.plan_id != draft.plan_id:
             raise CurrentRouteError("route_cache_plan_mismatch")
 
@@ -811,7 +931,6 @@ class CurrentRouteService:
                         planning_input, draft, cache, edge, mode,
                         transit_departure_at=requested_departure,
                         query_basis=query_basis,
-                        cancel_event=cancel_event,
                     )
                     for mode in _MODE_ORDER
                 ))
@@ -850,14 +969,15 @@ class CurrentRouteService:
         try:
             day_results = list(await asyncio.gather(*day_tasks))
         except BaseException:
-            cancel_event.set()
+            if owns_route_context and route_context is not None:
+                route_context.cancel_event.set()
             for task in day_tasks:
                 task.cancel()
             await asyncio.gather(*day_tasks, return_exceptions=True)
             raise
         finally:
-            if owns_cache:
-                await cache.aclose()
+            if owns_route_context and route_context is not None:
+                await route_context.aclose()
 
         updated_by_id: dict[str, RouteLeg] = {}
         added_routes: list[RouteFact] = []
@@ -897,44 +1017,6 @@ class CurrentRouteService:
             leg_results=tuple(leg_outcomes),
         )
 
-    def _make_loader(
-        self,
-        planning_input: PlanningInput,
-        draft: PlanDraft,
-        facts: FactStore,
-        cancel_event: Event,
-    ):
-        by_coordinate: dict[tuple[str, float, float], PlaceFact] = {}
-        for place in facts.places:
-            if place.location is not None:
-                by_coordinate.setdefault(
-                    (place.poi_id, float(place.location.lng), float(place.location.lat)),
-                    place,
-                )
-
-        async def load(key: RouteQueryKey) -> LoadedRouteFact:
-            origin = by_coordinate.get((key.origin_poi_id, key.origin[0], key.origin[1]))
-            destination = by_coordinate.get((key.destination_poi_id, key.destination[0], key.destination[1]))
-            if origin is None or destination is None:
-                raise _UncacheableRoute(None, error_category="invalid_response")
-            raw_strategy = key.params_dict().get("strategy")
-            strategy = int(raw_strategy) if raw_strategy is not None else None
-            fact, cacheable, valid = await self._load_route_fact(
-                planning_input,
-                key.mode,
-                origin,
-                destination,
-                transit_departure_at=key.requested_departure_at,
-                strategy=strategy,
-                cancel_event=cancel_event,
-            )
-            if fact is None or not valid:
-                raise _UncacheableRoute(fact, error_category="invalid_response")
-            if not cacheable:
-                raise _UncacheableRoute(fact)
-            return LoadedRouteFact(adapter_version=key.adapter_version, fact=fact)
-        return load
-
     def _timing_for_day(
         self,
         planning_input: PlanningInput,
@@ -963,7 +1045,6 @@ class CurrentRouteService:
         *,
         transit_departure_at: datetime,
         query_basis: TimeBasis,
-        cancel_event: Event,
     ) -> _ModeResult:
         assert edge.leg is not None and edge.origin is not None and edge.destination is not None
         leg_id = edge.leg.leg_id
@@ -1163,6 +1244,7 @@ async def query_current_routes(
     route_cache: RouteFactCache | None = None,
     tool_timeout_seconds: float | None = None,
     only_edge: tuple[str, str, str] | None = None,
+    route_context: PlanRouteContext | None = None,
 ) -> CurrentRouteExecution:
     """查询酒店起点、相邻地点及已核实返程终点；不会重排活动或改写输入。"""
     service = CurrentRouteService(
@@ -1179,4 +1261,5 @@ async def query_current_routes(
         verified_departure_fact_id=verified_departure_fact_id,
         current_context_revision=current_context_revision,
         only_edge=only_edge,
+        route_context=route_context,
     )

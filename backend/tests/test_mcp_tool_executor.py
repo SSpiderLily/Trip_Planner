@@ -105,6 +105,115 @@ class MCPToolExecutorTests(unittest.TestCase):
             callers.shutdown(wait=True)
             executor.close(wait=True)
 
+    def test_interactive_waiters_overtake_background_without_occupying_workers(self):
+        lock = threading.Lock()
+        started_ids = []
+        first_four_started = threading.Event()
+        interactive_started = threading.Event()
+        background_started = threading.Event()
+        release_first_four = threading.Event()
+        release_interactive = threading.Event()
+
+        def actual_tool(_name, arguments):
+            request_id = arguments["id"]
+            with lock:
+                started_ids.append(request_id)
+                if len(started_ids) == 4:
+                    first_four_started.set()
+            if request_id.startswith("initial-"):
+                release_first_four.wait(1)
+            elif request_id == "interactive-new":
+                interactive_started.set()
+                release_interactive.wait(1)
+            elif request_id == "background":
+                background_started.set()
+            return {"result_status": "ok"}
+
+        executor = MCPToolExecutor(actual_tool)
+        callers = ThreadPoolExecutor(max_workers=4)
+        active = [
+            callers.submit(
+                executor.run, "maps_text_search", {"id": f"initial-{index}"},
+                timeout_seconds=2,
+            )
+            for index in range(4)
+        ]
+        try:
+            self.assertTrue(first_four_started.wait(1))
+
+            async def queued_requests():
+                background = asyncio.create_task(executor.run_async(
+                    "maps_text_search", {"id": "background"},
+                    timeout_seconds=2, priority="background",
+                ))
+                await asyncio.sleep(0.02)
+                interactive = asyncio.create_task(executor.run_async(
+                    "maps_text_search", {"id": "interactive-new"}, timeout_seconds=2,
+                ))
+                await asyncio.sleep(0.02)
+                queued_priorities = [
+                    (ticket.priority.priority, ticket.state)
+                    for ticket in executor._admission._tickets
+                ]
+                self.assertIn(("background", "waiting"), queued_priorities)
+                self.assertIn(("interactive", "waiting"), queued_priorities)
+                release_first_four.set()
+                await asyncio.wait_for(asyncio.to_thread(interactive_started.wait, 1), timeout=1)
+                self.assertFalse(background_started.is_set())
+                release_interactive.set()
+                await asyncio.gather(interactive, background)
+
+            asyncio.run(queued_requests())
+            for future in active:
+                future.result(timeout=1)
+            self.assertLess(started_ids.index("interactive-new"), started_ids.index("background"))
+            self.assertFalse(executor.has_interactive_work)
+        finally:
+            release_first_four.set()
+            release_interactive.set()
+            callers.shutdown(wait=True)
+            executor.close(wait=True)
+
+    def test_background_admission_waits_until_interactive_work_is_idle(self):
+        interactive_started = threading.Event()
+        release_interactive = threading.Event()
+        background_started = threading.Event()
+
+        def actual_tool(_name, arguments):
+            if arguments["id"] == "interactive":
+                interactive_started.set()
+                release_interactive.wait(1)
+            else:
+                background_started.set()
+            return {"result_status": "ok"}
+
+        executor = MCPToolExecutor(actual_tool)
+        caller = ThreadPoolExecutor(max_workers=1)
+        running = caller.submit(
+            executor.run, "maps_text_search", {"id": "interactive"}, timeout_seconds=2,
+        )
+        try:
+            self.assertTrue(interactive_started.wait(1))
+
+            async def queue_background():
+                task = asyncio.create_task(executor.run_async(
+                    "maps_text_search", {"id": "background"},
+                    timeout_seconds=2, priority="background",
+                ))
+                await asyncio.sleep(0.03)
+                self.assertFalse(background_started.is_set())
+                self.assertTrue(executor.has_interactive_work)
+                release_interactive.set()
+                await task
+
+            asyncio.run(queue_background())
+            running.result(timeout=1)
+            self.assertTrue(background_started.is_set())
+        finally:
+            release_interactive.set()
+            caller.shutdown(wait=True)
+            executor.close(wait=True)
+
     def test_singleton_creation_is_locked_and_mcp_discovery_is_lazy(self):
         old_executor = mcp_tool_executor._shared_executor
         if old_executor is not None:
