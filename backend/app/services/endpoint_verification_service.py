@@ -668,4 +668,3 @@ def _add_source_without_overwrite(sources: dict[str, FactSource], source: FactSo
     if existing is not None and existing != source:
         raise ValueError("相同来源 ID 对应了冲突的来源记录")
     sources[source.tool_call_id] = source
-
