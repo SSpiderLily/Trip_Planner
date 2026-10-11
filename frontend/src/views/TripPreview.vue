@@ -24,8 +24,25 @@
     <template v-else-if="view && activeDay">
       <header class="page-topline">
         <span class="eyebrow">YOUR TRIP</span>
-        <span class="readonly-label">行程预览</span>
+        <div class="preview-actions">
+          <span class="readonly-label">行程预览</span>
+          <button class="preview-action" type="button" :disabled="exporting" @click="exportCurrent">
+            {{ exporting ? (exportPhase === 'saving' ? '图片已导出，正在保存…' : '正在生成图片…') : '导出全部日期' }}
+          </button>
+          <button class="preview-action restore-action" type="button" :disabled="!canRestore" @click="restoreLastSaved">
+            {{ restoring ? '正在还原…' : '还原上次保存' }}
+          </button>
+          <small v-if="finalState?.restorable && finalState.final">上次保存于 {{ formatSavedAt(finalState.final.saved_at) }}</small>
+          <small v-else-if="finalState?.unavailable_reason === 'snapshot_incomplete'">上次保存内容不完整，暂不可还原</small>
+          <small v-else-if="finalStateChecked && finalStateLoadFailed">暂时无法读取上次保存状态</small>
+          <small v-else-if="finalStateChecked && !finalState?.final">还没有可还原的已保存版本</small>
+          <TripPreviewExport v-if="exportSnapshot" ref="exportRenderer" :visible="exportSnapshot.visible" />
+        </div>
       </header>
+      <section v-if="exportFiles.length" class="export-download-fallback" aria-live="polite">
+        <span>如果浏览器没有自动开始下载，可逐张保存：</span>
+        <a v-for="file in exportFiles" :key="file.filename" :href="file.url" :download="file.filename">{{ file.label }}</a>
+      </section>
       <section class="hero">
         <div>
           <p class="hero-kicker">A JOURNEY MADE FOR YOU</p>
@@ -223,30 +240,69 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { message } from 'ant-design-vue'
 import PreviewMap from '@/components/preview/PreviewMap.vue'
+import TripPreviewExport from '@/views/TripPreviewExport.vue'
 import {
   getLatestPreviewAccess,
+  getV4FinalState,
   getV4Preview,
   getV4TaskStatus,
+  restoreV4Final,
+  saveV4Final,
+  v4FinalErrorMessage,
   v4PreviewErrorMessage,
 } from '@/services/v4Preview'
-import type { V4PreviewAccess, V4PreviewEnvelope } from '@/types/v4Preview'
+import type { V4FinalSaveResponse, V4FinalState, V4PreviewAccess, V4PreviewEnvelope } from '@/types/v4Preview'
 import { formatReferenceDuration, mapV4Preview, type TripPreviewView } from '@/utils/v4PreviewMapper'
+import {
+  canApplyV4Restore,
+  captureV4PreviewExport,
+  exportV4Snapshot,
+  type V4ExportFile,
+  type V4PreviewExportSnapshot,
+  type V4ExportVisibleState,
+} from '@/utils/v4PreviewExportController'
 
 const pageState = ref<'loading' | 'missing_access' | 'failed' | 'ready'>('loading')
 const errorMessage = ref('')
 const progressLabel = ref('正在整理旅行需求')
 const view = ref<TripPreviewView | null>(null)
+const envelope = ref<V4PreviewEnvelope | null>(null)
+const activeAccess = ref<V4PreviewAccess | null>(null)
+const finalState = ref<V4FinalState | null>(null)
+const finalStateChecked = ref(false)
+const finalStateLoadFailed = ref(false)
 const activeIndex = ref(0)
+const exporting = ref(false)
+const exportPhase = ref<'rendering' | 'saving'>('rendering')
+const exportFiles = ref<Array<{ filename: string; label: string; url: string }>>([])
+const restoring = ref(false)
+const exportSnapshot = ref<V4PreviewExportSnapshot | null>(null)
+const exportRenderer = ref<{ renderAll: () => Promise<readonly V4ExportFile<Blob>[]> } | null>(null)
+// Future editor state feeds this controller boundary; current v4 preview is read-only.
+const localDirty = ref(false)
+const localSaveInFlight = ref(false)
 let disposed = false
 let pendingTimer: number | null = null
 let requestGeneration = 0
+let finalStateGeneration = 0
 
 class PreviewPageError extends Error {}
 
 const activeDay = computed(() => view.value?.days[activeIndex.value] ?? null)
 const dayLevelIssues = computed(() => activeDay.value?.issues.filter((issue) => issue.scope === 'day') ?? [])
+const canRestore = computed(() => Boolean(
+  pageState.value === 'ready'
+  && envelope.value
+  && finalState.value?.restorable
+  && finalState.value.final
+  && !localDirty.value
+  && !localSaveInFlight.value
+  && !exporting.value
+  && !restoring.value,
+))
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
@@ -268,6 +324,12 @@ async function loadLatest(): Promise<void> {
   errorMessage.value = ''
   progressLabel.value = '正在整理旅行需求'
   view.value = null
+  envelope.value = null
+  activeAccess.value = access
+  finalState.value = null
+  finalStateChecked.value = false
+  finalStateLoadFailed.value = false
+  finalStateGeneration++
   try {
     await loadUntilReady(access, generation)
   } catch (error) {
@@ -293,14 +355,17 @@ async function loadUntilReady(access: V4PreviewAccess, generation: number): Prom
     }
     if (status.preview_ready || status.status === 'ready') {
       try {
-        const envelope: V4PreviewEnvelope = await getV4Preview(access)
+        const loadedEnvelope: V4PreviewEnvelope = await getV4Preview(access)
         if (disposed || generation !== requestGeneration) return
-        if (envelope.task_id !== access.taskId || envelope.plan_id !== access.planId) {
+        if (loadedEnvelope.task_id !== access.taskId || loadedEnvelope.plan_id !== access.planId) {
           throw new PreviewPageError('无法恢复这份预览。请从首页重新开始。')
         }
-        view.value = mapV4Preview(envelope)
+        view.value = mapV4Preview(loadedEnvelope)
+        envelope.value = loadedEnvelope
+        activeAccess.value = access
         activeIndex.value = 0
         pageState.value = 'ready'
+        void loadFinalState(access, generation)
         return
       } catch (error) {
         if (disposed || generation !== requestGeneration) return
@@ -310,6 +375,182 @@ async function loadUntilReady(access: V4PreviewAccess, generation: number): Prom
     await wait(1800)
     if (disposed || generation !== requestGeneration) return
   }
+}
+
+async function loadFinalState(access: V4PreviewAccess, pageGeneration: number): Promise<void> {
+  const request = ++finalStateGeneration
+  try {
+    const state = await getV4FinalState(access)
+    if (disposed || pageGeneration !== requestGeneration || request !== finalStateGeneration) return
+    if (state.task_id !== access.taskId || state.plan_id !== access.planId) return
+    finalState.value = state
+    finalStateChecked.value = true
+    finalStateLoadFailed.value = false
+  } catch {
+    // Final-state lookup is optional. It never blocks the preview or image export.
+    if (!disposed && pageGeneration === requestGeneration && request === finalStateGeneration) {
+      finalStateChecked.value = true
+      finalStateLoadFailed.value = true
+    }
+  }
+}
+
+async function exportCurrent(): Promise<void> {
+  if (exporting.value || !envelope.value || !view.value || !activeAccess.value) return
+  const access = activeAccess.value
+  const snapshot = captureV4PreviewExport(envelope.value, view.value, {
+    dirty: localDirty.value,
+    saving: localSaveInFlight.value,
+  })
+  exportSnapshot.value = snapshot
+  exporting.value = true
+  exportPhase.value = 'rendering'
+  try {
+    const result = await exportV4Snapshot({
+      snapshot,
+      renderAll: async (_visible: V4ExportVisibleState) => {
+        await nextTick()
+        const renderer = exportRenderer.value
+        if (!renderer) throw new Error('图片导出区域尚未准备好。')
+        return renderer.renderAll()
+      },
+      startDownloads: (files: readonly V4ExportFile<Blob>[]) => {
+        const links = files.map((file) => ({
+          filename: file.filename,
+          label: file.filename.replace(/^旅行计划_/, ''),
+          url: URL.createObjectURL(file.blob),
+        }))
+        revokeExportLinks()
+        exportFiles.value = links
+        for (const link of links) startImageDownload(link.url, link.filename)
+      },
+      canPersist: (source) => Boolean(
+        !localDirty.value
+        && !localSaveInFlight.value
+        && envelope.value?.task_id === source.taskId
+        && envelope.value.plan_id === source.planId
+        && envelope.value.store_version === source.storeVersion
+        && envelope.value.plan_revision === source.planRevision,
+      ),
+      onDownloadsStarted: (willAttemptSave) => {
+        if (willAttemptSave) exportPhase.value = 'saving'
+      },
+      saveFinal: (source) => saveV4Final(access, {
+        save_id: newRequestId('save'),
+        source_store_version: source.storeVersion,
+      }),
+      isSaved: (response: V4FinalSaveResponse) => {
+        if (response.task_id !== access.taskId || response.plan_id !== access.planId) {
+          throw new Error('保存结果与当前行程不匹配，图片已导出。')
+        }
+        return response.status !== 'stale'
+      },
+    })
+    if (result.status === 'saved') {
+      updateFinalState(result.response)
+      message.success(result.response.restorable
+        ? `已导出 ${result.fileCount} 张图片，并保存当前行程。`
+        : `已导出 ${result.fileCount} 张图片；保存结果目前不完整，暂不可还原。`)
+    } else if (result.status === 'stale') {
+      updateFinalState(result.response)
+      message.info(`已导出 ${result.fileCount} 张图片；行程已有变化，本次没有覆盖上次保存。`)
+    } else if (result.status === 'skipped') {
+      message.info(`已导出 ${result.fileCount} 张图片。当前内容有未同步修改，暂未保存服务器快照。`)
+    } else {
+      message.warning(v4FinalErrorMessage(result.error, 'save'))
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '图片生成失败，请重试。')
+  } finally {
+    exportSnapshot.value = null
+    exporting.value = false
+    exportPhase.value = 'rendering'
+  }
+}
+
+function updateFinalState(response: V4FinalSaveResponse): void {
+  finalStateGeneration++
+  finalStateChecked.value = true
+  finalStateLoadFailed.value = false
+  finalState.value = {
+    task_id: response.task_id,
+    plan_id: response.plan_id,
+    restorable: response.restorable,
+    final: response.final,
+    unavailable_reason: response.unavailable_reason,
+  }
+}
+
+async function restoreLastSaved(): Promise<void> {
+  const current = envelope.value
+  const access = activeAccess.value
+  const final = finalState.value?.final
+  if (!current || !access || !final || !canRestore.value) return
+  const expected = {
+    task_id: current.task_id,
+    plan_id: current.plan_id,
+    store_version: current.store_version,
+    plan_revision: current.plan_revision,
+  }
+  restoring.value = true
+  try {
+    const response = await restoreV4Final(access, {
+      restore_id: newRequestId('restore'),
+      expected_store_version: expected.store_version,
+      expected_plan_revision: expected.plan_revision,
+      expected_save_id: final.save_id,
+    })
+    if (disposed) return
+    if (!canApplyV4Restore({
+      dirty: localDirty.value,
+      saving: localSaveInFlight.value,
+      current: envelope.value ?? expected,
+      expected,
+    })) {
+      message.info('页面内容在还原期间已有变化，已保留当前内容；请确认后重新操作。')
+      return
+    }
+    if (response.envelope.task_id !== access.taskId
+      || response.envelope.plan_id !== access.planId
+      || response.restored_from.save_id !== final.save_id) {
+      throw new Error('还原结果与当前行程不匹配，当前页面内容保持不变。')
+    }
+    const restoredView = mapV4Preview(response.envelope)
+    envelope.value = response.envelope
+    view.value = restoredView
+    activeIndex.value = Math.min(activeIndex.value, Math.max(0, restoredView.days.length - 1))
+    message.success('已还原上次成功保存的行程。')
+  } catch (error) {
+    message.error(error instanceof Error && error.message.includes('不匹配')
+      ? error.message
+      : v4FinalErrorMessage(error, 'restore'))
+  } finally {
+    restoring.value = false
+  }
+}
+
+function newRequestId(prefix: string): string {
+  const randomId = globalThis.crypto?.randomUUID?.()
+  return randomId ? `${prefix}_${randomId}` : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`
+}
+
+function startImageDownload(url: string, filename: string): void {
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+}
+
+function revokeExportLinks(): void {
+  for (const file of exportFiles.value) URL.revokeObjectURL(file.url)
+  exportFiles.value = []
+}
+
+function formatSavedAt(value: string): string {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+    : value
 }
 
 function stageLabel(stage: string): string {
@@ -380,12 +621,20 @@ onUnmounted(() => {
   disposed = true
   requestGeneration++
   if (pendingTimer !== null) window.clearTimeout(pendingTimer)
+  revokeExportLinks()
 })
 </script>
 
 <style scoped>
 .preview-shell { max-width: 1440px; min-height: 100vh; margin: 0 auto; padding: 30px clamp(20px, 5vw, 72px) 84px; color: #1b322c; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
 .page-topline { display: flex; justify-content: space-between; align-items: center; padding-bottom: 17px; border-bottom: 1px solid #d7ded2; }
+.preview-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: end; gap: 8px; position: relative; }
+.preview-actions > small { color: #718173; font-size: 10px; }
+.preview-action { border: 1px solid #cdd8c9; background: #fffdfa; padding: 7px 11px; color: #355b44; font: inherit; font-size: 11px; cursor: pointer; }
+.preview-action:disabled { color: #9aa497; background: #f2f3ee; cursor: not-allowed; }
+.preview-action.restore-action { border-color: #b7c9a8; background: #eaf1df; }
+.export-download-fallback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 11px 14px; border: 1px solid #d8e0d2; background: #f7f8f1; color: #64785e; font-size: 11px; }
+.export-download-fallback a { color: #355b44; text-decoration: underline; }
 .eyebrow { color: #a65c40; font-size: 10px; letter-spacing: .15em; font-weight: 700; }
 .readonly-label { color: #718173; border: 1px solid #d2dbc7; padding: 5px 9px; font-size: 10px; }
 .hero { display: flex; align-items: end; justify-content: space-between; gap: 30px; padding: 34px 0 27px; border-bottom: 1px solid #cbd7c6; }
@@ -491,5 +740,5 @@ onUnmounted(() => {
 .loading-line i:nth-child(2) { animation-delay: .15s; }.loading-line i:nth-child(3) { animation-delay: .3s; }
 @keyframes pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-4px); } }
 @media (max-width: 940px) { .day-layout { grid-template-columns: 1fr; }.map-column { position: static; order: -1; }.hero { align-items: start; }.daily-facts { max-width: 430px; } }
-@media (max-width: 620px) { .preview-shell { padding: 20px 16px 55px; }.hero { display: block; padding: 25px 0; }.hero h1 { font-size: 39px; }.cost-summary { margin-top: 19px; min-width: 0; max-width: none; }.day-overview { display: block; }.daily-facts { justify-content: start; margin-top: 12px; }.lodging-grid { grid-template-columns: 1fr; gap: 13px; }.area-reference { border-left: 0; border-top: 1px solid #dce3d3; padding: 13px 0 0; }.mode-list { gap: 5px; }.mode-chip { padding: 7px; }.activity-card { padding: 16px; }.activity-title h3 { font-size: 19px; }.map-column { order: 0; } }
+@media (max-width: 620px) { .preview-shell { padding: 20px 16px 55px; }.page-topline { align-items: flex-start; }.preview-actions { max-width: 74%; }.hero { display: block; padding: 25px 0; }.hero h1 { font-size: 39px; }.cost-summary { margin-top: 19px; min-width: 0; max-width: none; }.day-overview { display: block; }.daily-facts { justify-content: start; margin-top: 12px; }.lodging-grid { grid-template-columns: 1fr; gap: 13px; }.area-reference { border-left: 0; border-top: 1px solid #dce3d3; padding: 13px 0 0; }.mode-list { gap: 5px; }.mode-chip { padding: 7px; }.activity-card { padding: 16px; }.activity-title h3 { font-size: 19px; }.map-column { order: 0; } }
 </style>
