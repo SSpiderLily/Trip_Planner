@@ -280,6 +280,51 @@ class PlanningDispatchService:
             }
             return result
 
+    @classmethod
+    def validate_result_snapshot(
+        cls,
+        context: PlanningDispatchContext,
+        result: PlanningDispatchResult,
+    ) -> PlanningDispatchResult:
+        """验证一次调度返回的已收集快照，不执行模型或工具调用。"""
+        if (not isinstance(result, PlanningDispatchResult)
+                or result.request_id != context.request_id
+                or result.run_id != context.run_id
+                or result.context_revision != context.context_revision
+                or result.base_revision != context.base_revision):
+            raise _DispatchFault(
+                "DISPATCH_RESULT_IDENTITY_MISMATCH", "dispatch_result",
+                "调度返回快照身份与当前请求不匹配。",
+            )
+
+        snapshot_context = PlanningDispatchContext(
+            planning_input=context.planning_input,
+            run_id=context.run_id,
+            context_revision=context.context_revision,
+            base_revision=context.base_revision,
+            fact_store=result.fact_store,
+            candidate_refs=result.candidate_refs,
+            area_hints=result.area_hints,
+            existing_tasks=result.existing_tasks,
+            task_results=result.task_results,
+            dispatch_scope=context.dispatch_scope,
+        )
+        validator = cls(decider=None, max_concurrency=1)
+        state = _MutableState(
+            context=snapshot_context,
+            fact_store=snapshot_context.fact_store,
+            candidate_refs=list(snapshot_context.candidate_refs),
+            area_hints=list(snapshot_context.area_hints),
+            existing_tasks=list(snapshot_context.existing_tasks),
+            task_results=list(snapshot_context.task_results),
+        )
+        validator._validate_initial_snapshot(state)
+        for execution in result.weather_results:
+            validator._validate_direct_identity(snapshot_context, execution, "weather")
+        for execution in result.endpoint_results:
+            validator._validate_direct_identity(snapshot_context, execution, "endpoint")
+        return result.model_copy(update={"candidate_refs": tuple(state.candidate_refs)})
+
     async def _run_loop(self, state: _MutableState, deadline: float) -> PlanningDispatchResult:
         last_action: str | None = None
         while True:

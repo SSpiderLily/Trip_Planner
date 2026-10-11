@@ -332,6 +332,123 @@ class FakeRepair:
 
 
 class PlanningV4PipelineTests(unittest.TestCase):
+    def test_initial_dispatch_semantic_error_keeps_valid_snapshot_and_warns_on_preview(self):
+        request = request_fixture()
+        facts, endpoint = endpoint_fixture(request, run_id="pipeline-partial-dispatch-task")
+        tracker = {}
+        initial_result = PlanningDispatchResult(
+            request_id=request.request_id,
+            run_id="pipeline-partial-dispatch-task",
+            context_revision=1,
+            base_revision=None,
+            action=None,
+            stop_reason="technical_error",
+            reason="拒绝了无效餐饮派发，保留之前已核实的结果。",
+            fact_store=facts,
+            endpoint_results=(endpoint,),
+            error=DispatchError(
+                code="MASTER_DINING_BINDING_INVALID",
+                step="master_decision",
+                message="主智能体决策未能完成。",
+            ),
+        )
+
+        class PartialDispatch:
+            async def run_async(self, context):
+                if context.dispatch_scope is None:
+                    return initial_result
+                return PlanningDispatchResult(
+                    request_id=context.request_id,
+                    run_id=context.run_id,
+                    context_revision=context.context_revision,
+                    base_revision=context.base_revision,
+                    action="delegate",
+                    stop_reason="no_progress",
+                    reason="没有可执行的新定向查询。",
+                    fact_store=context.fact_store,
+                    candidate_refs=context.candidate_refs,
+                    area_hints=context.area_hints,
+                )
+
+        progress_messages = []
+        pipeline = PlanningV4Pipeline(
+            requirement_interpreter_factory=lambda _timeout: FakeInterpreter(tracker),
+            dispatch_service_factory=lambda _timeout: PartialDispatch(),
+            daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
+            current_route_service_factory=lambda: FakeRouteService(tracker),
+            route_backfill_service_factory=lambda: FakeBackfill(tracker),
+            day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
+        )
+
+        result = asyncio.run(pipeline.run(
+            request,
+            task_id="pipeline-partial-dispatch-task",
+            plan_id="plan-partial-dispatch",
+            progress=lambda update: progress_messages.append(update.message),
+        ))
+
+        preview = result.snapshot.preview
+        self.assertEqual(preview.facts.places, facts.places)
+        self.assertIn("departure-fact", {fact.fact_id for fact in preview.facts.places})
+        self.assertIn("dispatch-partial-collection", {issue.issue_id for issue in preview.validation.issues})
+        warning = next(issue for issue in preview.validation.issues if issue.issue_id == "dispatch-partial-collection")
+        self.assertEqual(warning.code, "DISPATCH_COLLECTION_PARTIAL")
+        self.assertEqual(warning.category, "unknown_info")
+        self.assertFalse(warning.triggers_repair)
+        self.assertTrue(any("信息收集未能全部完成" in message for message in progress_messages))
+        self.assertEqual(tracker["proposal_identity"], ("pipeline-partial-dispatch-task", "plan-partial-dispatch"))
+
+    def test_initial_dispatch_semantic_error_does_not_recover_broken_fact_closure(self):
+        request = request_fixture()
+        facts, endpoint = endpoint_fixture(request, run_id="pipeline-broken-partial-task")
+        tracker = {}
+        broken_candidate = CandidateRef(
+            candidate_id="candidate-with-missing-fact",
+            category="sightseeing",
+            poi_id="missing-poi",
+            place_fact_id="missing-fact",
+        )
+        initial_result = PlanningDispatchResult(
+            request_id=request.request_id,
+            run_id="pipeline-broken-partial-task",
+            context_revision=1,
+            base_revision=None,
+            action=None,
+            stop_reason="technical_error",
+            reason="保留快照损坏。",
+            fact_store=facts,
+            candidate_refs=(broken_candidate,),
+            endpoint_results=(endpoint,),
+            error=DispatchError(
+                code="MASTER_DINING_BINDING_INVALID",
+                step="master_decision",
+                message="主智能体决策未能完成。",
+            ),
+        )
+
+        class BrokenPartialDispatch:
+            async def run_async(self, _context):
+                return initial_result
+
+        pipeline = PlanningV4Pipeline(
+            requirement_interpreter_factory=lambda _timeout: FakeInterpreter(tracker),
+            dispatch_service_factory=lambda _timeout: BrokenPartialDispatch(),
+            daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
+            current_route_service_factory=lambda: FakeRouteService(tracker),
+            route_backfill_service_factory=lambda: FakeBackfill(tracker),
+        )
+
+        with self.assertRaises(PlanningV4PipelineError) as raised:
+            asyncio.run(pipeline.run(
+                request,
+                task_id="pipeline-broken-partial-task",
+                plan_id="plan-broken-partial",
+                progress=lambda _update: None,
+            ))
+
+        self.assertEqual(raised.exception.code, "CANDIDATE_SOURCE_INVALID")
+        self.assertNotIn("proposal_identity", tracker)
+
     def test_actual_f06_weather_fallback_reaches_pipeline_preview_offline(self):
         request = request_fixture()
         endpoint_facts, endpoint = endpoint_fixture(request, run_id="pipeline-weather-fallback-task")

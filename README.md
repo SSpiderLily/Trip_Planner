@@ -433,3 +433,6 @@ v4中已查到有效天气但模型漏写出行建议时，会保留预报并显
 
 
 `/preview`地图下的“搜索其他地点”可按景点或餐馆搜索当前城市，查看来源与参考消费，选定时段后加入当天。缺少可靠位置的结果不可加入；候选失效时重新搜索。网络结果不明时保留待同步选择，刷新会安全核对同一命令。验证和浏览器故障回放见[搜索页面](docs/changes/CHG-003-planning-performance-observability.md#v4-destination-ui)。
+
+
+初始采集提前结束时，v4会重新校验已收集信息，并在信息有效时继续生成带提示的草稿；身份或事实引用损坏仍终止。规则与验收边界见[初始采集降级](docs/changes/CHG-003-planning-performance-observability.md#v4-initial-dispatch-recovery)。
