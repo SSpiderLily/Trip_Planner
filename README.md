@@ -375,7 +375,7 @@ Production deployment test.
 
 ### v4按日编辑核心
 
-`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。后续API负责原子存储和路线重算，当前页面尚未开放编辑，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
+`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。v4编辑API负责原子存储和路线重算；正式编辑页面继续接线，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
 
 
 ### v4最终结果保存与还原
@@ -397,3 +397,10 @@ Production deployment test.
 应用启动注册`PlanningV4Pipeline`并使用已确认的六个参考窗口；`TripRequest.explicit_return_buffer_s`可显式覆盖默认返程1小时，未填写时沿用默认。`PLANNER_V4_TOTAL_TIMEOUT_SECONDS`默认1800秒，`PLANNER_V4_INITIAL_COLLECTION_TIMEOUT_SECONDS`默认600秒；它们是停止等待的技术截止，不是业务查询额度。单日期最多修正3轮，耗尽后保留带缺项草稿；交通故障保留已验证活动。
 
 完整接线与独立离线验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-planning-pipeline)。当前配置模型配额不足，在线验收未完成；不要把离线回放当作真实旅行方案质量证据。
+
+
+### v4按日编辑API
+
+`POST /api/trip/v4/tasks/{task_id}/edits`携带`expected_store_version`和`EditCommand`，接受后返回202及同版本envelope、变化活动/路段和可选job。`GET .../edit-jobs/{calculation_id}`读取重算状态及当前预览，均使用该任务Bearer。一个命令只编辑一天，可在operations中原子删除多个活动；新增当前仅引用服务端已核实候选。
+
+网络结果不明时原样重放同一command_id；改参数必须新ID。409表示版本或幂等冲突，客户端先重新读取当前预览，不自动覆盖。后台路线失败保留已接受编辑；`PLANNER_EDIT_ROUTE_DEADLINE_SECONDS`默认120秒。重启恢复待查任务与具体故障验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-api)。

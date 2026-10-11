@@ -57,6 +57,7 @@ class PlanningV4EditService:
         command: EditCommand,
         *,
         verified_departure_fact_id: str | None = None,
+        inherited_pending_day_ids: tuple[str, ...] = (),
     ) -> EditExecution:
         if not isinstance(preview, ItineraryPreview) or not isinstance(command, EditCommand):
             raise PlanningV4EditError("input_type_invalid")
@@ -240,6 +241,12 @@ class PlanningV4EditService:
             leg.leg_id for leg in target_legs
             if any(result.status == "pending" for result in leg.mode_results)
         )
+        inherited_days = set(inherited_pending_day_ids) - {command.day_id}
+        pending_leg_ids = tuple(dict.fromkeys((*pending_leg_ids, *(
+            leg.leg_id for leg in final_draft.legs
+            if leg.day_id in inherited_days
+            and any(result.status == "pending" for result in leg.mode_results)
+        ))))
 
         timing = calculate_plan_timing(
             preview.planning_input,
@@ -257,7 +264,7 @@ class PlanningV4EditService:
         )
         calculation = PreviewCalculation(
             based_on_revision=revision,
-            calculation_id=f"edit:{command.command_id}",
+            calculation_id=f"edit:{draft.plan_id}:{command.command_id}",
             current_routes="pending" if pending_leg_ids else "completed",
             alternative_backfill="pending",
             pending_leg_ids=pending_leg_ids,

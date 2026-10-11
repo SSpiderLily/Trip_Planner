@@ -41,6 +41,37 @@ class DraftWriteResult:
 
 
 @dataclass(frozen=True)
+class PreviewEditWriteResult:
+    record: StoredPreview
+    receipt_store_version: int
+    replayed: bool
+    calculation_id: str
+    changed_activity_ids: tuple[str, ...]
+    changed_leg_ids: tuple[str, ...]
+    route_job: PreviewRouteJob | None = None
+
+
+@dataclass(frozen=True)
+class PreviewRouteJob:
+    task_id: str
+    plan_id: str
+    calculation_id: str
+    status: Literal["pending", "running", "completed", "failed", "superseded"]
+    source_store_version: int
+    source_plan_revision: int
+    affected_day_ids: tuple[str, ...]
+    result_store_version: int | None
+    error_code: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ClaimedPreviewRouteJob:
+    job: PreviewRouteJob
+    record: StoredPreview
+
+
+@dataclass(frozen=True)
 class SavedPreview:
     preview: ItineraryPreview
     plan_revision: int

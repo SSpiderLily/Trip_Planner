@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     planner_v4_total_timeout_seconds: float = Field(default=1800, gt=0, le=7200)
     planner_v4_initial_collection_timeout_seconds: float = Field(default=600, gt=0, le=3600)
 
+    planner_edit_route_deadline_seconds: float = Field(default=120, gt=0, le=600)
+
     # 日志配置
     log_level: str = "INFO"
 
