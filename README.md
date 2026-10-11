@@ -247,6 +247,15 @@ v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—1
 
 验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`；`cd frontend && npm run build`。替代依赖测试与真实调用验收结论见[学习日志](docs/learning-log.md)。
 
+F04c天气查询的独立手动核验（只调用高德MCP，不调用模型或写数据库）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python -m scripts.run_weather_query --live
+```
+
+必须显式传入`--live`。命令保留固定上海三日的2026-10-10至12日，按实际预报匹配日期；未覆盖日期显示unknown，工具错误与日期缺失分开。输出包含日级状态、供应商发布时间和查询来源摘要。后续规划只使用`WeatherQueryExecution.fact_store`中的已核验投影；`diagnostic_tool_result`仅供诊断。正式规划入口尚未接入，验收与交付状态见[CHG-003 F04c](docs/changes/CHG-003-planning-performance-observability.md#f04c-weather-query)。
+
 F01需求整理的独立手动核验（会调用配置的LLM，不属于离线测试）：
 
 ```bash

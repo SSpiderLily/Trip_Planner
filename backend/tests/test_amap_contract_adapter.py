@@ -156,6 +156,24 @@ class AmapContractAdapterTest(unittest.TestCase):
         self.assertEqual(result.data.forecasts[0].day_temp_c, -2)
         self.assertEqual(result.data.missing_dates, (date(2026, 10, 11),))
 
+    def test_weather_marks_missing_or_blank_provider_city_without_changing_fallback_value(self):
+        for raw_city in (None, [], "   "):
+            with self.subTest(raw_city=raw_city):
+                raw = {
+                    "result_status": "ok", "city": raw_city, "adcode": "310000",
+                    "forecasts": [{"date": "2026-10-10", "dayweather": "晴", "nightweather": "晴"}],
+                    "result_source": vendor_source({"city": "上海"}),
+                }
+                result = AmapContractAdapter(lambda *_: raw).get_weather(
+                    "上海", (date(2026, 10, 10),),
+                )
+
+                self.assertEqual(result.data.city, "上海")
+                self.assertIn(
+                    ("city", "not_returned"),
+                    {(item.field, item.reason) for item in result.missing_fields},
+                )
+
     def test_missing_metadata_never_claims_transit_date_was_sent(self):
         raw = {"result_status": "ok", "route": {"transits": [{"duration": "600", "segments": []}]}}
         runner = lambda *_: raw
