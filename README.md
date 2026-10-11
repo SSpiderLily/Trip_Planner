@@ -354,3 +354,5 @@ CC BY-NC-SA 4.0
 ## Deployment
 
 Production deployment test.
+
+按日期修正可用独立的 `DayRepairService(collect=..., revise=..., recalculate=...).run_async(...)` 组合已核实事实、当前草稿和F09报告。`DailyPlanGenerator.revise_day(...)` 只输出一个日期的修订；重算回调可使用F08的 `only_day_id` 和同一 `route_context`。每日期业务修正合计最多3轮，单次格式修复不另计轮；错误输出保留旧草稿，未知价格/天气/路线不单独触发修正。此模块尚未接入F05定向搜集适配器及正式API，边界见[CHG-003 F09b](docs/changes/CHG-003-planning-performance-observability.md#f09b-day-repair)。

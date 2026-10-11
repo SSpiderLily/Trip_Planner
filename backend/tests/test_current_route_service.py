@@ -287,6 +287,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertTrue(all(leg.plan_revision == self.draft.revision for leg in result.draft.legs))
         self.assertEqual(len(result.fact_store.routes), 15)
+
         self.assertLessEqual(self.fake_tool.peak, 4)
         self.assertEqual(self.fake_tool.peak, 4)
 
@@ -332,6 +333,81 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.input.model_dump(mode="json"), self.input_before)
         self.assertEqual(self.draft.model_dump(mode="json"), self.draft_before)
         self.assertEqual(self.facts.model_dump(mode="json"), self.facts_before)
+
+    async def test_only_day_requeries_target_and_preserves_other_day_routes(self):
+        full = await query_current_routes(
+            self.input, self.draft, self.facts,
+            verified_departure_fact_id="fact-terminal",
+            tool_executor=self.executor,
+            tool_timeout_seconds=1,
+        )
+        target_day_id = "day-2026-10-11"
+        preserved = {
+            leg.leg_id: leg for leg in full.draft.legs if leg.day_id != target_day_id
+        }
+        self.fake_tool.calls.clear()
+
+        scoped = await query_current_routes(
+            self.input, full.draft, full.fact_store,
+            verified_departure_fact_id="fact-terminal",
+            tool_executor=self.executor,
+            tool_timeout_seconds=1,
+            only_day_id=target_day_id,
+        )
+
+        self.assertTrue(self.fake_tool.calls)
+        self.assertTrue(all(
+            outcome.day_id == target_day_id for outcome in scoped.leg_results
+        ))
+        scoped_other_legs = {
+            leg.leg_id: leg for leg in scoped.draft.legs if leg.day_id != target_day_id
+        }
+        self.assertEqual(scoped_other_legs, preserved)
+        self.assertLess(len(self.fake_tool.calls), 15)
+
+    async def test_only_day_keeps_shared_route_context_and_rebases_other_legs(self):
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        try:
+            full = await route_service.run_async(
+                self.input, self.draft, self.facts,
+                verified_departure_fact_id="fact-terminal",
+                route_context=context,
+            )
+            target_day_id = "day-2026-10-11"
+            new_revision = full.draft.revision + 1
+            revised = full.draft.model_copy(update={
+                "revision": new_revision,
+                "base_revision": full.draft.revision,
+                "legs": tuple(
+                    leg.model_copy(update={"plan_revision": new_revision})
+                    for leg in full.draft.legs
+                ),
+            })
+            preserved = {
+                leg.leg_id: leg.model_copy(update={"plan_revision": new_revision})
+                for leg in revised.legs if leg.day_id != target_day_id
+            }
+
+            scoped = await route_service.run_async(
+                self.input, revised, full.fact_store,
+                verified_departure_fact_id="fact-terminal",
+                route_context=context,
+                only_day_id=target_day_id,
+            )
+
+            scoped_other_legs = {
+                leg.leg_id: leg for leg in scoped.draft.legs if leg.day_id != target_day_id
+            }
+            self.assertEqual(scoped_other_legs, preserved)
+            self.assertTrue(scoped.leg_results)
+            self.assertTrue(all(item.day_id == target_day_id for item in scoped.leg_results))
+            self.assertEqual(scoped.based_on_revision, new_revision)
+            self.assertFalse(context.route_cache._closed)
+        finally:
+            await context.aclose()
 
     async def test_failed_mode_is_retained_while_other_modes_remain_usable(self):
         self.fake_tool.fail_modes.add("walking")

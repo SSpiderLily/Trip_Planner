@@ -833,8 +833,11 @@ class CurrentRouteService:
         current_context_revision: int | None = None,
         only_edge: tuple[str, str, str] | None = None,
         route_context: PlanRouteContext | None = None,
+        only_day_id: str | None = None,
     ) -> CurrentRouteExecution:
         _validate_plan_binding(planning_input, draft)
+        if only_day_id is not None and only_day_id not in {day.day_id for day in draft.days}:
+            raise CurrentRouteError("requested_live_day_missing")
         merged_facts, departure_fact_id = _resolve_departure_fact(
             planning_input, draft, facts, endpoint_execution,
             verified_departure_fact_id, current_context_revision,
@@ -851,6 +854,8 @@ class CurrentRouteService:
             planning_input, draft, merged_facts, departure_fact_id,
         )
         if only_edge is not None:
+            if only_day_id is not None and only_edge[0] != only_day_id:
+                raise CurrentRouteError("requested_live_scope_conflict")
             matches = [edge for edges in edges_by_day.values() for edge in edges if (
                 edge.day_id == only_edge[0]
                 and edge.from_reference_id == only_edge[1]
@@ -965,6 +970,7 @@ class CurrentRouteService:
         day_tasks = [
             asyncio.create_task(run_day(day_id, edges))
             for day_id, edges in edges_by_day.items()
+            if only_day_id is None or day_id == only_day_id
         ]
         try:
             day_results = list(await asyncio.gather(*day_tasks))
@@ -986,10 +992,19 @@ class CurrentRouteService:
             updated_by_id.update((leg.leg_id, leg) for leg in local_legs)
             added_routes.extend(local_facts)
             leg_outcomes.extend(local_results)
-        final_legs = tuple(
-            updated_by_id.get(leg.leg_id, leg)
-            for leg in generated_legs
-        )
+        final_leg_items = []
+        for leg in generated_legs:
+            if only_day_id is not None and leg.day_id != only_day_id:
+                # The target day may receive a new global revision. Keep every other
+                # day's route content and only move its revision binding forward.
+                previous = original_legs.get(leg.leg_id)
+                final_leg_items.append(
+                    previous.model_copy(update={"plan_revision": draft.revision})
+                    if previous is not None else leg
+                )
+            else:
+                final_leg_items.append(updated_by_id.get(leg.leg_id, leg))
+        final_legs = tuple(final_leg_items)
         final_draft = draft.model_copy(update={"legs": final_legs}, deep=True)
         final_facts = _merge_fact_stores(
             merged_facts,
@@ -1006,6 +1021,12 @@ class CurrentRouteService:
             mode.status in {"empty", "error", "unknown", "not_queried"}
             for item in leg_outcomes for mode in item.modes
         )
+        if only_day_id is not None:
+            partial = partial or any(
+                result.status in {"pending", "empty", "error"}
+                for leg in final_legs if leg.day_id != only_day_id
+                for result in leg.mode_results
+            )
         return CurrentRouteExecution(
             plan_id=draft.plan_id,
             request_id=draft.request_id,
@@ -1245,8 +1266,9 @@ async def query_current_routes(
     tool_timeout_seconds: float | None = None,
     only_edge: tuple[str, str, str] | None = None,
     route_context: PlanRouteContext | None = None,
+    only_day_id: str | None = None,
 ) -> CurrentRouteExecution:
-    """查询酒店起点、相邻地点及已核实返程终点；不会重排活动或改写输入。"""
+    """查询当前路线；only_day_id 用于局部修订后只重查受影响日期。"""
     service = CurrentRouteService(
         adapter=adapter,
         tool_executor=tool_executor,
@@ -1262,4 +1284,5 @@ async def query_current_routes(
         current_context_revision=current_context_revision,
         only_edge=only_edge,
         route_context=route_context,
+        only_day_id=only_day_id,
     )
