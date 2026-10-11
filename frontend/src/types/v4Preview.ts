@@ -84,6 +84,52 @@ export interface V4RestoreResponse {
   receipt_store_version: number
 }
 
+export type V4EditOperation =
+  | { type: 'add_activity'; client_ref: string; candidate_ref: string; slot_id: string; day_id: string }
+  | { type: 'remove_activity'; day_id: string; activity_id: string }
+  | { type: 'reorder_activities'; day_id: string; activity_ids: string[] }
+  | { type: 'select_leg_mode'; day_id: string; leg_id: string; mode: V4TravelMode; option_id: string }
+
+export interface V4EditCommand {
+  plan_id: string
+  day_id: string
+  base_revision: number
+  command_id: string
+  operations: V4EditOperation[]
+}
+
+export interface V4EditRequest {
+  command: V4EditCommand
+  expected_store_version: number
+}
+
+export interface V4EditJob {
+  task_id: string
+  plan_id: string
+  calculation_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'superseded' | string
+  source_store_version: number
+  source_plan_revision: number
+  affected_day_ids: string[]
+  result_store_version: number | null
+  error_code: string | null
+  updated_at: string
+}
+
+export interface V4EditResponse {
+  envelope: V4PreviewEnvelope
+  job: V4EditJob | null
+  changed_activity_ids: string[]
+  changed_leg_ids: string[]
+  replayed: boolean
+  receipt_store_version: number
+}
+
+export interface V4EditJobResponse {
+  envelope: V4PreviewEnvelope
+  job: V4EditJob
+}
+
 export interface ItineraryPreview {
   schema_version: 4
   preview_id: string
