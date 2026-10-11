@@ -274,6 +274,8 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 命令复用完整的上海三日原始请求构造`PlanningInput`，任务仅覆盖10月10日下午的“必须去外滩”景点子任务，首次规划的`base_revision`为空。模型只返回搜索关键词或已查到的POI选择；后端固定城市、查询参数、事实来源与任务版本。模型输入包含已有候选的坐标、城市、分类、费用原文/数值、营业时间原文及来源引用。营业时间只作原文参考，不推断旅行日期是否开放。模型预期执行一次关键词搜索后结束，但若它继续搜索、需要补真实景点详情或遇到可重试的地图错误，实际地图调用次数会增加。命令不会重跑F01，不生成整趟行程，也不写正式任务数据库。成功输出TaskResult、事实来源、地图调用摘要、Token和耗时；不输出原始模型响应、第三方异常文本或密钥。已完成离线回归及一次上海外滩真实子任务核验；这不代表完整三日行程已经生成，F03进度与验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f03-单个景点子任务2026-10-11授权)。
 
+F05a主智能体决定为独立模块：`MasterDecider.run(MasterDecisionContext(...))`接收固定的PlanningInput、事实、候选及历史任务，返回后端定稿的delegate/plan决定。可执行角色和直接查询由当前依赖收窄；最多一次JSON格式修复，业务引用不合法直接拒绝。它不执行MCP或生成行程；F05b负责调度续派，F06负责每日安排。调用会使用配置的真实LLM。范围及验收见[CHG-003 F05a](docs/changes/CHG-003-planning-performance-observability.md#f05a-master-decision)。
+
 F07时间计算为纯服务：`calculate_plan_timing(planning_input, draft, facts, verified_departure_fact_id=...)` 按草稿顺序消费已有路线，不调用模型或地图。完整日默认08:00酒店出发；到达日使用已核实就绪时间，未知交通保留未知。返程事实须绑定F04d的已核实离开地点；默认1小时缓冲与交通分开。结果提供活动时刻、等待、已知耗时、不足3小时判断和冲突下界，不修改草稿。范围及验收见[CHG-003 F07](docs/changes/CHG-003-planning-performance-observability.md#f07-activity-timing)。
 
 F04b住宿子任务的独立手动核验（会调用配置的LLM和高德MCP）：

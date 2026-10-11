@@ -18,6 +18,18 @@ from .facts import (
     WeatherFact,
     WeatherForecast,
 )
+from .decision import (
+    AreaSpec,
+    DelegatePayload,
+    MasterDecisionOutcome,
+    MealAreaSpec,
+    NamedRestaurantSpec,
+    PlanPayload,
+    ResolvedMealArea,
+    ResolvedNamedRestaurant,
+    ResolvedTask,
+    TaskSpec,
+)
 from .input import (
     ArrivalBlockRule,
     DayConstraint,
@@ -61,11 +73,11 @@ from .plan import (
 from .tasks import CandidateRef, Subtask, TaskCoverage, TaskResult
 
 __all__ = [
-    "AddActivity", "AreaHint", "ArrivalBlockRule", "CandidateRef", "DayConstraint", "DayRevision", "DaySummary", "DayValidation", "DeleteActivity", "DraftActivity", "DraftDay", "EditCommand",
-    "FactSource", "FactStore", "HardRequirement", "ItineraryPreview", "MapCoordinate",
+    "AddActivity", "AreaHint", "AreaSpec", "ArrivalBlockRule", "CandidateRef", "DayConstraint", "DayRevision", "DaySummary", "DayValidation", "DelegatePayload", "DeleteActivity", "DraftActivity", "DraftDay", "EditCommand",
+    "FactSource", "FactStore", "HardRequirement", "ItineraryPreview", "MapCoordinate", "MasterDecisionOutcome", "MealAreaSpec",
     "LegEndpoint", "LodgingProposal", "LodgingRef", "MissingField", "PlaceFact", "PlaceSearchData", "PlanDraft", "PlanProposal", "ProposalActivity", "ProposalDay",
     "PlanningBoundaryFacts", "PlanningInput", "ReferenceCost", "RequirementSummary", "RouteFact", "RouteLeg",
     "RouteModeResult", "RouteOption", "RouteSegment", "RuleSet", "SelectLegMode", "SlotConstraint", "Subtask", "TaskCoverage", "TransitLine", "TransitStop",
-    "PreviewCalculation", "RepairState", "ReorderActivities", "RequirementResult", "TaskResult", "ToolError", "ToolResult", "TripBudget", "TripRequest", "ValidationIssue",
+    "NamedRestaurantSpec", "PlanPayload", "PreviewCalculation", "RepairState", "ReorderActivities", "RequirementResult", "ResolvedMealArea", "ResolvedNamedRestaurant", "ResolvedTask", "TaskResult", "TaskSpec", "ToolError", "ToolResult", "TripBudget", "TripRequest", "ValidationIssue",
     "ValidationReport", "WeatherFact", "WeatherForecast",
 ]
