@@ -11,7 +11,7 @@ from threading import Event
 from typing import Any, Callable
 from uuid import uuid4
 
-from app.agents.daily_plan_generator import DailyDayRevisionExecution
+from app.agents.daily_plan_generator import DailyDayRevisionExecution, DailyPlanRecoveryNotice
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
     AreaHint,
@@ -272,6 +272,17 @@ class PlanningV4Pipeline:
                     or draft.base_revision is not None
                     or draft.rule_version != planning_input.rules.rule_version):
                 raise PlanningV4PipelineError("PLAN_DRAFT_IDENTITY_MISMATCH", "proposal")
+            recovery_notices = tuple(getattr(generated, "recovery_notices", ()))
+            slots_by_day = {
+                day.day_id: {slot.slot_id for slot in day.slots if slot.eligibility != "skipped"}
+                for day in planning_input.days
+            }
+            if any(
+                not isinstance(notice, DailyPlanRecoveryNotice)
+                or notice.slot_id not in slots_by_day.get(notice.day_id, set())
+                for notice in recovery_notices
+            ):
+                raise PlanningV4PipelineError("PLAN_RECOVERY_NOTICE_INVALID", "proposal")
             # F06 may enrich area hints; these are the exact hints validated with the proposal.
             area_hints = draft.area_hints
 
@@ -506,6 +517,7 @@ class PlanningV4Pipeline:
                 )
             failed_route_days.update(self._failed_route_days(draft))
             current_routes_status = "failed" if failed_route_days else "completed"
+            report = self._with_initial_recovery_notices(report, recovery_notices)
             if initial_dispatch_recovery_code is not None:
                 report = report.model_copy(update={
                     "issues": (*report.issues, ValidationIssue(
@@ -1073,6 +1085,31 @@ class PlanningV4Pipeline:
             ),
         }, deep=True) for leg in draft.legs)
         return draft.model_copy(update={"legs": failed_legs}, deep=True)
+
+    @staticmethod
+    def _with_initial_recovery_notices(report, notices):
+        """记录初版活动被排除的事实；当前是否缺项仍由 F09 判断。"""
+        affected_slots = sorted({(notice.day_id, notice.slot_id) for notice in notices})
+        if not affected_slots:
+            return report
+        added = tuple(ValidationIssue(
+            issue_id=f"initial-activity-omitted:{day_id}:{slot_id}",
+            code="INITIAL_ACTIVITY_OMITTED",
+            category="unknown_info",
+            severity="warning",
+            scope="slot",
+            day_id=day_id,
+            target_id=slot_id,
+            message="该时段有初版活动未能通过校验，未纳入行程；其他有效安排已保留，请检查当前安排。",
+            triggers_repair=False,
+            based_on_revision=report.based_on_revision,
+        ) for day_id, slot_id in affected_slots)
+        return report.model_copy(update={
+            "issues": (*report.issues, *added),
+            "days": tuple(day.model_copy(update={
+                "issue_ids": (*day.issue_ids, *(issue.issue_id for issue in added if issue.day_id == day.day_id)),
+            }) for day in report.days),
+        })
 
     @staticmethod
     def _preview(

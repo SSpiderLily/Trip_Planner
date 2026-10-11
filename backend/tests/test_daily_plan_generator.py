@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from app.agents.daily_plan_generator import DailyPlanGenerator, DailyPlanModelOutput
+from app.agents.daily_plan_activity_repair import parse_patch_response
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
     AreaHint,
@@ -514,7 +515,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 self.assertEqual(execution.model_calls, 1)
                 self.assertEqual(execution.format_repairs, 0)
 
-    def test_rejects_sightseeing_in_lunch_even_when_candidate_slot_allows_it(self):
+    def test_repairs_sightseeing_in_lunch_even_when_candidate_slot_allows_it(self):
         planning_input = make_input()
         day_id = planning_input.days[1].day_id
         activity = {
@@ -523,22 +524,34 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-lunch",
             "kind": "sightseeing",
         }
-        generator, fake = make_generator(make_model_output(
+        first_response = make_model_output(
             planning_input,
             activities={day_id: (activity,)},
-        ))
-        with self.assertRaises(PlanningError) as raised:
-            generator.generate(
-                planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
-            )
-        self.assertEqual(raised.exception.code, "PLAN_REFERENCE_INVALID")
-        self.assertIn("activity_kind_slot_mismatch", raised.exception.reference_issue_codes)
-        self.assertEqual(len(fake.calls), 1)
-        self.assertEqual(raised.exception.model_calls, 1)
-        self.assertEqual(raised.exception.format_repairs, 0)
-        self.assertEqual(raised.exception.usage["total_tokens"], 180)
+        )
+        repair = json.dumps({"repairs": [{
+            "repair_id": "repair-0",
+            "action": "replace",
+            "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+        }]})
+        fake = FakeLLM([first_response, repair])
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+        lunch = next(
+            item for item in execution.draft.days[1].activities
+            if item.slot_id == "slot-2026-10-11-lunch"
+        )
+        self.assertEqual(lunch.kind, "meal")
+        self.assertEqual(lunch.candidate_ref, "candidate-meal")
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(execution.model_calls, 2)
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertEqual(execution.recovery_notices, ())
+        repair_prompt = json.loads(fake.calls[1][0][-1]["content"])
+        self.assertIn("活动kind不符合当前时段", repair_prompt["repair_targets"][0]["condition"])
+        self.assertEqual(repair_prompt["repair_targets"][0]["required_kind"], "meal")
 
-    def test_rejects_meal_in_morning(self):
+    def test_repairs_meal_in_morning(self):
         planning_input = make_input()
         day_id = planning_input.days[1].day_id
         activity = {
@@ -547,13 +560,23 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-morning",
             "kind": "meal",
         }
-        generator, fake = make_generator(make_model_output(planning_input, activities={day_id: (activity,)}))
-        with self.assertRaises(PlanningError) as raised:
-            generator.generate(
-                planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
-            )
-        self.assertIn("activity_kind_slot_mismatch", raised.exception.reference_issue_codes)
-        self.assertEqual(len(fake.calls), 1)
+        first_response = make_model_output(planning_input, activities={day_id: (activity,)})
+        repair = json.dumps({"repairs": [{
+            "repair_id": "repair-0",
+            "action": "replace",
+            "replacement": {"candidate_ref": "candidate-bund", "kind": "sightseeing"},
+        }]})
+        fake = FakeLLM([first_response, repair])
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+        morning = next(
+            item for item in execution.draft.days[1].activities
+            if item.slot_id == "slot-2026-10-11-morning"
+        )
+        self.assertEqual(morning.kind, "sightseeing")
+        self.assertEqual(morning.candidate_ref, "candidate-bund")
+        self.assertEqual(len(fake.calls), 2)
 
     def test_required_candidate_without_slot_scope_uses_any_available_sightseeing_slot(self):
         base_input = make_input()
@@ -622,15 +645,30 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-lunch",
             "kind": "meal",
         }
-        generator, fake = make_generator(make_model_output(planning_input, activities={day_id: (activity,)}))
-        with self.assertRaises(PlanningError) as raised:
-            generator.generate(
-                planning_input, (mislabeled, *candidates[1:]), make_facts(), make_areas(), (), source_run_id=RUN_ID,
-            )
-        self.assertIn("selected_candidate_category_invalid", raised.exception.reference_issue_codes)
-        self.assertEqual(len(fake.calls), 1)
+        first_response = make_model_output(planning_input, activities={day_id: (activity,)})
+        repair = json.dumps({"repairs": [{
+            "repair_id": "repair-0",
+            "action": "replace",
+            "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+        }]})
+        fake = FakeLLM([first_response, repair])
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input,
+            (mislabeled, *candidates[1:]),
+            make_facts(),
+            make_areas(),
+            (),
+            source_run_id=RUN_ID,
+        )
+        selected = next(
+            item for item in execution.draft.days[1].activities
+            if item.slot_id == "slot-2026-10-11-lunch"
+        )
+        self.assertEqual(selected.candidate_ref, "candidate-meal")
+        self.assertEqual(selected.kind, "meal")
+        self.assertEqual(len(fake.calls), 2)
 
-    def test_rejects_category_and_foreign_city_selections(self):
+    def test_repairs_incompatible_category_and_falls_back_for_foreign_city(self):
         planning_input = make_input()
         day_id = planning_input.days[1].day_id
         category_bad = {
@@ -639,12 +677,27 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-lunch",
             "kind": "sightseeing",
         }
-        generator, _ = make_generator(make_model_output(planning_input, activities={day_id: (category_bad,)}))
-        with self.assertRaises(PlanningError) as category_error:
-            generator.generate(
-                planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
-            )
-        self.assertIn("candidate_category_mismatch", category_error.exception.reference_issue_codes)
+        category_response = make_model_output(planning_input, activities={day_id: (category_bad,)})
+        category_repair = json.dumps({"repairs": [{
+            "repair_id": "repair-0",
+            "action": "replace",
+            "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+        }]})
+        category_fake = FakeLLM([category_response, category_repair])
+        generator = DailyPlanGenerator(llm=category_fake)
+        category_execution = generator.generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+        corrected = next(
+            item for item in category_execution.draft.days[1].activities
+            if item.slot_id == "slot-2026-10-11-lunch"
+        )
+        self.assertEqual(corrected.candidate_ref, "candidate-meal")
+        self.assertEqual(corrected.kind, "meal")
+        self.assertEqual(len(category_fake.calls), 2)
+        category_prompt = json.loads(category_fake.calls[1][0][-1]["content"])
+        self.assertIn("候选类别与required_kind不一致", category_prompt["repair_targets"][0]["condition"])
+        self.assertEqual(category_prompt["repair_targets"][0]["required_kind"], "meal")
 
         city_bad = {
             "proposal_ref": "bad-city",
@@ -652,17 +705,416 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-morning",
             "kind": "sightseeing",
         }
-        generator, _ = make_generator(make_model_output(planning_input, activities={day_id: (city_bad,)}))
-        with self.assertRaises(PlanningError) as city_error:
-            generator.generate(
-                planning_input,
-                make_candidates(),
-                make_facts(sightseeing_city="杭州"),
-                make_areas(),
-                (),
-                source_run_id=RUN_ID,
+        generator, city_fake = make_generator(make_model_output(planning_input, activities={day_id: (city_bad,)}))
+        city_execution = generator.generate(
+            planning_input,
+            make_candidates(),
+            make_facts(sightseeing_city="杭州"),
+            make_areas(),
+            (),
+            source_run_id=RUN_ID,
+        )
+        self.assertEqual(city_execution.draft.days[1].activities, ())
+        self.assertIn("slot-2026-10-11-morning", city_execution.draft.days[1].unfilled_slot_ids)
+        self.assertEqual(city_execution.recovery_notices[0].reason_code, "candidate_incompatible")
+        self.assertEqual(len(city_fake.calls), 1)
+
+    def test_local_patch_feedback_is_specific_and_preserves_locked_activities(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        payload = json.loads(make_model_output(planning_input, activities={day_id: (
+            {
+                "proposal_ref": "good-morning",
+                "candidate_ref": "candidate-bund",
+                "slot_id": "slot-2026-10-11-morning",
+                "kind": "sightseeing",
+                "duration_s": 10800,
+            },
+            {
+                "proposal_ref": "unknown-candidate-activity",
+                "candidate_ref": "unknown_candidate_secret_7913",
+                "slot_id": "slot-2026-10-11-evening",
+                "kind": "sightseeing",
+            },
+            {
+                "proposal_ref": "invalid-duration-activity",
+                "candidate_ref": "candidate-bund",
+                "slot_id": "slot-2026-10-11-afternoon",
+                "kind": "sightseeing",
+                "duration_s": -5,
+                "private_unknown_field_2648": "sensitive_value_5821",
+            },
+            {
+                "proposal_ref": "missing-lunch-candidate",
+                "candidate_ref": None,
+                "slot_id": "slot-2026-10-11-lunch",
+                "kind": "meal",
+            },
+            {
+                "proposal_ref": "good-afternoon",
+                "candidate_ref": "candidate-bund",
+                "slot_id": "slot-2026-10-11-afternoon",
+                "kind": "sightseeing",
+                "duration_s": 7200,
+            },
+        )}))
+        response = "```json\n" + json.dumps({
+            # A patch response cannot replace dates, themes, lodging or other activities.
+            "days": [],
+            "repairs": [
+                {
+                    "repair_id": "repair-0",
+                    "action": "replace",
+                    "replacement": {"candidate_ref": "candidate-bund-evening", "kind": "sightseeing"},
+                },
+                {
+                    "repair_id": "repair-1",
+                    "action": "replace",
+                    "replacement": {"candidate_ref": "candidate-bund", "kind": "sightseeing"},
+                },
+                {
+                    "repair_id": "repair-2",
+                    "action": "replace",
+                    "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+                },
+            ],
+        }) + "\n```"
+        candidates = (
+            *make_candidates(),
+            make_candidates()[0].model_copy(update={
+                "candidate_id": "candidate-bund-evening",
+                "slot_ids": ("slot-2026-10-11-evening",),
+            }),
+        )
+        fake = FakeLLM([json.dumps(payload, ensure_ascii=False), response])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, candidates, make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        patch_payload = json.loads(fake.calls[1][0][-1]["content"])
+        targets = patch_payload["repair_targets"]
+        self.assertEqual(len(targets), 3)
+        self.assertEqual(
+            {(target["day_date"], target["slot_id"], target["required_kind"]) for target in targets},
+            {
+                ("2026-10-11", "slot-2026-10-11-evening", "sightseeing"),
+                ("2026-10-11", "slot-2026-10-11-afternoon", "sightseeing"),
+                ("2026-10-11", "slot-2026-10-11-lunch", "meal"),
+            },
+        )
+        feedback = json.dumps(patch_payload, ensure_ascii=False)
+        self.assertIn("candidate_ref 不在当前已核实候选中", feedback)
+        self.assertIn("地点活动必须引用一个当前有效候选", feedback)
+        self.assertIn("duration_s 必须是非负整数秒", feedback)
+        self.assertIn("candidate-bund-evening", feedback)
+        self.assertIn('"candidate_id": "candidate-bund"', feedback)
+        self.assertIn("candidate-meal", feedback)
+        self.assertNotIn("unknown_candidate_secret_7913", feedback)
+        self.assertNotIn("private_unknown_field_2648", feedback)
+        self.assertNotIn("sensitive_value_5821", feedback)
+
+        day = execution.draft.days[1]
+        self.assertEqual(
+            [(item.slot_id, item.candidate_ref, item.duration_s) for item in day.activities],
+            [
+                ("slot-2026-10-11-morning", "candidate-bund", 10800),
+                ("slot-2026-10-11-evening", "candidate-bund-evening", 3 * 60 * 60),
+                ("slot-2026-10-11-afternoon", "candidate-bund", 3 * 60 * 60),
+                ("slot-2026-10-11-lunch", "candidate-meal", 60 * 60),
+                ("slot-2026-10-11-afternoon", "candidate-bund", 7200),
+            ],
+        )
+        self.assertEqual(day.theme, "第11日城市漫步")
+        self.assertEqual(len({item.activity_id for item in day.activities}), 5)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertEqual(execution.recovery_notices, ())
+
+    def test_unrepaired_local_activity_becomes_unfilled_without_losing_valid_activity(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        payload = json.loads(make_model_output(planning_input, activities={day_id: (
+            {
+                "proposal_ref": "good-morning",
+                "candidate_ref": "candidate-bund",
+                "slot_id": "slot-2026-10-11-morning",
+                "kind": "sightseeing",
+                "duration_s": 5400,
+            },
+            {
+                "proposal_ref": "bad-morning",
+                "candidate_ref": "unknown_candidate_secret_7913",
+                "slot_id": "slot-2026-10-11-morning",
+                "kind": "sightseeing",
+            },
+        )}))
+        fake = FakeLLM([json.dumps(payload), "not a repair payload"])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        day = execution.draft.days[1]
+        self.assertEqual(len(day.activities), 1)
+        self.assertEqual(day.activities[0].candidate_ref, "candidate-bund")
+        self.assertEqual(day.activities[0].duration_s, 5400)
+        # The slot remains covered by a valid visit, but F06 still reports the rejected
+        # original activity through the slot-scoped recovery notice.
+        self.assertNotIn("slot-2026-10-11-morning", day.unfilled_slot_ids)
+        self.assertEqual(len(execution.recovery_notices), 1)
+        self.assertEqual(execution.recovery_notices[0].slot_id, "slot-2026-10-11-morning")
+        self.assertEqual(execution.recovery_notices[0].reason_code, "candidate_reference_invalid")
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(execution.model_calls, 2)
+
+    def test_no_selectable_replacement_marks_slot_unfilled_without_extra_call(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        payload = json.loads(make_model_output(planning_input, activities={day_id: (
+            {
+                "proposal_ref": "bad-lunch",
+                "candidate_ref": None,
+                "slot_id": "slot-2026-10-11-lunch",
+                "kind": "meal",
+            },
+        )}))
+        candidates = tuple(item for item in make_candidates() if item.candidate_id != "candidate-meal")
+        fake = FakeLLM([json.dumps(payload)])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, candidates, make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        self.assertEqual(execution.draft.days[1].activities, ())
+        self.assertIn("slot-2026-10-11-lunch", execution.draft.days[1].unfilled_slot_ids)
+        self.assertEqual(len(execution.recovery_notices), 1)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(execution.model_calls, 1)
+        self.assertEqual(execution.usage["total_tokens"], 180)
+
+    def test_unlocatable_day_identity_error_is_not_downgraded(self):
+        planning_input = make_input()
+        payload = json.loads(make_model_output(planning_input))
+        payload["days"][1]["day_id"] = "foreign-day-identity"
+        fake = FakeLLM([json.dumps(payload)])
+
+        with self.assertRaises(PlanningError) as raised:
+            DailyPlanGenerator(llm=fake).generate(
+                planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
             )
-        self.assertIn("selected_candidate_city_invalid", city_error.exception.reference_issue_codes)
+
+        self.assertEqual(raised.exception.code, "PLAN_REFERENCE_INVALID")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_unknown_requirement_is_repaired_with_only_allowed_ids(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        payload = json.loads(make_model_output(planning_input, activities={day_id: ({
+            "proposal_ref": "unknown-requirement",
+            "candidate_ref": "candidate-meal",
+            "slot_id": "slot-2026-10-11-lunch",
+            "kind": "meal",
+            "requirement_ids": ["private_unknown_requirement_437"],
+        },)}))
+        patch_response = json.dumps({"repairs": [{
+            "repair_id": "repair-0",
+            "action": "replace",
+            "replacement": {"candidate_ref": "candidate-meal", "kind": "meal", "requirement_ids": []},
+        }]})
+        fake = FakeLLM([json.dumps(payload), patch_response])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        repair_prompt = json.loads(fake.calls[1][0][-1]["content"])
+        target = repair_prompt["repair_targets"][0]
+        self.assertIn("requirement_ids含未知需求", target["condition"])
+        self.assertEqual(target["available_verified_candidates"][0]["allowed_requirement_ids"], [])
+        self.assertNotIn("private_unknown_requirement_437", json.dumps(repair_prompt))
+        lunch = next(
+            item for item in execution.draft.days[1].activities
+            if item.slot_id == "slot-2026-10-11-lunch"
+        )
+        self.assertEqual(lunch.candidate_ref, "candidate-meal")
+        self.assertEqual(lunch.requirement_ids, ())
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_repair_budget_from_truncated_output_allows_safe_unfilled_fallback(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        initial_valid = make_model_output(planning_input)
+        bad_second_response = make_model_output(planning_input, activities={day_id: ({
+            "proposal_ref": "missing-lunch-candidate",
+            "candidate_ref": None,
+            "slot_id": "slot-2026-10-11-lunch",
+            "kind": "meal",
+        },)})
+        fake = MetadataFakeLLM([(initial_valid, "length"), (bad_second_response, "stop")])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(execution.model_calls, 2)
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertIn("slot-2026-10-11-lunch", execution.draft.days[1].unfilled_slot_ids)
+        self.assertEqual(execution.recovery_notices[0].reason_code, "activity_kind_reference_mismatch")
+
+    def test_duplicate_repair_id_with_one_bad_item_is_ambiguous(self):
+        response = json.dumps({"repairs": [
+            {
+                "repair_id": "repair-0",
+                "action": "replace",
+                "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+                "unexpected_field": "ignored but ambiguous",
+            },
+            {
+                "repair_id": "repair-0",
+                "action": "replace",
+                "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+            },
+        ]})
+
+        self.assertEqual(parse_patch_response(response, {"repair-0"}), {})
+
+    def test_local_patch_accepts_only_complete_json_fences(self):
+        patch = {
+            "repairs": [{
+                "repair_id": "repair-0",
+                "action": "replace",
+                "replacement": {"candidate_ref": "candidate-meal", "kind": "meal"},
+            }],
+        }
+        body = json.dumps(patch)
+        target_ids = {"repair-0"}
+
+        self.assertIn("repair-0", parse_patch_response(f"```json\n{body}\n```", target_ids))
+        self.assertEqual(parse_patch_response(f"```json\n{body}", target_ids), {})
+        self.assertEqual(parse_patch_response(f"```json\n{body}\n```\nextra", target_ids), {})
+        self.assertEqual(parse_patch_response(f"```python\n{body}\n```", target_ids), {})
+
+    def test_local_repair_observation_records_safe_target_for_success_and_call_failure(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        bad_output = make_model_output(planning_input, activities={day_id: ({
+            "proposal_ref": "untrusted-model-ref",
+            "candidate_ref": "unknown_candidate_secret_7913",
+            "slot_id": "slot-2026-10-11-morning",
+            "kind": "sightseeing",
+        },)})
+        outcomes = (
+            ("success", json.dumps({"repairs": [{
+                "repair_id": "repair-0",
+                "action": "replace",
+                "replacement": {"candidate_ref": "candidate-bund", "kind": "sightseeing"},
+            }]})),
+            ("failure", RuntimeError("provider_secret_615")),
+        )
+
+        for label, repair_response in outcomes:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                task_id = f"local-repair-observation-{label}"
+                repository = TaskRepository(Path(directory) / "observation.sqlite3")
+                repository.initialize()
+                repository.create(task_id, {})
+                fake = FakeLLM([bad_output, repair_response])
+                with ObservationService(repository).task(task_id):
+                    execution = DailyPlanGenerator(llm=fake).generate(
+                        planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+                    )
+
+                rows = repository.spans(task_id)
+                recovery_rows = [row for row in rows if row["name"] == "validation.daily_plan_local_repair"]
+                self.assertEqual(len(recovery_rows), 1)
+                recovery = repository.span(task_id, recovery_rows[0]["span_id"])["output_data"]
+                serialized = json.dumps([
+                    repository.span(task_id, row["span_id"])
+                    for row in rows
+                ], ensure_ascii=False)
+                self.assertEqual(recovery["target_count"], 1)
+                self.assertFalse(recovery["diagnostics_truncated"])
+                self.assertEqual(recovery["diagnostics"][0]["path"], "days[1].activities[0]")
+                self.assertIn("unknown_candidate", recovery["diagnostics"][0]["reason_codes"])
+                self.assertIn("candidate_ref 不在当前已核实候选中", recovery["diagnostics"][0]["guidance"])
+                self.assertNotIn("unknown_candidate_secret_7913", serialized)
+                self.assertNotIn("untrusted-model-ref", serialized)
+                self.assertNotIn("provider_secret_615", serialized)
+                self.assertEqual(len(fake.calls), 2)
+                if label == "failure":
+                    self.assertEqual(len(execution.recovery_notices), 1)
+                    self.assertEqual(recovery["status"], "repair_call_unavailable")
+                else:
+                    self.assertEqual(execution.recovery_notices, ())
+                    self.assertEqual(recovery["status"], "repaired")
+
+    def test_cancellation_is_not_downgraded_when_local_repair_has_no_candidates(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        bad_output = make_model_output(planning_input, activities={day_id: ({
+            "proposal_ref": "missing-lunch-candidate",
+            "candidate_ref": None,
+            "slot_id": "slot-2026-10-11-lunch",
+            "kind": "meal",
+        },)})
+        cancel_event = Event()
+
+        class CancellingLLM:
+            def __init__(self):
+                self.calls = []
+
+            def invoke_with_usage(self, messages, **kwargs):
+                self.calls.append((messages, kwargs))
+                cancel_event.set()
+                return bad_output, {"prompt_tokens": 120, "completion_tokens": 60, "total_tokens": 180}
+
+        fake = CancellingLLM()
+        candidates = tuple(item for item in make_candidates() if item.candidate_id != "candidate-meal")
+        with self.assertRaises(PlanningError) as raised:
+            DailyPlanGenerator(llm=fake).generate(
+                planning_input, candidates, make_facts(), make_areas(), (),
+                source_run_id=RUN_ID, cancel_event=cancel_event,
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_CALL_CANCELLED")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_cancellation_after_local_response_keeps_completed_call_statistics(self):
+        planning_input = make_input()
+        day_id = planning_input.days[1].day_id
+        bad_output = make_model_output(planning_input, activities={day_id: ({
+            "proposal_ref": "bad-candidate",
+            "candidate_ref": "unknown_candidate_7913",
+            "slot_id": "slot-2026-10-11-morning",
+            "kind": "sightseeing",
+        },)})
+        cancel_event = Event()
+        fake = FakeLLM([bad_output])
+        generator = DailyPlanGenerator(llm=fake)
+
+        def completed_repair_then_cancel(snapshot, *args, **kwargs):
+            cancel_event.set()
+            return (
+                snapshot.rebuild({}),
+                (),
+                1,
+                {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+                True,
+            )
+
+        with patch.object(generator, "_repair_local_activities", side_effect=completed_repair_then_cancel):
+            with self.assertRaises(PlanningError) as raised:
+                generator.generate(
+                    planning_input, make_candidates(), make_facts(), make_areas(), (),
+                    source_run_id=RUN_ID, cancel_event=cancel_event,
+                )
+
+        self.assertEqual(raised.exception.code, "MODEL_CALL_CANCELLED")
+        self.assertEqual(raised.exception.model_calls, 2)
+        self.assertEqual(raised.exception.format_repairs, 1)
+        self.assertEqual(raised.exception.usage["total_tokens"], 192)
 
     def test_invalid_candidate_source_and_task_run_fail_before_model_call(self):
         planning_input = make_input()
@@ -723,13 +1175,15 @@ class DailyPlanGeneratorTests(unittest.TestCase):
             "slot_id": "slot-2026-10-11-morning",
             "kind": "sightseeing",
         }
-        generator, _ = make_generator(make_model_output(planning_input, activities={day_id: (activity,)}))
+        generator, fake = make_generator(make_model_output(planning_input, activities={day_id: (activity,)}))
         facts = make_facts(sightseeing_city=None)
-        with self.assertRaises(PlanningError) as raised:
-            generator.generate(
-                planning_input, make_candidates(), facts, make_areas(), (), source_run_id=RUN_ID,
-            )
-        self.assertIn("selected_candidate_city_invalid", raised.exception.reference_issue_codes)
+        execution = generator.generate(
+            planning_input, make_candidates(), facts, make_areas(), (), source_run_id=RUN_ID,
+        )
+        self.assertEqual(execution.draft.days[1].activities, ())
+        self.assertIn("slot-2026-10-11-morning", execution.draft.days[1].unfilled_slot_ids)
+        self.assertEqual(execution.recovery_notices[0].reason_code, "candidate_incompatible")
+        self.assertEqual(len(fake.calls), 1)
 
     def test_specified_lodging_is_fixed_by_backend_or_unknown_without_fallback(self):
         planning_input = make_input(lodging_query="外滩酒店")

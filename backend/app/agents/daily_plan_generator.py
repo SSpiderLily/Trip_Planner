@@ -14,6 +14,20 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, ValidationError
 
+from .daily_plan_activity_repair import (
+    ActivityRepairOutput,
+    ActivityRepairSnapshot,
+    ActivityRepairTarget,
+    DailyPlanModelOutput,
+    DailyPlanRecoveryNotice,
+    build_reference_snapshot,
+    build_structural_snapshot,
+    notice_reason_code,
+    parse_patch_response,
+    reference_reasons_from_issues,
+    reference_reasons_from_selected,
+    safe_reason_text,
+)
 from ..models.planning_v4 import (
     AreaHint,
     CandidateRef,
@@ -50,13 +64,6 @@ MAX_TIMEOUT_SECONDS = 120.0
 MAX_FORMAT_REPAIRS = 1
 MAX_MODEL_TOKENS = 8192
 _MODEL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="daily-plan-model")
-
-
-class DailyPlanModelOutput(ContractModel):
-    """模型只输出每日安排；区域事实和请求版本由后端注入。"""
-
-    days: tuple[ProposalDay, ...] = Field(min_length=1)
-    missing_notes: tuple[str, ...] = ()
 
 
 class DailyDayRevisionModelOutput(ContractModel):
@@ -145,6 +152,7 @@ class DailyPlanExecution:
     model_calls: int
     format_repairs: int
     elapsed_seconds: float
+    recovery_notices: tuple[DailyPlanRecoveryNotice, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -646,6 +654,8 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
             usage_totals = _UsageAccumulator()
             model_calls = 0
             format_repairs = 0
+            repair_budget_used = False
+            recovery_notices: tuple[DailyPlanRecoveryNotice, ...] = ()
             _stats.sync(model_calls, format_repairs, usage_totals.value())
             with span(
                 "validation.daily_plan_inputs",
@@ -673,6 +683,91 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                 planning_input, candidates, facts, area_hints, task_results,
             )
             output: DailyPlanModelOutput | None = None
+
+            def raise_if_cancelled():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise PlanningError(
+                        "MODEL_CALL_CANCELLED", "每日安排生成已取消", step="daily_plan_model_call",
+                    ) from None
+
+            def record_local_recovery(snapshot, notices, status):
+                safe_targets = sorted(
+                    snapshot.targets,
+                    key=lambda target: (target.day_index, target.activity_index),
+                )
+                diagnostics = [
+                    {
+                        "path": f"days[{target.day_index}].activities[{target.activity_index}]",
+                        "reason_codes": list(target.reason_codes),
+                        "guidance": safe_reason_text(target.reason_codes),
+                    }
+                    for target in safe_targets[:8]
+                ]
+                with span(
+                    "validation.daily_plan_local_repair",
+                    "validation",
+                    {"target_count": len(safe_targets)},
+                ) as repair_record:
+                    repair_record.output = {
+                        "status": status,
+                        "target_count": len(safe_targets),
+                        "diagnostic_count": len(safe_targets),
+                        "diagnostics_truncated": len(safe_targets) > len(diagnostics),
+                        "diagnostics": diagnostics,
+                        "recovered_count": len(snapshot.targets) - len(notices),
+                        "unresolved_count": len(notices),
+                        "reason_codes": sorted({item.reason_code for item in notices}),
+                    }
+
+            def repair_local(snapshot: ActivityRepairSnapshot) -> DailyPlanModelOutput:
+                nonlocal model_calls, format_repairs, repair_budget_used, recovery_notices
+                raise_if_cancelled()
+                if repair_budget_used:
+                    recovery_notices = tuple(self._recovery_notice(target) for target in snapshot.targets)
+                    record_local_recovery(snapshot, recovery_notices, "repair_budget_exhausted")
+                    raise_if_cancelled()
+                    return snapshot.rebuild({})
+                repair_budget_used = True
+                try:
+                    repaired, notices, local_calls, local_usage, call_attempted = self._repair_local_activities(
+                        snapshot,
+                        planning_input,
+                        candidates,
+                        facts,
+                        area_hints,
+                        deadline,
+                        request_id=planning_input.request.request_id,
+                        source_run_id=source_run_id,
+                        cancel_event=cancel_event,
+                    )
+                except PlanningError as exc:
+                    # 取消继续向上传递；其它局部模型错误保留已经隔离的
+                    # 有效快照，并把坏活动交给F09作为缺项。
+                    model_calls += getattr(exc, "model_calls", 0)
+                    usage_totals.add(getattr(exc, "usage", None))
+                    format_repairs += 1
+                    _stats.sync(model_calls, format_repairs, usage_totals.value())
+                    if exc.code == "MODEL_CALL_CANCELLED":
+                        raise
+                    recovery_notices = tuple(self._recovery_notice(target) for target in snapshot.targets)
+                    raise_if_cancelled()
+                    record_local_recovery(snapshot, recovery_notices, "repair_call_unavailable")
+                    return snapshot.rebuild({})
+                model_calls += local_calls
+                if call_attempted:
+                    format_repairs += 1
+                recovery_notices = notices
+                if local_calls > 0:
+                    usage_totals.add(local_usage)
+                _stats.sync(model_calls, format_repairs, usage_totals.value())
+                raise_if_cancelled()
+                record_local_recovery(
+                    snapshot,
+                    recovery_notices,
+                    "repaired" if not recovery_notices else "partially_repaired",
+                )
+                return repaired
+
             for attempt in range(MAX_FORMAT_REPAIRS + 1):
                 try:
                     response, raw_usage, finish_reason, call_started = self._invoke_once(
@@ -731,6 +826,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                             step="daily_plan_output_validation",
                         ) from None
                     format_repairs += 1
+                    repair_budget_used = True
                     _stats.sync(model_calls, format_repairs, usage_totals.value())
                     messages = [
                         *messages,
@@ -762,6 +858,27 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                             }
                             raise _InvalidModelOutput(issues) from None
                 except _InvalidModelOutput as invalid:
+                    # 活动字段错误只有在日期、有效时段和唯一 proposal_ref 都可
+                    # 安全定位时才进入局部修复；其他结构问题沿用一次全局格式修复。
+                    try:
+                        raw_payload = _parse_json(response)
+                    except (ValueError, TypeError):
+                        raw_payload = None
+                    initial_snapshot = build_structural_snapshot(raw_payload, planning_input)
+                    if initial_snapshot is not None:
+                        local_snapshot, _, _ = self._collect_local_activity_errors(
+                            initial_snapshot.output,
+                            planning_input,
+                            candidates,
+                            facts,
+                            area_hints,
+                            initial_snapshot=initial_snapshot,
+                        )
+                        if local_snapshot is not None:
+                            # 如果前一轮已消耗唯一修复调用，只隔离坏活动并将其交给
+                            # F09；不再发起第三次模型调用。
+                            output = repair_local(local_snapshot)
+                            break
                     if attempt >= MAX_FORMAT_REPAIRS:
                         agent_record.output = {
                             "status": "invalid_output",
@@ -774,6 +891,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                             step="daily_plan_output_validation",
                         ) from None
                     format_repairs += 1
+                    repair_budget_used = True
                     _stats.sync(model_calls, format_repairs, usage_totals.value())
                     messages = [
                         *messages,
@@ -794,20 +912,35 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                     "validation",
                     {"request_id": planning_input.request.request_id, "candidate_count": len(candidates)},
                 ) as validation_record:
-                    try:
-                        proposal = self._build_proposal(output, planning_input, area_hints, facts)
-                        validate_plan_proposal(proposal, planning_input, candidates, facts)
-                        self._validate_selected_candidates(
-                            proposal, planning_input, candidates, facts, area_hints,
+                    snapshot, proposal, issue_codes = self._collect_local_activity_errors(
+                        output, planning_input, candidates, facts, area_hints,
+                    )
+                    if issue_codes is not None:
+                        validation_record.output = {"valid": False, "issue_codes": list(issue_codes)}
+                        raise _reference_error(issue_codes) from None
+                    if snapshot is not None:
+                        output = repair_local(snapshot)
+                        proposal = self._validate_proposal_output(
+                            output, planning_input, candidates, facts, area_hints,
                         )
-                        validation_record.output = {"valid": True}
-                    except ContractValidationError as exc:
-                        codes = sorted({issue.code for issue in exc.issues})
-                        validation_record.output = {"valid": False, "issue_codes": codes}
-                        raise _reference_error(codes) from None
-                    except _InvalidReferences as exc:
-                        validation_record.output = {"valid": False, "issue_codes": list(exc.codes)}
-                        raise _reference_error(exc.codes) from None
+                    if proposal is None:
+                        # 局部扫描未能安全定位全局错误。复验后只返回固定错误码。
+                        try:
+                            proposal = self._validate_proposal_output(
+                                output, planning_input, candidates, facts, area_hints,
+                            )
+                        except ContractValidationError as exc:
+                            codes = sorted({issue.code for issue in exc.issues})
+                            validation_record.output = {"valid": False, "issue_codes": codes}
+                            raise _reference_error(codes) from None
+                        except _InvalidReferences as exc:
+                            validation_record.output = {"valid": False, "issue_codes": list(exc.codes)}
+                            raise _reference_error(exc.codes) from None
+                    validation_record.output = {
+                        "valid": True,
+                        "local_recovery_count": len(recovery_notices),
+                        "recovery_reason_codes": sorted({item.reason_code for item in recovery_notices}),
+                    }
 
                 draft = self._build_draft(
                     proposal, planning_input, candidates, facts, area_hints, source_run_id,
@@ -840,6 +973,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                 model_calls=model_calls,
                 format_repairs=format_repairs,
                 elapsed_seconds=elapsed,
+                recovery_notices=recovery_notices,
             )
             agent_record.output = {
                 "status": "complete",
@@ -847,9 +981,120 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                 "activity_count": sum(len(day.activities) for day in draft.days),
                 "model_calls": model_calls,
                 "format_repairs": format_repairs,
+                "recovery_notice_count": len(recovery_notices),
                 "elapsed_seconds": elapsed,
             }
             return execution
+
+    def _collect_local_activity_errors(
+        self,
+        output: DailyPlanModelOutput,
+        planning_input: PlanningInput,
+        candidates: tuple[CandidateRef, ...],
+        facts: FactStore,
+        area_hints: tuple[AreaHint, ...],
+        *,
+        initial_snapshot: ActivityRepairSnapshot | None = None,
+    ) -> tuple[ActivityRepairSnapshot | None, PlanProposal | None, tuple[str, ...] | None]:
+        """逐层移除可定位的活动错误，直到全局提案剩余部分完全通过校验。
+
+        返回 issue_codes 时表示存在全局或无法安全归属的错误。每轮必须至少剥离
+        一个活动，循环次数受初版活动数限制；所有本地问题最终共用同一patch预算。
+        """
+        current = initial_snapshot.output if initial_snapshot is not None else output
+        original_positions: dict[str, tuple[int, int]] = {}
+        targets_by_ref: dict[str, ActivityRepairTarget] = {}
+
+        if initial_snapshot is not None:
+            for day_index, activity_index, activity in initial_snapshot.positioned_activities:
+                original_positions[activity.proposal_ref] = (day_index, activity_index)
+            for target in initial_snapshot.targets:
+                original_positions[target.proposal_ref] = (target.day_index, target.activity_index)
+                targets_by_ref[target.proposal_ref] = target
+        else:
+            for day_index, day in enumerate(current.days):
+                for activity_index, activity in enumerate(day.activities):
+                    if activity.proposal_ref in original_positions:
+                        return None, None, ("duplicate_proposal_ref",)
+                    original_positions[activity.proposal_ref] = (day_index, activity_index)
+
+        max_passes = sum(len(day.activities) for day in current.days) + 1
+        for _ in range(max_passes):
+            try:
+                proposal = self._validate_proposal_output(
+                    current, planning_input, candidates, facts, area_hints,
+                )
+            except ContractValidationError as exc:
+                issue_codes = tuple(sorted({issue.code for issue in exc.issues}))
+                reasons = reference_reasons_from_issues(exc.issues)
+            except _InvalidReferences as exc:
+                issue_codes = exc.codes
+                reasons = reference_reasons_from_selected(exc.codes, exc.activity_issue_codes)
+            else:
+                if not targets_by_ref:
+                    return None, proposal, None
+                ordered = sorted(
+                    targets_by_ref.values(),
+                    key=lambda target: (target.day_index, target.activity_index),
+                )
+                normalized_targets = tuple(
+                    ActivityRepairTarget(
+                        repair_id=f"repair-{index}",
+                        day_index=target.day_index,
+                        activity_index=target.activity_index,
+                        day_id=target.day_id,
+                        day_date=target.day_date,
+                        slot_id=target.slot_id,
+                        period=target.period,
+                        expected_kind=target.expected_kind,
+                        proposal_ref=target.proposal_ref,
+                        reason_codes=target.reason_codes,
+                    )
+                    for index, target in enumerate(ordered)
+                )
+                positioned = []
+                for day_index, day in enumerate(current.days):
+                    for activity in day.activities:
+                        position = original_positions.get(activity.proposal_ref)
+                        if position is None or position[0] != day_index:
+                            return None, None, ("activity_identity_unresolved",)
+                        positioned.append((position[0], position[1], activity))
+                snapshot = ActivityRepairSnapshot(
+                    current,
+                    normalized_targets,
+                    tuple(sorted(positioned, key=lambda item: (item[0], item[1]))),
+                )
+                return snapshot, None, None
+
+            if reasons is None:
+                return None, None, issue_codes
+            step = build_reference_snapshot(current, planning_input, reasons)
+            if step is None or not step.targets:
+                return None, None, issue_codes
+            for target in step.targets:
+                activity = current.days[target.day_index].activities[target.activity_index]
+                original_position = original_positions.get(activity.proposal_ref)
+                if original_position is None or original_position[0] != target.day_index:
+                    return None, None, issue_codes
+                previous = targets_by_ref.get(activity.proposal_ref)
+                combined_reasons = set(target.reason_codes)
+                if previous is not None:
+                    combined_reasons.update(previous.reason_codes)
+                targets_by_ref[activity.proposal_ref] = ActivityRepairTarget(
+                    repair_id="",
+                    day_index=original_position[0],
+                    activity_index=original_position[1],
+                    day_id=target.day_id,
+                    day_date=target.day_date,
+                    slot_id=target.slot_id,
+                    period=target.period,
+                    expected_kind=target.expected_kind,
+                    proposal_ref=activity.proposal_ref,
+                    reason_codes=tuple(sorted(combined_reasons)),
+                )
+            current = step.output
+
+        return None, None, ("activity_localization_limit",)
 
     def _invoke_once(
         self, messages, deadline, *, attempt, request_id, source_run_id,
@@ -1054,6 +1299,162 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
+    def _validate_proposal_output(self, output, planning_input, candidates, facts, area_hints):
+        refs = [activity.proposal_ref for day in output.days for activity in day.activities]
+        if len(refs) != len(set(refs)):
+            raise _reference_error(("duplicate_proposal_ref",))
+        proposal = self._build_proposal(output, planning_input, area_hints, facts)
+        validate_plan_proposal(proposal, planning_input, candidates, facts)
+        self._validate_selected_candidates(proposal, planning_input, candidates, facts, area_hints)
+        return proposal
+
+    def _repair_local_activities(
+        self,
+        snapshot: ActivityRepairSnapshot,
+        planning_input: PlanningInput,
+        candidates: tuple[CandidateRef, ...],
+        facts: FactStore,
+        area_hints: tuple[AreaHint, ...],
+        deadline: float,
+        *,
+        request_id: str,
+        source_run_id: str,
+        cancel_event: Event | None,
+    ):
+        """对可定位坏活动执行一次patch调用；所有好活动由后端快照锁定。"""
+        place_by_fact = {place.fact_id: place for place in facts.places}
+        options_by_target: dict[str, dict[str, CandidateRef]] = {}
+        target_records = []
+        for target in snapshot.targets:
+            options: dict[str, CandidateRef] = {}
+            records = []
+            for candidate in candidates:
+                if candidate.category != target.expected_kind:
+                    continue
+                if candidate.slot_ids and target.slot_id not in candidate.slot_ids:
+                    continue
+                place = place_by_fact.get(candidate.place_fact_id)
+                if self._candidate_rejection(candidate, place, planning_input, facts, area_hints) is not None:
+                    continue
+                options[candidate.candidate_id] = candidate
+                records.append({
+                    "candidate_id": candidate.candidate_id,
+                    "category": candidate.category,
+                    "name": place.name,
+                    "city": place.city,
+                    "type_name": place.type_name,
+                    "allowed_requirement_ids": list(candidate.requirement_ids),
+                })
+            if not records:
+                continue
+            options_by_target[target.repair_id] = options
+            target_records.append({
+                "repair_id": target.repair_id,
+                "day_id": target.day_id,
+                "day_date": target.day_date.isoformat(),
+                "slot_id": target.slot_id,
+                "period": target.period,
+                "required_kind": target.expected_kind,
+                "condition": safe_reason_text(target.reason_codes),
+                "available_verified_candidates": records,
+            })
+
+        if not target_records:
+            return (
+                snapshot.rebuild({}),
+                tuple(self._recovery_notice(target) for target in snapshot.targets),
+                0,
+                None,
+                False,
+            )
+
+        request = planning_input.request
+        repair_messages = [
+            {
+                "role": "system",
+                "content": """你只修复列出的初版活动。只返回 repairs 数组，不输出整份行程。
+每个 repair_id 只能提交一个 replace 或 leave_unfilled。replace 只能从该目标列出的 selectable 已核实候选中选择；kind必须等于required_kind，requirement_ids只能取所选候选的allowed_requirement_ids，不确定时留空。不要提供地点名称、日期、时段、proposal_ref、说明文字或其他字段。
+后端会把patch放回原活动位置，并锁定所有未列出的有效活动、原顺序、主题、天气和住宿。没有合适候选时使用leave_unfilled。""",
+            },
+            {
+                "role": "user",
+                "content": json.dumps({
+                    "schema": ActivityRepairOutput.model_json_schema(),
+                    "trip_context": {
+                        "city": request.city,
+                        "preferences": list(request.preferences),
+                        "transport_preferences": list(request.transport_preferences),
+                        "lodging_query": request.lodging_query,
+                        "remarks": request.remarks,
+                        "hard_requirements": [
+                            {"requirement_id": item.requirement_id, "kind": item.kind, "text": item.text}
+                            for item in planning_input.requirements.hard_requirements
+                        ],
+                    },
+                    "repair_targets": target_records,
+                }, ensure_ascii=False),
+            },
+        ]
+        response = None
+        call_started = False
+        raw_usage = None
+        try:
+            response, raw_usage, finish_reason, call_started = self._invoke_once(
+                repair_messages,
+                deadline,
+                attempt=2,
+                request_id=request_id,
+                source_run_id=source_run_id,
+                cancel_event=cancel_event,
+            )
+        except PlanningError:
+            # The caller preserves the isolated snapshot for non-cancellation errors.
+            raise
+
+        parsed = parse_patch_response(response, set(options_by_target)) if finish_reason in (None, "stop") else {}
+        replacements: dict[str, ProposalActivity] = {}
+        for target in snapshot.targets:
+            item = parsed.get(target.repair_id)
+            if item is None or item.action != "replace" or item.replacement is None:
+                continue
+            candidate = options_by_target.get(target.repair_id, {}).get(item.replacement.candidate_ref)
+            if candidate is None or item.replacement.kind != target.expected_kind:
+                continue
+            requirement_ids = item.replacement.requirement_ids
+            if len(requirement_ids) != len(set(requirement_ids)):
+                continue
+            if not set(requirement_ids).issubset(set(candidate.requirement_ids)):
+                continue
+            try:
+                replacement = ProposalActivity(
+                    proposal_ref=target.proposal_ref,
+                    candidate_ref=candidate.candidate_id,
+                    slot_id=target.slot_id,
+                    kind=target.expected_kind,
+                    duration_s=item.replacement.duration_s,
+                    requirement_ids=requirement_ids,
+                    recommendation_reason="根据已核实候选修复的活动。",
+                )
+            except (ValidationError, ValueError):
+                continue
+            replacements[target.repair_id] = replacement
+
+        notices = tuple(
+            self._recovery_notice(target)
+            for target in snapshot.targets
+            if target.repair_id not in replacements
+        )
+        return snapshot.rebuild(replacements), notices, int(call_started), raw_usage, True
+
+    @staticmethod
+    def _recovery_notice(target: ActivityRepairTarget) -> DailyPlanRecoveryNotice:
+        return DailyPlanRecoveryNotice(
+            day_id=target.day_id,
+            slot_id=target.slot_id,
+            activity_index=target.activity_index,
+            reason_code=notice_reason_code(target),
+        )
+
     @staticmethod
     def _place_for_model(place: PlaceFact) -> dict[str, Any]:
         # 地点核实原文完整保留；不把路线几何或模型以外的路径数据送入排程调用。
@@ -1255,72 +1656,81 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
         by_id = {candidate.candidate_id: candidate for candidate in candidates}
         place_by_fact = {place.fact_id: place for place in facts.places}
         area_ids = {area.area_hint_id for area in area_hints}
-        issues: list[str] = []
+        issues: set[str] = set()
+        activity_issue_codes: dict[tuple[int, int], set[str]] = {}
+
+        def add_activity_issue(day_index, activity_index, code):
+            issues.add(code)
+            activity_issue_codes.setdefault((day_index, activity_index), set()).add(code)
+
         expected_day_ids = [day.day_id for day in planning_input.days]
         if [day.day_id for day in proposal.days] != expected_day_ids:
-            issues.append("day_order_mismatch")
+            issues.add("day_order_mismatch")
         slots_by_day = {day.day_id: {slot.slot_id: slot for slot in day.slots} for day in planning_input.days}
-        for day in proposal.days:
-            for activity in day.activities:
+        for day_index, day in enumerate(proposal.days):
+            for activity_index, activity in enumerate(day.activities):
                 slot = slots_by_day.get(day.day_id, {}).get(activity.slot_id)
                 if activity.kind == "sightseeing" and (slot is None or slot.period not in {"morning", "afternoon", "evening"}):
-                    issues.append("activity_kind_slot_mismatch")
+                    add_activity_issue(day_index, activity_index, "activity_kind_slot_mismatch")
                 if activity.kind == "meal" and (slot is None or slot.period not in {"breakfast", "lunch", "dinner"}):
-                    issues.append("activity_kind_slot_mismatch")
+                    add_activity_issue(day_index, activity_index, "activity_kind_slot_mismatch")
                 if activity.candidate_ref is None:
                     continue
                 candidate = by_id.get(activity.candidate_ref)
                 if candidate is None or (candidate.slot_ids and activity.slot_id not in candidate.slot_ids):
-                    issues.append("candidate_slot_scope_invalid")
+                    add_activity_issue(day_index, activity_index, "candidate_slot_scope_invalid")
                 place = place_by_fact.get(candidate.place_fact_id) if candidate else None
                 if place is None or not place.city or not _city_matches(planning_input.request.city, place.city):
-                    issues.append("selected_candidate_city_invalid")
+                    add_activity_issue(day_index, activity_index, "selected_candidate_city_invalid")
                 if place is None or place.location is None:
-                    issues.append("selected_candidate_location_missing")
+                    add_activity_issue(day_index, activity_index, "selected_candidate_location_missing")
                 if place is not None and activity.kind == "sightseeing" and _category_status(place) != "sightseeing":
-                    issues.append("selected_candidate_category_invalid")
+                    add_activity_issue(day_index, activity_index, "selected_candidate_category_invalid")
                 if place is not None and activity.kind == "meal" and _dining_category(place) != "dining":
-                    issues.append("selected_candidate_category_invalid")
+                    add_activity_issue(day_index, activity_index, "selected_candidate_category_invalid")
                 if place is None or not place.source_refs or any(
                     source_id not in {source.tool_call_id for source in facts.sources}
                     for source_id in place.source_refs
                 ):
-                    issues.append("selected_candidate_source_invalid")
+                    add_activity_issue(day_index, activity_index, "selected_candidate_source_invalid")
             lodging = day.lodging
             if _specified_lodging(planning_input):
                 selected = self._unique_specified_lodging(planning_input, candidates, facts, area_hints)
                 if lodging and lodging.candidate_ref is not None and (
                     selected is None or lodging.candidate_ref != selected.candidate_id
                 ):
-                    issues.append("specified_lodging_replacement")
+                    issues.add("specified_lodging_replacement")
                 if lodging and lodging.area_hint_id is not None:
-                    issues.append("specified_lodging_area_forbidden")
+                    issues.add("specified_lodging_area_forbidden")
             elif lodging and lodging.candidate_ref is not None:
                 candidate = by_id.get(lodging.candidate_ref)
                 area_id = candidate.area_hint_id if candidate else None
                 if candidate is None or candidate.category != "lodging":
-                    issues.append("lodging_candidate_invalid")
+                    issues.add("lodging_candidate_invalid")
                 place = place_by_fact.get(candidate.place_fact_id) if candidate else None
                 if place is None or not place.city or not _city_matches(planning_input.request.city, place.city):
-                    issues.append("lodging_candidate_city_invalid")
+                    issues.add("lodging_candidate_city_invalid")
                 if place is None or place.location is None:
-                    issues.append("lodging_candidate_location_invalid")
+                    issues.add("lodging_candidate_location_invalid")
                 if place is None or not place.source_refs:
-                    issues.append("lodging_candidate_source_invalid")
+                    issues.add("lodging_candidate_source_invalid")
                 if place is not None and _lodging_category(place) != "lodging":
-                    issues.append("lodging_candidate_category_invalid")
+                    issues.add("lodging_candidate_category_invalid")
                 if area_id is None or area_id not in area_ids:
-                    issues.append("lodging_candidate_area_invalid")
+                    issues.add("lodging_candidate_area_invalid")
                 if lodging.area_hint_id != area_id:
-                    issues.append("lodging_area_candidate_mismatch")
+                    issues.add("lodging_area_candidate_mismatch")
             elif lodging and lodging.area_hint_id is not None:
-                issues.append("lodging_area_without_candidate")
+                issues.add("lodging_area_without_candidate")
             try:
                 self._weather_for_day(day.day_date, day.weather_advice, planning_input, facts)
             except _InvalidReferences as exc:
-                issues.extend(exc.codes)
+                issues.update(exc.codes)
         if issues:
-            raise _InvalidReferences(tuple(sorted(set(issues))))
+            raise _InvalidReferences(
+                tuple(sorted(issues)),
+                activity_issue_codes={key: tuple(sorted(value)) for key, value in activity_issue_codes.items()},
+            )
 
     def _build_draft(
         self, proposal, planning_input, candidates, facts, area_hints, source_run_id,
@@ -1673,8 +2083,9 @@ class _InvalidModelOutput(Exception):
 
 
 class _InvalidReferences(Exception):
-    def __init__(self, codes):
+    def __init__(self, codes, *, activity_issue_codes=None):
         self.codes = tuple(sorted(set(codes)))
+        self.activity_issue_codes = activity_issue_codes or {}
 
 
 class _CallNotStarted(Exception):

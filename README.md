@@ -279,7 +279,7 @@ F05a主智能体决定为独立模块：`MasterDecider.run(MasterDecisionContext
 F05b可通过 `await PlanningDispatchService(...).run_async(PlanningDispatchContext(...))` 执行决定、就绪任务并行及结果续派。默认最多3个信息任务并行，工具仍共用4个名额；600秒为单次搜集技术期限，不是业务调用总额。返回已核实事实、候选、区域、各任务结果及停止原因；`technical_error`必须先分类；身份或事实损坏终止，其他错误经保留快照校验后可进入带提示的草稿。主模型只接收候选关联事实与工具查询摘要，后端保留完整事实。正式首页已接入，真实服务验收限制见[CHG-003 F05b](docs/changes/CHG-003-planning-performance-observability.md#f05b-dispatch)。
 
 
-F06每日规划为独立模块：`DailyPlanGenerator.generate(planning_input, candidates, facts, area_hints, task_results, source_run_id=...)`调用配置模型，返回提案、已绑定事实的草稿和调用用量。后端计算缺项清单；空白或占位时段仍是未完成安排。120秒技术期限内最多一次格式修复，模型截断不接受为完整结果。`UsageAwareLLM.invoke_with_metadata`提供结束原因，原`invoke_with_usage`两值接口保持兼容。显式手动核验可用`python -m scripts.run_daily_plan_generator --help`查看输入格式；会调用模型，不调用MCP或写正式数据库。范围见[CHG-003 F06](docs/changes/CHG-003-planning-performance-observability.md#f06-daily-plan)。
+F06每日规划为独立模块：`DailyPlanGenerator.generate(planning_input, candidates, facts, area_hints, task_results, source_run_id=...)`调用配置模型，返回提案、已绑定事实的草稿和调用用量。后端计算缺项清单；空白或占位时段仍是未完成安排。120秒技术期限内，截断补全、格式修复与活动局部修复共用最多一次额外模型调用；模型截断不接受为完整结果。可定位到合法日期、时段及活动身份的错误会收到具体约束和可选候选；后端只合并目标活动的修复，保留有效安排。未修复的活动被排除并附位置提示，空缺时段进入既有按日补查；日期身份、事实来源及最终草稿仍须通过校验。`UsageAwareLLM.invoke_with_metadata`提供结束原因，原`invoke_with_usage`两值接口保持兼容。显式手动核验可用`python -m scripts.run_daily_plan_generator --help`查看输入格式；会调用模型，不调用MCP或写正式数据库。范围见[CHG-003 F06](docs/changes/CHG-003-planning-performance-observability.md#f06-daily-plan)，本次恢复策略验收见[局部修复](docs/changes/CHG-003-planning-performance-observability.md#v4-local-plan-repair)。
 
 F08当前相邻路线为异步服务：`query_current_routes(planning_input, draft, facts, ...)`按模型顺序查三种方式并选择最快有效路线。日内串接F07时刻，跨日并行；使用共享四并发MCP与F11a缓存。若提供F04d execution，必须同时提供当前context_revision并匹配请求、run、版本和端点原文。公共交通使用09:00参考时刻时保留标记，不能当作绝对行程时间。范围见[CHG-003 F08](docs/changes/CHG-003-planning-performance-observability.md#f08-current-routes)。显式真实核验仅查传入草稿的一段：
 
@@ -424,9 +424,9 @@ Production deployment test.
 `DESTINATION_CANDIDATE_DB_PATH`默认`backend/data/destination_candidates.sqlite3`，必须与预览/观测库分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。
 
 
-每日安排初版与单日修订的结构校验会在观测中保留安全字段路径、错误类型及固定修复指引；超出8条时保留总数和截断标记，不保存完整模型回答。格式修复仍最多一次，不替代按日业务补查。验收见[安全校验诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-plan-validation-diagnostics)。
+每日安排初版与单日修订的结构校验会在观测中保留安全字段路径、错误类型及固定修复指引；超出8条时保留总数和截断标记，不保存完整模型回答。初版局部修复与格式修复共用一次额度；单日修订协议及按日最多三轮业务补查保持原规则。验收见[安全校验诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-plan-validation-diagnostics)及[局部修复](docs/changes/CHG-003-planning-performance-observability.md#v4-local-plan-repair)。
 
-v4中已查到有效天气但模型漏写出行建议时，会保留预报并显示建议尚未生成，不因此让整个规划失败；真实地点引用错误仍会拒绝。真实失败与修复验证见[天气建议缺失](docs/changes/CHG-003-planning-performance-observability.md#v4-weather-advice-fallback)。
+v4中已查到有效天气但模型漏写出行建议时，会保留预报并显示建议尚未生成，不因此让整个规划失败；无效地点引用仍不进入草稿，可安全定位的活动错误按上述局部修复规则处理。真实失败与修复验证见[天气建议缺失](docs/changes/CHG-003-planning-performance-observability.md#v4-weather-advice-fallback)。
 
 
 ### 新规划入口

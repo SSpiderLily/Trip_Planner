@@ -39,6 +39,20 @@ assert.equal(day.recommendations.filter(candidate => candidate.kind === 'meal').
 assert.ok(!day.recommendations.some(candidate => candidate.id === 'candidate-selected-sight'))
 assert.equal(formatReferenceDuration(1800), '0小时30分钟')
 
+const recoveryEnvelope = mixedSyntheticEnvelope()
+const keptActivity = recoveryEnvelope.preview.draft.days[0].activities[0]
+recoveryEnvelope.preview.validation.issues.push({
+  issue_id: 'initial-omitted-morning', code: 'INITIAL_ACTIVITY_OMITTED',
+  category: 'unknown_info', severity: 'warning', scope: 'slot',
+  day_id: recoveryEnvelope.preview.draft.days[0].day_id, target_id: keptActivity.slot_id,
+  message: '该时段有初版活动未能通过校验，未纳入行程；其他有效安排已保留，请检查当前安排。',
+  triggers_repair: false, based_on_revision: recoveryEnvelope.preview.draft.revision,
+})
+const recoveredDay = mapV4Preview(recoveryEnvelope).days[0]
+assert.deepEqual(recoveredDay.activities.map(a => a.id), day.activities.map(a => a.id), 'a recovery notice cannot remove valid activities')
+assert.ok(recoveredDay.activities[0].issues.some(issue => issue.issue_id === 'initial-omitted-morning'), 'a dropped activity stays visible beside the kept activity in the same slot')
+assert.deepEqual(recoveredDay.missingSlots.map(slot => slot.period), day.missingSlots.map(slot => slot.period), 'historical recovery notice must not invent a new current missing slot')
+
 const readableEnvelope = mixedSyntheticEnvelope()
 const rawRouteIssue = readableEnvelope.preview.validation.issues.find(issue => issue.issue_id === 'issue-leg-unknown')
 rawRouteIssue.message = '路段耗时尚未核实：missing_route_leg。'
