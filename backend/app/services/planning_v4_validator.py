@@ -306,6 +306,7 @@ def validate_preview(
     issue_by_id = {issue.issue_id: issue for issue in preview.validation.issues}
     if len(issue_by_id) != len(preview.validation.issues):
         issues.append(ReferenceIssue("duplicate_issue_id", "validation.issues", "issue_id 必须唯一"))
+    day_validation_by_id = {item.day_id: item for item in preview.validation.days}
     for day in draft.days:
             constraint = day_constraints.get(day.day_id)
             slots = {slot.slot_id: slot for slot in constraint.slots} if constraint else {}
@@ -314,13 +315,33 @@ def validate_preview(
                 if issue.day_id == day.day_id and issue.scope == "slot"
             }
             activities_by_slot = slot_activity_ids
+            day_validation = day_validation_by_id.get(day.day_id)
+            day_issue_ids = set(day_validation.issue_ids) if day_validation is not None else set()
+            has_not_required_evidence = (
+                day_validation is not None
+                and day_validation.completeness == "not_required"
+                and any(
+                    issue.issue_id in day_issue_ids
+                    and issue.day_id == day.day_id
+                    and issue.scope == "day"
+                    and issue.code == "departure_day_not_required"
+                    and issue.severity == "info"
+                    and not issue.triggers_repair
+                    for issue in preview.validation.issues
+                )
+            )
             for slot in slots.values():
                 has_activity = bool(activities_by_slot.get(slot.slot_id))
                 is_unfilled = (day.day_id, slot.slot_id) in unfilled_ids
                 has_issue = slot.slot_id in issue_slots
                 if slot.eligibility == "skipped" and (has_activity or is_unfilled):
                     issues.append(ReferenceIssue("skipped_slot_content", f"day:{day.day_id}.slot:{slot.slot_id}", "skipped 时段不能有活动或缺项"))
-                if slot.eligibility != "skipped" and not has_activity and not (is_unfilled and has_issue):
+                if (
+                    slot.eligibility != "skipped"
+                    and not has_activity
+                    and not has_not_required_evidence
+                    and not (is_unfilled and has_issue)
+                ):
                     issues.append(ReferenceIssue("missing_slot_not_reported", f"day:{day.day_id}.slot:{slot.slot_id}", "无活动时必须同时记录缺项和对应 Issue"))
     for issue_index, issue in enumerate(preview.validation.issues):
             path = f"validation.issues[{issue_index}]"
@@ -426,6 +447,16 @@ def validate_preview(
         for mode_index, mode_result in enumerate(leg.mode_results):
             mode_path = f"{path}.mode_results[{mode_index}]"
             if mode_result.status == "pending":
+                continue
+            if mode_result.status == "error" and mode_result.route_fact_id is None:
+                # 工具调用可以在生成路线事实前失败。error_category 是此状态的
+                # 必需证据；若存在 route_fact_id，下面仍会完整校验事实闭包。
+                if mode_result.error_category is None:
+                    issues.append(ReferenceIssue(
+                        "route_error_without_category",
+                        f"{mode_path}.error_category",
+                        "没有路线事实的 error 结果必须记录错误分类",
+                    ))
                 continue
             route_fact = route_by_id.get(mode_result.route_fact_id or "")
             if route_fact is None:

@@ -285,6 +285,8 @@ PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file
 
 输入文件须包含PlanningInput、PlanDraft与来源闭合的FactStore；命令不会代造POI或运行完整规划。
 
+F09a每日检查为纯服务：`validate_daily_plan(planning_input, draft, facts, candidates, timing)`返回每日完整性、可行性、需求落实和对应位置的提示；`build_day_summaries`生成时间摘要。缺价格、天气或部分交通不单独触发补查，补查轮次由F09b管理。尚未接入正式入口，范围见[CHG-003 F09a](docs/changes/CHG-003-planning-performance-observability.md#f09a-daily-validation)。
+
 F07时间计算为纯服务：`calculate_plan_timing(planning_input, draft, facts, verified_departure_fact_id=...)` 按草稿顺序消费已有路线，不调用模型或地图。完整日默认08:00酒店出发；到达日使用已核实就绪时间，未知交通保留未知。返程事实须绑定F04d的已核实离开地点；默认1小时缓冲与交通分开。结果提供活动时刻、等待、已知耗时、不足3小时判断和冲突下界，不修改草稿。范围及验收见[CHG-003 F07](docs/changes/CHG-003-planning-performance-observability.md#f07-activity-timing)。
 
 F04b住宿子任务的独立手动核验（会调用配置的LLM和高德MCP）：
