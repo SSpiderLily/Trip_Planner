@@ -370,6 +370,8 @@ Production deployment test.
 
 前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；新需求入口为`/plan`，`/`与`/plan`使用同一新表单；预览已支持按日编辑，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
 
+生成中会显示转圈动画和后端实际阶段，完成后自动打开预览。规划失败会说明安全原因并引导“重新规划”；网络或服务暂不可读时可“重新读取”，不会重新提交模型任务。刷新仍读取当前任务。阶段与错误分类验证：`cd frontend && node tests/v4PreviewProgress.test.mjs`。
+
 映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
 
 
@@ -396,7 +398,7 @@ Production deployment test.
 
 应用启动注册`PlanningV4Pipeline`并使用已确认的六个参考窗口；`TripRequest.explicit_return_buffer_s`可显式覆盖默认返程1小时，未填写时沿用默认。`PLANNER_V4_TOTAL_TIMEOUT_SECONDS`默认1800秒，`PLANNER_V4_INITIAL_COLLECTION_TIMEOUT_SECONDS`默认600秒；它们是停止等待的技术截止，不是业务查询额度。单日期最多修正3轮，耗尽后保留带缺项草稿；交通故障保留已验证活动。
 
-完整接线与独立离线验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-planning-pipeline)。当前配置模型配额不足，在线验收未完成；不要把离线回放当作真实旅行方案质量证据。
+完整接线与独立离线验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-planning-pipeline)。最新模型、在线验收与失败记录以[CHG-003当前状态](docs/changes/CHG-003-planning-performance-observability.md#当前状态)为准；不要把离线回放当作真实旅行方案质量证据。
 
 
 ### v4按日编辑API
