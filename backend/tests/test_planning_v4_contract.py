@@ -128,7 +128,11 @@ def make_facts():
 
 def make_candidates():
     return (
-        CandidateRef(candidate_id="candidate-bund", category="sightseeing", poi_id="poi-bund", place_fact_id="fact-bund"),
+        CandidateRef(
+            candidate_id="candidate-bund", category="sightseeing",
+            poi_id="poi-bund", place_fact_id="fact-bund",
+            requirement_ids=("req-bund",),
+        ),
         CandidateRef(candidate_id="candidate-hotel", category="lodging", poi_id="poi-hotel", place_fact_id="fact-hotel",
                      area_hint_id="area-bund"),
     )

@@ -256,7 +256,7 @@ class RepairState(ContractModel):
     completed_rounds: int = Field(ge=0, le=3)
     active_round_id: str | None = None
     status: Literal["open", "active", "complete", "stopped"]
-    stop_reason: Literal["complete", "round_limit", "no_progress", "deadline"] | None = None
+    stop_reason: Literal["complete", "round_limit", "no_progress", "deadline", "technical_error"] | None = None
 
     @model_validator(mode="after")
     def validate_repair_state(self):

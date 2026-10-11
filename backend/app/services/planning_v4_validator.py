@@ -619,7 +619,25 @@ def validate_day_revision(
         issues.append(ReferenceIssue("revision_issue_missing", "revision.source_issue_ids", "日期修订必须关联触发本次修复的问题"))
     for issue_id in revision.source_issue_ids:
         source_issue = issue_by_id.get(issue_id)
-        if source_issue is None or source_issue.day_id != revision.day_id or not source_issue.triggers_repair or source_issue.category == "unknown_info":
+        assigned_plan_requirement = bool(
+            source_issue is not None
+            and source_issue.code == "must_visit_unplanned"
+            and source_issue.scope == "plan"
+            and source_issue.day_id is None
+            and source_issue.target_id is not None
+            and constraint is not None
+            and any(
+                slot.eligibility != "skipped"
+                and slot.period in {"morning", "afternoon", "evening"}
+                for slot in constraint.slots
+            )
+        )
+        if (
+            source_issue is None
+            or (source_issue.day_id != revision.day_id and not assigned_plan_requirement)
+            or not source_issue.triggers_repair
+            or source_issue.category == "unknown_info"
+        ):
             issues.append(ReferenceIssue("invalid_revision_issue", "revision.source_issue_ids", "修订只能引用目标日期上触发修复的已知问题"))
     slots = {slot.slot_id: slot for slot in constraint.slots}
     candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
@@ -654,6 +672,10 @@ def validate_day_revision(
                 fact = place_by_id.get(candidate.place_fact_id)
                 if candidate.category != expected or fact is None or fact.poi_id != candidate.poi_id or fact.location is None:
                     issues.append(ReferenceIssue("invalid_revision_candidate", f"{path}.candidate_ref", "修订候选类别或地点事实无效"))
+                if candidate.slot_ids and activity.slot_id not in candidate.slot_ids:
+                    issues.append(ReferenceIssue("invalid_revision_candidate_slot", f"{path}.slot_id", "修订候选不适用于指定时段"))
+                if activity.requirement_ids and not set(activity.requirement_ids).issubset(candidate.requirement_ids):
+                    issues.append(ReferenceIssue("invalid_revision_candidate_requirement", f"{path}.requirement_ids", "修订活动不能把无关候选绑定为必去要求"))
         if activity.existing_activity_id is not None and activity.existing_activity_id not in old_activity_ids:
             issues.append(ReferenceIssue("dangling_existing_activity", f"{path}.existing_activity_id", "修订引用了不存在的既有活动"))
     unfilled = set(revision.replacement_day.unfilled_slot_ids)
