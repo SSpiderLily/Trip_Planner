@@ -368,7 +368,7 @@ Production deployment test.
 
 ### v4用户预览页面
 
-前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；首页尚未改为v4提交，预览已支持按日编辑，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
+前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；新需求入口为`/plan`，默认`/`仍保留原流程；预览已支持按日编辑，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
 
 映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
 
@@ -410,7 +410,7 @@ Production deployment test.
 
 `/preview`左侧拖动调整当天顺序，也可删除某一次活动、切换已查询到的交通方式；地图下方按地点批量删除关联活动，或把已有候选加入可用时段。一次请求未确认时先处理待同步编辑；路线计算期间仍可继续修改。网络响应不明时刷新会重放同一命令，版本冲突需用户明确重试。停止重试会重新读取服务器内容，已接受的编辑仍保留。
 
-验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。搜索新地点与需求入口继续单独接入。
+验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。搜索新地点继续单独接入；新需求入口为`/plan`。
 
 
 ### v4目的地搜索
@@ -423,3 +423,10 @@ Production deployment test.
 
 
 v4中已查到有效天气但模型漏写出行建议时，会保留预报并显示建议尚未生成，不因此让整个规划失败；真实地点引用错误仍会拒绝。真实失败与修复验证见[天气建议缺失](docs/changes/CHG-003-planning-performance-observability.md#v4-weather-advice-fallback)。
+
+
+### 新规划入口
+
+访问`/plan`填写需求，提交后进入`/preview`查看进度和可编辑结果；只保留当前预览访问入口，无历史列表。默认首页`/`仍走原流程，待新规划链真实验收后再切换。日期按中国标准时间输入，预算指全程旅费；返程预留留空采用1小时，另算实际返程交通。
+
+如果浏览器暂时无法保存访问信息，当前页面仍可继续查看预览，但刷新/关闭后可能无法恢复。页面提供重试保存，重试不会重新创建规划任务。验证：`cd frontend && node tests/v4TripRequest.test.mjs`；边界与证据见[新需求填写入口](docs/changes/CHG-003-planning-performance-observability.md#v4-home)。
