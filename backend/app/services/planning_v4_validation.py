@@ -72,7 +72,18 @@ def validate_daily_plan(
         draft=draft,
         candidates=candidate_by_id,
     )
-    validate_plan_proposal(proposal, planning_input, candidates, facts)
+    validate_plan_proposal(
+        proposal,
+        planning_input,
+        candidates,
+        facts,
+        user_activity_refs=frozenset(
+            activity.activity_id
+            for day in draft.days
+            for activity in day.activities
+            if activity.activity_source == "user"
+        ),
+    )
 
     issues: list[ValidationIssue] = []
     issues_by_day: dict[str, list[str]] = {day_id: [] for day_id in day_constraints}
