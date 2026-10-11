@@ -264,7 +264,9 @@ def validate_preview(
             if activity.duration_source == "default":
                 expected_duration = (
                     planning_input.rules.sightseeing_default_s
-                    if activity.kind == "sightseeing" else planning_input.rules.meal_default_s
+                    if activity.kind == "sightseeing" else (
+                        planning_input.rules.meal_default_s if activity.kind == "meal" else 0
+                    )
                 )
                 if activity.duration_s != expected_duration:
                     issues.append(ReferenceIssue("default_duration_mismatch", f"{activity_path}.duration_s", "默认时长与规则版本不一致"))

@@ -1,8 +1,19 @@
 """LLM服务模块"""
 
+from dataclasses import dataclass
+
 from hello_agents import HelloAgentsLLM
 from hello_agents.core.exceptions import HelloAgentsException
 from ..config import get_settings
+
+
+@dataclass(frozen=True)
+class LLMCompletion:
+    """带结束原因的非流式响应；文本和 token 用量与旧接口保持兼容。"""
+
+    text: str | None
+    usage: object | None
+    finish_reason: str | None
 
 # 全局LLM实例
 _llm_instance = None
@@ -11,7 +22,7 @@ _llm_instance = None
 class UsageAwareLLM(HelloAgentsLLM):
     """保留 HelloAgents 非流式调用行为，同时向观测层返回原响应的用量。"""
 
-    def invoke_with_usage(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
+    def _invoke_completion(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
         try:
             client = self._client
             client_options = {}
@@ -29,9 +40,33 @@ class UsageAwareLLM(HelloAgentsLLM):
                 max_tokens=kwargs.get('max_tokens', self.max_tokens),
                 **{key: value for key, value in kwargs.items() if key not in ('temperature', 'max_tokens')}
             )
-            return response.choices[0].message.content, response.usage
+            choice = response.choices[0]
+            return LLMCompletion(
+                text=choice.message.content,
+                usage=response.usage,
+                finish_reason=getattr(choice, 'finish_reason', None),
+            )
         except Exception as exc:
             raise HelloAgentsException(f"LLM调用失败: {str(exc)}")
+
+    def invoke_with_metadata(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
+        """返回文本、token用量和供应商结束原因，不暴露完整 SDK 响应对象。"""
+        return self._invoke_completion(
+            messages,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            **kwargs,
+        )
+
+    def invoke_with_usage(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
+        """兼容旧调用方：仍返回 (text, usage) 两值。"""
+        completion = self._invoke_completion(
+            messages,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            **kwargs,
+        )
+        return completion.text, completion.usage
 
     def invoke(self, messages, **kwargs):
         text, _ = self.invoke_with_usage(messages, **kwargs)
