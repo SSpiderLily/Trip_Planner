@@ -247,6 +247,15 @@ v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—1
 
 验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`；`cd frontend && npm run build`。替代依赖测试与真实调用验收结论见[学习日志](docs/learning-log.md)。
 
+F01需求整理的独立手动核验（会调用配置的LLM，不属于离线测试）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python scripts/run_requirement_interpreter.py --timeout-seconds 120
+```
+
+命令使用设计页中的固定上海三日请求，最多进行一次格式修复；每个HTTP请求超时上限为120秒，SDK自动重试关闭。成功时只输出结构化需求摘要、供应商usage、模型调用次数和总耗时；不调用高德、不运行完整规划、不写正式任务数据库。超时、认证及结构化校验失败输出安全错误码，不显示原始模型响应或错误文本。
+
 任务总耗时不累加父子步骤。共用时间轴用于查看先后与重叠，累计调用耗时不等于任务实际总耗时；工具平均仅基于有可靠起止时间的调用。异常总数下列出“调用失败”和“中断未完成”两个子项；仍在执行或状态未确定的记录不计为失败。未知耗时不参与慢调用比较，未采集Token与真实零值分别显示，供应商总量不反推缺失的输入/输出。角色汇总保留在Token分析的折叠明细中。
 
 前端边界验证：`cd frontend && node tests/observationView.test.mjs`。正式页展示已于2026-10-09获用户接受，验证证据见[学习日志](docs/learning-log.md#agent观测正式页改版2026-10-09)；剩余需求见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。

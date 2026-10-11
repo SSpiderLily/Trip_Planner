@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Iterable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, Field, PositiveInt, model_validator
@@ -88,6 +88,22 @@ class RequirementSummary(ContractModel):
     preferences: tuple[str, ...] = ()
     unknowns: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
+
+
+def validate_requirement_sources(request: TripRequest, hard_requirements: Iterable[HardRequirement]) -> None:
+    """验证硬性要求的来源引用确实存在于原始请求中。"""
+    for requirement in hard_requirements:
+        source_value = getattr(request, requirement.source.field)
+        if isinstance(source_value, tuple):
+            valid = requirement.source.quote in source_value
+        elif isinstance(source_value, TripBudget):
+            valid = requirement.source.quote in source_value.model_dump_json()
+        elif source_value is None:
+            valid = False
+        else:
+            valid = requirement.source.quote in str(source_value)
+        if not valid:
+            raise ValueError(f"硬性需求来源与原始输入不匹配: {requirement.requirement_id}")
 
 
 class ReferenceWindow(ContractModel):
@@ -218,18 +234,7 @@ class PlanningInput(ContractModel):
             raise ValueError("slot_id 必须唯一")
         if any(slot.day_id != day.day_id for day in self.days for slot in day.slots):
             raise ValueError("slot 必须引用所属日期的 day_id")
-        for requirement in self.requirements.hard_requirements:
-            source_value = getattr(self.request, requirement.source.field)
-            if isinstance(source_value, tuple):
-                valid = requirement.source.quote in source_value
-            elif isinstance(source_value, TripBudget):
-                valid = requirement.source.quote in source_value.model_dump_json()
-            elif source_value is None:
-                valid = False
-            else:
-                valid = requirement.source.quote in str(source_value)
-            if not valid:
-                raise ValueError(f"硬性需求来源与原始输入不匹配: {requirement.requirement_id}")
+        validate_requirement_sources(self.request, self.requirements.hard_requirements)
         return self
 
 
