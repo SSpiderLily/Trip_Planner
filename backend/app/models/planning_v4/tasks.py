@@ -30,6 +30,7 @@ class Subtask(ContractModel):
     scope: TaskScope
     dependencies: tuple[TaskDependency, ...] = ()
     known_fact_ids: tuple[str, ...] = ()
+    requirement_ids: tuple[str, ...] = ()
     excluded_poi_ids: tuple[str, ...] = ()
     candidate_target: int = Field(ge=1, le=20)
     required_fields: tuple[Literal["poi_id", "name", "location", "cost", "opening_hours"], ...] = (
@@ -40,6 +41,12 @@ class Subtask(ContractModel):
     constraints: tuple[str, ...] = ()
     preferences: tuple[str, ...] = ()
     deadline_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def validate_requirement_ids(self):
+        if len(self.requirement_ids) != len(set(self.requirement_ids)):
+            raise ValueError("Subtask.requirement_ids 必须唯一")
+        return self
 
 
 class CandidateRef(ContractModel):
@@ -62,14 +69,19 @@ class TaskResult(ContractModel):
     task_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
     context_revision: int = Field(ge=1)
+    request_id: str | None = None
+    base_revision: int | None = Field(default=None, ge=1)
     status: Literal["complete", "partial", "failed"]
     stop_reason: Literal[
         "target_met",
         "no_match",
         "scope_exhausted",
         "no_progress",
+        "ambiguous",
         "deadline",
         "tool_error",
+        "model_error",
+        "invalid_output",
     ]
     candidates: tuple[CandidateRef, ...] = ()
     coverage: tuple[TaskCoverage, ...] = ()

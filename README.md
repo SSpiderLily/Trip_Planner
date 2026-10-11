@@ -256,6 +256,15 @@ PYTHONPATH=. venv/bin/python scripts/run_requirement_interpreter.py --timeout-se
 
 命令使用设计页中的固定上海三日请求，最多进行一次格式修复；每个HTTP请求超时上限为120秒，SDK自动重试关闭。成功时只输出结构化需求摘要、供应商usage、模型调用次数和总耗时；不调用高德、不运行完整规划、不写正式任务数据库。超时、认证及结构化校验失败输出安全错误码，不显示原始模型响应或错误文本。
 
+F03单个景点子任务的独立手动核验（会调用配置的LLM和高德MCP，必须明确传入`--live`）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
+```
+
+命令复用完整的上海三日原始请求构造`PlanningInput`，任务仅覆盖10月10日下午的“必须去外滩”景点子任务，首次规划的`base_revision`为空。模型只返回搜索关键词或已查到的POI选择；后端固定城市、查询参数、事实来源与任务版本。模型输入包含已有候选的坐标、城市、分类、费用原文/数值、营业时间原文及来源引用。营业时间只作原文参考，不推断旅行日期是否开放。模型预期执行一次关键词搜索后结束，但若它继续搜索、需要补真实景点详情或遇到可重试的地图错误，实际地图调用次数会增加。命令不会重跑F01，不生成整趟行程，也不写正式任务数据库。成功输出TaskResult、事实来源、地图调用摘要、Token和耗时；不输出原始模型响应、第三方异常文本或密钥。已完成离线回归及一次上海外滩真实子任务核验；这不代表完整三日行程已经生成，F03进度与验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f03-单个景点子任务2026-10-11授权)。
+
 任务总耗时不累加父子步骤。共用时间轴用于查看先后与重叠，累计调用耗时不等于任务实际总耗时；工具平均仅基于有可靠起止时间的调用。异常总数下列出“调用失败”和“中断未完成”两个子项；仍在执行或状态未确定的记录不计为失败。未知耗时不参与慢调用比较，未采集Token与真实零值分别显示，供应商总量不反推缺失的输入/输出。角色汇总保留在Token分析的折叠明细中。
 
 前端边界验证：`cd frontend && node tests/observationView.test.mjs`。正式页展示已于2026-10-09获用户接受，验证证据见[学习日志](docs/learning-log.md#agent观测正式页改版2026-10-09)；剩余需求见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
