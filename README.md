@@ -274,6 +274,15 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 命令复用完整的上海三日原始请求构造`PlanningInput`，任务仅覆盖10月10日下午的“必须去外滩”景点子任务，首次规划的`base_revision`为空。模型只返回搜索关键词或已查到的POI选择；后端固定城市、查询参数、事实来源与任务版本。模型输入包含已有候选的坐标、城市、分类、费用原文/数值、营业时间原文及来源引用。营业时间只作原文参考，不推断旅行日期是否开放。模型预期执行一次关键词搜索后结束，但若它继续搜索、需要补真实景点详情或遇到可重试的地图错误，实际地图调用次数会增加。命令不会重跑F01，不生成整趟行程，也不写正式任务数据库。成功输出TaskResult、事实来源、地图调用摘要、Token和耗时；不输出原始模型响应、第三方异常文本或密钥。已完成离线回归及一次上海外滩真实子任务核验；这不代表完整三日行程已经生成，F03进度与验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f03-单个景点子任务2026-10-11授权)。
 
+F04a餐饮子任务的独立手动核验（会调用配置的LLM和高德MCP，必须显式传入`--live`及来源化区域锚点文件）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python scripts/run_dining_subtask.py --live --anchor-file /path/to/dining-anchor.json
+```
+
+锚点文件包含`fact_store`和`area_hints`，使用F03已核实的地点事实与区域引用。命令保留原始上海三日请求，仅验证首日晚餐在外滩区域附近的餐馆子任务；这不是新增用户硬性条件。每个餐次绑定自己的区域锚点，先查1公里，没有有效候选时扩大至3公里。模型选择关键词、餐次或已有POI；后端校验类别、距离、来源与版本。人均`cost`缺失不扩大搜索，营业时间只保留原文。支持按原始要求核实明确餐馆名，同名歧义保留未知；饮食属性不能仅凭地图名称认定。结果包含餐次覆盖与缺项，正式调度和整趟行程尚未接入。范围及验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f04a-dining-subtask)。
+
 任务总耗时不累加父子步骤。共用时间轴用于查看先后与重叠，累计调用耗时不等于任务实际总耗时；工具平均仅基于有可靠起止时间的调用。异常总数下列出“调用失败”和“中断未完成”两个子项；仍在执行或状态未确定的记录不计为失败。未知耗时不参与慢调用比较，未采集Token与真实零值分别显示，供应商总量不反推缺失的输入/输出。角色汇总保留在Token分析的折叠明细中。
 
 前端边界验证：`cd frontend && node tests/observationView.test.mjs`。正式页展示已于2026-10-09获用户接受，验证证据见[学习日志](docs/learning-log.md#agent观测正式页改版2026-10-09)；剩余需求见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
