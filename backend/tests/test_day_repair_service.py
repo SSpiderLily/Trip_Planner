@@ -42,6 +42,7 @@ from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
 from app.services.planning_v4_pipeline import PlanningV4Pipeline
+from app.services.daily_plan_adapter import DailyPlanGeneratorAdapter
 from test_planning_v4_validation import make_facts_and_candidates, make_filled_draft, make_input, requirement
 
 
@@ -925,6 +926,93 @@ def day_revision_from_response(case, *, preserve_activity_ids, response):
 
 
 class DayScopedRevisionModelTests(unittest.TestCase):
+    def test_real_adapter_execution_is_unwrapped_before_day_repair_service(self):
+        case = day_revision_model_case()
+
+        class FixedLLM:
+            def invoke_with_metadata(self, _messages, **_kwargs):
+                return LLMCompletion(case["response"], None, "stop")
+
+        adapter = DailyPlanGeneratorAdapter(DailyPlanGenerator(llm=FixedLLM()))
+
+        async def collect(_request):
+            return DayRepairCollectionResult.empty(
+                case["facts"], case["candidates"], (), (),
+            )
+
+        async def revise(request):
+            execution = await adapter.revise_day(
+                request.planning_input,
+                request.draft,
+                request.report,
+                request.day.day_id,
+                request.issues,
+                request.assignments,
+                request.candidates,
+                request.fact_store,
+                request.area_hints,
+                request.task_results,
+                preserve_activity_ids=request.preserve_activity_ids,
+                modifiable_activity_ids=request.modifiable_activity_ids,
+                removable_activity_ids=request.removable_activity_ids,
+                source_run_id=request.draft.source_run_id,
+                round_id=request.round_id,
+                round_number=request.round_number,
+                timeout_seconds=30,
+            )
+            return PlanningV4Pipeline._normalize_day_revision_execution(execution)
+
+        async def recalculate(request):
+            timing = calculate_plan_timing(
+                request.planning_input, request.draft, request.facts,
+            )
+            report = validate_daily_plan(
+                request.planning_input,
+                request.draft,
+                request.facts,
+                request.candidates,
+                timing,
+                repair_states=request.repair_states,
+            )
+            return DayRepairRecalculation(
+                draft=request.draft,
+                facts=request.facts,
+                timing=timing,
+                report=report,
+            )
+
+        result = asyncio.run(DayRepairService(
+            collect=collect,
+            revise=revise,
+            recalculate=recalculate,
+        ).run_async(
+            case["planning_input"],
+            case["draft"],
+            case["facts"],
+            case["candidates"],
+            (),
+            (),
+            calculate_plan_timing(case["planning_input"], case["draft"], case["facts"]),
+            case["report"],
+        ))
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.draft.revision, case["draft"].revision + 1)
+        target = next(day for day in result.draft.days if day.day_id == TARGET_DAY)
+        self.assertTrue(any(activity.slot_id == case["missing_slot"].slot_id for activity in target.activities))
+        self.assertEqual(result.attempts[0].outcome, "applied")
+
+    def test_day_revision_result_rejects_unrecognized_or_malformed_adapter_values(self):
+        from app.agents.daily_plan_generator import DailyDayRevisionExecution
+
+        with self.assertRaisesRegex(DayRepairError, "DAY_REVISION_RESULT_INVALID"):
+            PlanningV4Pipeline._normalize_day_revision_execution(object())
+        malformed_execution = DailyDayRevisionExecution(
+            revision=object(), usage=None, model_calls=1, format_repairs=0, elapsed_seconds=0,
+        )
+        with self.assertRaisesRegex(DayRepairError, "DAY_REVISION_RESULT_INVALID"):
+            PlanningV4Pipeline._normalize_day_revision_execution(malformed_execution)
+
     def test_revise_day_sends_one_date_and_returns_a_bound_day_revision(self):
         planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
         target = next(day for day in draft.days if day.day_id == TARGET_DAY)
