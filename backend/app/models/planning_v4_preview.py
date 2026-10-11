@@ -1,4 +1,4 @@
-"""Persisted preview envelope returned by the read-only v4 API."""
+"""Persisted v4 preview, edit, and route-job API contracts."""
 from __future__ import annotations
 
 from typing import Literal
@@ -7,7 +7,7 @@ from pydantic import Field, PositiveInt, StrictInt, model_validator
 
 from .planning_v4.base import ContractModel
 from .planning_v4.cost import ReferenceCostSummary
-from .planning_v4.plan import ItineraryPreview
+from .planning_v4.plan import EditCommand, ItineraryPreview
 from ..services.planning_v4_timing import PlanTimingResult
 
 
@@ -133,6 +133,38 @@ class PreviewRestoreResponse(ContractModel):
     restored_from: PreviewFinalMetadata
     replayed: bool
     receipt_store_version: PositiveInt
+
+
+class PreviewEditRequest(ContractModel):
+    command: EditCommand
+    expected_store_version: StrictInt = Field(gt=0)
+
+
+class PreviewRouteJobStatus(ContractModel):
+    task_id: str
+    plan_id: str
+    calculation_id: str
+    status: Literal["pending", "running", "completed", "failed", "superseded"]
+    source_store_version: PositiveInt
+    source_plan_revision: PositiveInt
+    affected_day_ids: tuple[str, ...]
+    result_store_version: PositiveInt | None = None
+    error_code: str | None = None
+    updated_at: str
+
+
+class PreviewEditResponse(ContractModel):
+    envelope: PreviewEnvelope
+    job: PreviewRouteJobStatus | None = None
+    changed_activity_ids: tuple[str, ...] = ()
+    changed_leg_ids: tuple[str, ...] = ()
+    replayed: bool
+    receipt_store_version: PositiveInt
+
+
+class PreviewEditJobResponse(ContractModel):
+    envelope: PreviewEnvelope
+    job: PreviewRouteJobStatus
 
 
 class BackfillTaskProgress(ContractModel):

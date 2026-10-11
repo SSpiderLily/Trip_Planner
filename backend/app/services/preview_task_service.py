@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import logging
 from typing import Awaitable, Callable, Literal, Protocol
 from uuid import uuid4
 
@@ -31,6 +32,9 @@ from app.models.preview_storage import (
 )
 from app.services.observation_service import span
 from app.services.task_service import TaskError
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class PreviewProgress(ContractModel):
@@ -371,6 +375,16 @@ class PreviewTaskService:
         except Exception as exc:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "还原保存结果失败", 503) from exc
 
+        coordinator = getattr(self, "edit_coordinator", None)
+        if coordinator is not None:
+            try:
+                await coordinator.schedule_for_record(result.record)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "restored preview %s is committed; route job remains queued (%s)",
+                    result.record.preview.calculation.calculation_id,
+                    type(exc).__name__,
+                )
         return PreviewRestoreResponse(
             envelope=self._preview_envelope(task_id, result.record),
             restored_from=self._metadata_model(result.restored_from),

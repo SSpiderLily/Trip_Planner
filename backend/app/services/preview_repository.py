@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import secrets
 import sqlite3
-from typing import Iterator
+from typing import Callable, Iterator
 import hmac
 
 from app.models.planning_v4.plan import ItineraryPreview
@@ -21,15 +21,18 @@ from app.models.planning_v4_preview import PreviewSnapshot
 from app.services.planning_v4_timing import PlanTimingResult
 from app.models.preview_storage import (
     CreatedPreview,
+    ClaimedPreviewRouteJob,
     DraftWriteResult,
     FinalSaveResult,
     IdempotencyConflict,
     PreviewAccessError,
     PreviewConflict,
+    PreviewEditWriteResult,
     PreviewFinalChanged,
     PreviewFinalUnavailable,
     PreviewIdentityConflict,
     PreviewRestoreResult,
+    PreviewRouteJob,
     SavedPreview,
     SavedPreviewMetadata,
     StoredPreview,
@@ -85,6 +88,36 @@ CREATE TABLE IF NOT EXISTS preview_restore_receipts (
 );
 CREATE INDEX IF NOT EXISTS preview_restore_receipts_by_plan
     ON preview_restore_receipts(plan_id, restore_seq DESC);
+CREATE TABLE IF NOT EXISTS preview_edit_receipts (
+    edit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_store_version INTEGER NOT NULL CHECK (result_store_version > 0),
+    result_plan_revision INTEGER NOT NULL CHECK (result_plan_revision > 0),
+    calculation_id TEXT NOT NULL,
+    changed_activity_ids_json TEXT NOT NULL,
+    changed_leg_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (plan_id, command_id)
+);
+CREATE INDEX IF NOT EXISTS preview_edit_receipts_by_plan
+    ON preview_edit_receipts(plan_id, edit_seq DESC);
+CREATE TABLE IF NOT EXISTS preview_route_jobs (
+    calculation_id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    source_store_version INTEGER NOT NULL CHECK (source_store_version > 0),
+    source_plan_revision INTEGER NOT NULL CHECK (source_plan_revision > 0),
+    affected_day_ids_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','running','completed','failed','superseded')),
+    result_store_version INTEGER CHECK (result_store_version IS NULL OR result_store_version > 0),
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS preview_route_jobs_by_plan_state
+    ON preview_route_jobs(plan_id, state, created_at);
 CREATE TABLE IF NOT EXISTS preview_jobs (
     task_id TEXT PRIMARY KEY NOT NULL,
     plan_id TEXT NOT NULL UNIQUE,
@@ -355,6 +388,25 @@ class PreviewRepository:
                 "UPDATE preview_jobs SET backfill_state='interrupted',updated_at=? WHERE backfill_state='running'",
                 (self._now(),),
             )
+            route_rows = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE state IN ('pending','running')"
+            ).fetchall()
+            now = self._now()
+            for route_row in route_rows:
+                draft_row = conn.execute(
+                    "SELECT * FROM preview_drafts WHERE plan_id=?", (route_row["plan_id"],)
+                ).fetchone()
+                current = self._stored_from_row(draft_row) if draft_row is not None else None
+                if current is not None and self._job_matches_record(route_row, current):
+                    conn.execute(
+                        "UPDATE preview_route_jobs SET state='pending',updated_at=? WHERE calculation_id=?",
+                        (now, route_row["calculation_id"]),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE preview_route_jobs SET state='superseded',updated_at=? WHERE calculation_id=?",
+                        (now, route_row["calculation_id"]),
+                    )
 
     def delete_job(self, task_id: str) -> None:
         """回滚尚未接受成功的任务登记。"""
@@ -378,6 +430,384 @@ class PreviewRepository:
                 "SELECT plan_revision FROM preview_drafts WHERE plan_id=?", (plan_id,)
             ).fetchone()
         return int(row["plan_revision"]) if row is not None else None
+
+    def apply_edit(
+        self,
+        access_token: str,
+        task_id: str,
+        command,
+        *,
+        expected_store_version: int,
+        transform: Callable[[PreviewSnapshot, tuple[str, ...]], tuple[
+            PreviewSnapshot, tuple[str, ...], tuple[str, ...]
+        ]],
+    ) -> PreviewEditWriteResult:
+        """在一个 SQLite 写事务内检查收据、CAS、改稿、收据和路线任务。"""
+        command_id = self._required_id(command.command_id, "command_id")
+        expected_store_version = self._positive_version(expected_store_version, "expected_store_version")
+        request_hash = self._fingerprint({
+            "expected_store_version": expected_store_version,
+            "command": command.model_dump(mode="json"),
+        })
+        token_hash = self._token_hash(access_token)
+
+        with self._write_transaction() as conn:
+            row = conn.execute(
+                """SELECT p.*,j.task_id,j.generation_state,j.preview_plan_id
+                   FROM preview_drafts p JOIN preview_jobs j ON j.plan_id=p.plan_id
+                   WHERE p.access_token_hash=? AND j.task_id=?""",
+                (token_hash, self._required_id(task_id, "task_id")),
+            ).fetchone()
+            if row is None:
+                raise PreviewAccessError("预览访问标识与任务不匹配")
+            if row["generation_state"] != "ready" or row["preview_plan_id"] != row["plan_id"]:
+                raise PreviewConflict(
+                    "预览尚未就绪",
+                    current_store_version=row["store_version"],
+                    current_plan_revision=row["plan_revision"],
+                )
+
+            receipt = conn.execute(
+                """SELECT * FROM preview_edit_receipts WHERE plan_id=? AND command_id=?""",
+                (row["plan_id"], command_id),
+            ).fetchone()
+            current = self._stored_from_row(row)
+            if receipt is not None:
+                if receipt["request_hash"] != request_hash:
+                    raise IdempotencyConflict("command_id 已用于不同编辑请求")
+                route_job_row = conn.execute(
+                    "SELECT * FROM preview_route_jobs WHERE plan_id=? AND calculation_id=?",
+                    (row["plan_id"], receipt["calculation_id"]),
+                ).fetchone()
+                return PreviewEditWriteResult(
+                    record=current,
+                    receipt_store_version=receipt["result_store_version"],
+                    replayed=True,
+                    calculation_id=receipt["calculation_id"],
+                    changed_activity_ids=tuple(json.loads(receipt["changed_activity_ids_json"])),
+                    changed_leg_ids=tuple(json.loads(receipt["changed_leg_ids_json"])),
+                    route_job=(self._route_job_from_row(route_job_row) if route_job_row else None),
+                )
+
+            if command.plan_id != current.preview.draft.plan_id:
+                raise PreviewAccessError("编辑命令与访问计划不匹配")
+            if (
+                current.store_version != expected_store_version
+                or current.plan_revision != command.base_revision
+            ):
+                raise PreviewConflict(
+                    "草稿版本已变化",
+                    current_store_version=current.store_version,
+                    current_plan_revision=current.plan_revision,
+                )
+            snapshot = current.snapshot
+            if snapshot is None:
+                raise PreviewConflict(
+                    "预览计算快照不完整",
+                    current_store_version=current.store_version,
+                    current_plan_revision=current.plan_revision,
+                )
+
+            inherited_days = set(self._pending_days(snapshot.preview))
+            current_job = conn.execute(
+                """SELECT affected_day_ids_json FROM preview_route_jobs
+                   WHERE plan_id=? AND calculation_id=? AND state IN ('pending','running')
+                     AND source_store_version=? AND source_plan_revision=?""",
+                (
+                    current.preview.draft.plan_id,
+                    snapshot.preview.calculation.calculation_id,
+                    current.store_version,
+                    current.plan_revision,
+                ),
+            ).fetchone()
+            if current_job is not None:
+                inherited_days.update(json.loads(current_job["affected_day_ids_json"]))
+
+            updated_snapshot, changed_activity_ids, changed_leg_ids = transform(
+                snapshot, tuple(sorted(inherited_days)),
+            )
+            updated, timing_json, cost_json = self._validated_snapshot(updated_snapshot)
+            preview_json = self._dump_preview(updated)
+            self._check_immutable_identity(current.preview, updated)
+            if updated.draft.revision != current.plan_revision + 1:
+                raise PreviewIdentityConflict("编辑必须且只能递增一个 plan_revision")
+            if updated.draft.base_revision != current.plan_revision:
+                raise PreviewIdentityConflict("编辑 draft.base_revision 必须引用当前 revision")
+            pending_ids = set(updated.calculation.pending_leg_ids)
+            leg_by_id = {leg.leg_id: leg for leg in updated.draft.legs}
+            if updated.calculation.current_routes == "pending":
+                if not pending_ids or pending_ids - set(leg_by_id):
+                    raise PreviewIdentityConflict("pending 路线必须引用当前草稿路段")
+                pending_days = {leg_by_id[item].day_id for item in pending_ids}
+                affected_days = tuple(
+                    day.day_id for day in updated.planning_input.days
+                    if day.day_id in pending_days
+                )
+                if set(affected_days) != pending_days:
+                    raise PreviewIdentityConflict("pending 路线引用了当前行程之外的日期")
+            else:
+                if pending_ids:
+                    raise PreviewIdentityConflict("非 pending 路线状态不能保留待计算路段")
+                affected_days = ()
+
+            timestamp = self._now()
+            new_store_version = current.store_version + 1
+            changed = conn.execute(
+                """UPDATE preview_drafts
+                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
+                   WHERE plan_id=? AND access_token_hash=? AND store_version=? AND plan_revision=?""",
+                (
+                    preview_json, timing_json, cost_json, updated.draft.revision,
+                    new_store_version, timestamp, current.preview.draft.plan_id,
+                    token_hash, expected_store_version, command.base_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                latest = conn.execute(
+                    "SELECT store_version,plan_revision FROM preview_drafts WHERE plan_id=?",
+                    (current.preview.draft.plan_id,),
+                ).fetchone()
+                raise PreviewConflict(
+                    "草稿版本已变化",
+                    current_store_version=latest["store_version"],
+                    current_plan_revision=latest["plan_revision"],
+                )
+
+            conn.execute(
+                """UPDATE preview_route_jobs SET state='superseded',updated_at=?
+                   WHERE plan_id=? AND state IN ('pending','running')""",
+                (timestamp, current.preview.draft.plan_id),
+            )
+            calculation_id = updated.calculation.calculation_id
+            if affected_days:
+                self._insert_route_job(
+                    conn,
+                    task_id=task_id,
+                    plan_id=current.preview.draft.plan_id,
+                    calculation_id=calculation_id,
+                    source_store_version=new_store_version,
+                    source_plan_revision=updated.draft.revision,
+                    affected_day_ids=affected_days,
+                    created_at=timestamp,
+                )
+            conn.execute(
+                """INSERT INTO preview_edit_receipts
+                   (plan_id,command_id,request_hash,result_store_version,result_plan_revision,
+                    calculation_id,changed_activity_ids_json,changed_leg_ids_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    current.preview.draft.plan_id,
+                    command_id,
+                    request_hash,
+                    new_store_version,
+                    updated.draft.revision,
+                    calculation_id,
+                    json.dumps(changed_activity_ids, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(changed_leg_ids, ensure_ascii=False, separators=(",", ":")),
+                    timestamp,
+                ),
+            )
+            self._prune_edit_receipts(conn, current.preview.draft.plan_id)
+            stored_row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (current.preview.draft.plan_id,)
+            ).fetchone()
+            route_job_row = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE plan_id=? AND calculation_id=?",
+                (current.preview.draft.plan_id, calculation_id),
+            ).fetchone()
+            return PreviewEditWriteResult(
+                record=self._stored_from_row(stored_row),
+                receipt_store_version=new_store_version,
+                replayed=False,
+                calculation_id=calculation_id,
+                changed_activity_ids=tuple(changed_activity_ids),
+                changed_leg_ids=tuple(changed_leg_ids),
+                route_job=(self._route_job_from_row(route_job_row) if route_job_row else None),
+            )
+
+    def get_route_job(
+        self, access_token: str, task_id: str, calculation_id: str,
+    ) -> PreviewRouteJob | None:
+        token_hash = self._token_hash(access_token)
+        with self._read_connection() as conn:
+            row = conn.execute(
+                """SELECT r.* FROM preview_route_jobs r
+                   JOIN preview_jobs j ON j.plan_id=r.plan_id
+                   WHERE j.task_id=? AND j.access_token_hash=? AND r.calculation_id=?""",
+                (task_id, token_hash, calculation_id),
+            ).fetchone()
+        return self._route_job_from_row(row) if row is not None else None
+
+    def requeue_stale_running_route_job(
+        self, access_token: str, task_id: str, calculation_id: str,
+    ) -> PreviewRouteJob | None:
+        """Recover a same-process worker that exited while its durable job stayed running."""
+        token_hash = self._token_hash(access_token)
+        with self._write_transaction() as conn:
+            job_row = conn.execute(
+                """SELECT r.* FROM preview_route_jobs r
+                   JOIN preview_jobs j ON j.plan_id=r.plan_id
+                   WHERE j.task_id=? AND j.access_token_hash=? AND r.calculation_id=?""",
+                (task_id, token_hash, calculation_id),
+            ).fetchone()
+            if job_row is None or job_row["state"] != "running":
+                return self._route_job_from_row(job_row) if job_row is not None else None
+
+            draft_row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (job_row["plan_id"],),
+            ).fetchone()
+            current = self._stored_from_row(draft_row) if draft_row is not None else None
+            state = (
+                "pending"
+                if current is not None and self._job_matches_record(job_row, current)
+                else "superseded"
+            )
+            conn.execute(
+                "UPDATE preview_route_jobs SET state=?,updated_at=? WHERE calculation_id=? AND state='running'",
+                (state, self._now(), calculation_id),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE calculation_id=?", (calculation_id,),
+            ).fetchone()
+            return self._route_job_from_row(refreshed)
+
+    def get_route_job_by_plan(self, plan_id: str, calculation_id: str) -> PreviewRouteJob | None:
+        with self._read_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE plan_id=? AND calculation_id=?",
+                (plan_id, calculation_id),
+            ).fetchone()
+        return self._route_job_from_row(row) if row is not None else None
+
+    def list_pending_route_plans(self) -> tuple[str, ...]:
+        with self._read_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT plan_id FROM preview_route_jobs WHERE state='pending' ORDER BY plan_id"
+            ).fetchall()
+        return tuple(row["plan_id"] for row in rows)
+
+    def has_pending_route_job(self, plan_id: str) -> bool:
+        with self._read_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM preview_route_jobs WHERE plan_id=? AND state='pending' LIMIT 1",
+                (plan_id,),
+            ).fetchone()
+        return row is not None
+
+    def requeue_route_jobs(self) -> None:
+        """优雅关停后，仅把仍绑定当前 pending 快照的 worker 重新排队。"""
+        with self._write_transaction() as conn:
+            now = self._now()
+            rows = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE state='running'"
+            ).fetchall()
+            for job_row in rows:
+                draft_row = conn.execute(
+                    "SELECT * FROM preview_drafts WHERE plan_id=?", (job_row["plan_id"],)
+                ).fetchone()
+                current = self._stored_from_row(draft_row) if draft_row is not None else None
+                state = "pending" if current is not None and self._job_matches_record(job_row, current) else "superseded"
+                conn.execute(
+                    "UPDATE preview_route_jobs SET state=?,updated_at=? WHERE calculation_id=?",
+                    (state, now, job_row["calculation_id"]),
+                )
+
+    def claim_route_job(self, plan_id: str) -> ClaimedPreviewRouteJob | None:
+        with self._write_transaction() as conn:
+            job_row = conn.execute(
+                """SELECT * FROM preview_route_jobs WHERE plan_id=? AND state='pending'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (plan_id,),
+            ).fetchone()
+            if job_row is None:
+                return None
+            draft_row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (plan_id,),
+            ).fetchone()
+            if draft_row is None:
+                conn.execute(
+                    "UPDATE preview_route_jobs SET state='superseded',updated_at=? WHERE calculation_id=?",
+                    (self._now(), job_row["calculation_id"]),
+                )
+                return None
+            record = self._stored_from_row(draft_row)
+            if not self._job_matches_record(job_row, record):
+                conn.execute(
+                    "UPDATE preview_route_jobs SET state='superseded',updated_at=? WHERE calculation_id=?",
+                    (self._now(), job_row["calculation_id"]),
+                )
+                return None
+            now = self._now()
+            conn.execute(
+                "UPDATE preview_route_jobs SET state='running',updated_at=? WHERE calculation_id=? AND state='pending'",
+                (now, job_row["calculation_id"]),
+            )
+            claimed_row = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE calculation_id=?",
+                (job_row["calculation_id"],),
+            ).fetchone()
+            return ClaimedPreviewRouteJob(self._route_job_from_row(claimed_row), record)
+
+    def publish_route_job(
+        self,
+        plan_id: str,
+        calculation_id: str,
+        snapshot: PreviewSnapshot,
+        *,
+        status: str,
+        error_code: str | None = None,
+    ) -> StoredPreview | None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("路线任务终态无效")
+        updated, timing_json, cost_json = self._validated_snapshot(snapshot)
+        preview_json = self._dump_preview(updated)
+        with self._write_transaction() as conn:
+            job = conn.execute(
+                "SELECT * FROM preview_route_jobs WHERE plan_id=? AND calculation_id=?",
+                (plan_id, calculation_id),
+            ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (plan_id,),
+            ).fetchone()
+            if job is None or row is None:
+                return None
+            current = self._stored_from_row(row)
+            if job["state"] != "running":
+                return None
+            if not self._job_matches_record(job, current):
+                conn.execute(
+                    "UPDATE preview_route_jobs SET state='superseded',updated_at=? WHERE calculation_id=?",
+                    (self._now(), calculation_id),
+                )
+                return None
+            self._check_immutable_identity(current.preview, updated)
+            if (
+                updated.draft.revision != current.plan_revision
+                or updated.calculation.calculation_id != calculation_id
+            ):
+                raise PreviewIdentityConflict("路线结果必须引用当前 calculation_id 和 plan_revision")
+            new_store_version = current.store_version + 1
+            timestamp = self._now()
+            changed = conn.execute(
+                """UPDATE preview_drafts
+                   SET preview_json=?,timing_json=?,cost_json=?,store_version=?,updated_at=?
+                   WHERE plan_id=? AND store_version=? AND plan_revision=?""",
+                (
+                    preview_json, timing_json, cost_json, new_store_version,
+                    timestamp, plan_id, current.store_version, current.plan_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                return None
+            conn.execute(
+                """UPDATE preview_route_jobs SET state=?,result_store_version=?,error_code=?,updated_at=?
+                   WHERE calculation_id=? AND state='running'""",
+                (status, new_store_version, error_code, timestamp, calculation_id),
+            )
+            stored_row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (plan_id,),
+            ).fetchone()
+            return self._stored_from_row(stored_row)
 
     def replace_preview(
         self,
@@ -672,6 +1102,11 @@ class PreviewRepository:
 
             restored_snapshot = self._rebind_snapshot_for_restore(
                 source_snapshot, base_revision=current.plan_revision,
+                calculation_id=(
+                    f"restore:{plan_id}:{restore_id}"
+                    if source_snapshot.preview.calculation.current_routes == "pending"
+                    else source_snapshot.preview.calculation.calculation_id
+                ),
             )
             validated, timing_json, cost_json = self._validated_snapshot(restored_snapshot)
             preview_json = self._dump_preview(validated)
@@ -698,6 +1133,35 @@ class PreviewRepository:
                     "草稿版本已变化",
                     current_store_version=current.store_version,
                     current_plan_revision=current.plan_revision,
+                )
+            conn.execute(
+                """UPDATE preview_route_jobs SET state='superseded',updated_at=?
+                   WHERE plan_id=? AND state IN ('pending','running')""",
+                (timestamp, plan_id),
+            )
+            if validated.calculation.current_routes == "pending":
+                job_row = conn.execute(
+                    "SELECT task_id FROM preview_jobs WHERE plan_id=? AND preview_plan_id=?",
+                    (plan_id, plan_id),
+                ).fetchone()
+                if job_row is None:
+                    raise PreviewIdentityConflict("pending 预览还原需要有效任务绑定")
+                pending_ids = set(validated.calculation.pending_leg_ids)
+                legs_by_id = {leg.leg_id: leg for leg in validated.draft.legs}
+                affected_days = tuple(sorted({
+                    legs_by_id[leg_id].day_id for leg_id in pending_ids if leg_id in legs_by_id
+                }))
+                if not affected_days or pending_ids - set(legs_by_id):
+                    raise PreviewIdentityConflict("pending 预览还原缺少可恢复的目标日期")
+                self._insert_route_job(
+                    conn,
+                    task_id=job_row["task_id"],
+                    plan_id=plan_id,
+                    calculation_id=validated.calculation.calculation_id,
+                    source_store_version=new_store_version,
+                    source_plan_revision=validated.draft.revision,
+                    affected_day_ids=affected_days,
+                    created_at=timestamp,
                 )
             conn.execute(
                 """INSERT INTO preview_restore_receipts
@@ -728,7 +1192,12 @@ class PreviewRepository:
             )
 
     @staticmethod
-    def _rebind_snapshot_for_restore(snapshot: PreviewSnapshot, *, base_revision: int) -> PreviewSnapshot:
+    def _rebind_snapshot_for_restore(
+        snapshot: PreviewSnapshot,
+        *,
+        base_revision: int,
+        calculation_id: str,
+    ) -> PreviewSnapshot:
         new_revision = base_revision + 1
         draft = snapshot.preview.draft.model_copy(update={
             "revision": new_revision,
@@ -745,7 +1214,10 @@ class PreviewRepository:
         preview = snapshot.preview.model_copy(update={
             "draft": draft,
             "validation": validation,
-            "calculation": snapshot.preview.calculation.model_copy(update={"based_on_revision": new_revision}),
+            "calculation": snapshot.preview.calculation.model_copy(update={
+                "based_on_revision": new_revision,
+                "calculation_id": calculation_id,
+            }),
         })
         return PreviewSnapshot.model_validate({
             "preview": preview.model_dump(mode="json"),
@@ -804,6 +1276,89 @@ class PreviewRepository:
                 "DELETE FROM preview_restore_receipts WHERE restore_seq=?",
                 ((row["restore_seq"],) for row in expired),
             )
+
+    def _prune_edit_receipts(self, conn: sqlite3.Connection, plan_id: str) -> None:
+        expired = conn.execute(
+            """SELECT edit_seq FROM preview_edit_receipts WHERE plan_id=?
+               ORDER BY edit_seq DESC LIMIT -1 OFFSET ?""",
+            (plan_id, self.receipt_limit),
+        ).fetchall()
+        if expired:
+            conn.executemany(
+                "DELETE FROM preview_edit_receipts WHERE edit_seq=?",
+                ((row["edit_seq"],) for row in expired),
+            )
+
+    @staticmethod
+    def _pending_days(preview: ItineraryPreview) -> tuple[str, ...]:
+        if preview.calculation.current_routes != "pending":
+            return ()
+        legs_by_id = {leg.leg_id: leg for leg in preview.draft.legs}
+        return tuple(sorted({
+            legs_by_id[leg_id].day_id
+            for leg_id in preview.calculation.pending_leg_ids
+            if leg_id in legs_by_id
+        }))
+
+    @staticmethod
+    def _job_matches_record(job_row: sqlite3.Row, record: StoredPreview) -> bool:
+        preview = record.preview
+        if (
+            job_row["source_store_version"] != record.store_version
+            or job_row["source_plan_revision"] != record.plan_revision
+            or preview.calculation.calculation_id != job_row["calculation_id"]
+            or preview.calculation.current_routes != "pending"
+        ):
+            return False
+        try:
+            job_days = set(json.loads(job_row["affected_day_ids_json"]))
+        except (TypeError, ValueError):
+            return False
+        return bool(job_days) and job_days.issubset(set(PreviewRepository._pending_days(preview)))
+
+    @staticmethod
+    def _insert_route_job(
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        plan_id: str,
+        calculation_id: str,
+        source_store_version: int,
+        source_plan_revision: int,
+        affected_day_ids: tuple[str, ...],
+        created_at: str,
+    ) -> None:
+        conn.execute(
+            """INSERT INTO preview_route_jobs
+               (calculation_id,task_id,plan_id,source_store_version,source_plan_revision,
+                affected_day_ids_json,state,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,'pending',?,?)""",
+            (
+                calculation_id,
+                task_id,
+                plan_id,
+                source_store_version,
+                source_plan_revision,
+                json.dumps(affected_day_ids, ensure_ascii=False, separators=(",", ":")),
+                created_at,
+                created_at,
+            ),
+        )
+
+    @staticmethod
+    def _route_job_from_row(row: sqlite3.Row) -> PreviewRouteJob:
+        return PreviewRouteJob(
+            task_id=row["task_id"],
+            plan_id=row["plan_id"],
+            calculation_id=row["calculation_id"],
+            status=row["state"],
+            source_store_version=row["source_store_version"],
+            source_plan_revision=row["source_plan_revision"],
+            affected_day_ids=tuple(json.loads(row["affected_day_ids_json"])),
+            result_store_version=row["result_store_version"],
+            error_code=row["error_code"],
+            updated_at=row["updated_at"],
+        )
 
     @staticmethod
     def _check_immutable_identity(current: ItineraryPreview, updated: ItineraryPreview) -> None:

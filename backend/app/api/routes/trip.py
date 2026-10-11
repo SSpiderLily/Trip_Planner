@@ -5,6 +5,9 @@ from fastapi import APIRouter, HTTPException, Request, Query, Header
 from ...services.task_service import TaskError
 from ...models.planning_v4 import TripRequest as PlanningV4TripRequest
 from ...models.planning_v4_preview import (
+    PreviewEditJobResponse,
+    PreviewEditRequest,
+    PreviewEditResponse,
     PreviewEnvelope,
     PreviewFinalRestoreRequest,
     PreviewFinalSaveRequest,
@@ -94,6 +97,52 @@ async def v4_preview(task_id: str, request: Request, authorization: str | None =
     if payload is None:
         raise HTTPException(status_code=503, detail={"code": "PREVIEW_UNAVAILABLE", "message": "预览暂不可用"})
     return payload
+
+
+@router.post(
+    "/v4/tasks/{task_id}/edits",
+    status_code=202,
+    response_model=PreviewEditResponse,
+)
+async def v4_edit_preview(
+    task_id: str,
+    body: PreviewEditRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    editor = getattr(request.app.state, "preview_edit_service", None)
+    if editor is None:
+        raise HTTPException(status_code=503, detail={"code": "EDIT_UNAVAILABLE", "message": "预览编辑暂不可用"})
+    try:
+        return await editor.edit(
+            task_id,
+            token,
+            body.command,
+            expected_store_version=body.expected_store_version,
+        )
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.get(
+    "/v4/tasks/{task_id}/edit-jobs/{calculation_id}",
+    response_model=PreviewEditJobResponse,
+)
+async def v4_edit_job(
+    task_id: str,
+    calculation_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    editor = getattr(request.app.state, "preview_edit_service", None)
+    if editor is None:
+        raise HTTPException(status_code=503, detail={"code": "EDIT_UNAVAILABLE", "message": "预览编辑暂不可用"})
+    try:
+        return await editor.get_job(task_id, token, calculation_id)
+    except TaskError as exc:
+        raise task_http(exc)
 
 
 @router.get("/v4/tasks/{task_id}/final", response_model=PreviewFinalState)

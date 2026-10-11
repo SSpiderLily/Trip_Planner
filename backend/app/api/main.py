@@ -11,6 +11,9 @@ from ..services.day_edit_service import DayEditService
 from ..services.preview_repository import PreviewRepository
 from ..services.preview_task_service import PreviewTaskService
 from ..services.planning_v4_pipeline import PlanningV4Pipeline
+
+from ..services.planning_v4_preview_edit_service import PlanningV4PreviewEditService
+from ..services.current_route_service import CurrentRouteService
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
@@ -101,6 +104,14 @@ async def startup_event(application: FastAPI):
         preview_repository,
         pipeline,
     )
+    application.state.preview_edit_service = PlanningV4PreviewEditService(
+        application.state.preview_task_service,
+        preview_repository,
+        route_service=CurrentRouteService(),
+        route_deadline_seconds=settings.planner_edit_route_deadline_seconds,
+    )
+    application.state.preview_task_service.edit_coordinator = application.state.preview_edit_service
+    await application.state.preview_edit_service.recover_pending_jobs()
 
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")
@@ -112,6 +123,8 @@ async def shutdown_event(application: FastAPI):
     """应用关闭事件"""
     print("\n" + "="*60)
     print("👋 应用正在关闭...")
+    if hasattr(application.state, "preview_edit_service"):
+        await application.state.preview_edit_service.close()
     if hasattr(application.state, "preview_task_service"):
         await application.state.preview_task_service.close()
     if hasattr(application.state, "task_service"):
