@@ -276,6 +276,15 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 F05a主智能体决定为独立模块：`MasterDecider.run(MasterDecisionContext(...))`接收固定的PlanningInput、事实、候选及历史任务，返回后端定稿的delegate/plan决定。可执行角色和直接查询由当前依赖收窄；最多一次JSON格式修复，业务引用不合法直接拒绝。它不执行MCP或生成行程；F05b负责调度续派，F06负责每日安排。调用会使用配置的真实LLM。范围及验收见[CHG-003 F05a](docs/changes/CHG-003-planning-performance-observability.md#f05a-master-decision)。
 
+F08当前相邻路线为异步服务：`query_current_routes(planning_input, draft, facts, ...)`按模型顺序查三种方式并选择最快有效路线。日内串接F07时刻，跨日并行；使用共享四并发MCP与F11a缓存。若提供F04d execution，必须同时提供当前context_revision并匹配请求、run、版本和端点原文。公共交通使用09:00参考时刻时保留标记，不能当作绝对行程时间。范围见[CHG-003 F08](docs/changes/CHG-003-planning-performance-observability.md#f08-current-routes)。显式真实核验仅查传入草稿的一段：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file /path/to/route-input.json --day-id day-2026-10-10 --from-ref lodging:day-2026-10-10 --to-ref activity-id
+```
+
+输入文件须包含PlanningInput、PlanDraft与来源闭合的FactStore；命令不会代造POI或运行完整规划。
+
 F07时间计算为纯服务：`calculate_plan_timing(planning_input, draft, facts, verified_departure_fact_id=...)` 按草稿顺序消费已有路线，不调用模型或地图。完整日默认08:00酒店出发；到达日使用已核实就绪时间，未知交通保留未知。返程事实须绑定F04d的已核实离开地点；默认1小时缓冲与交通分开。结果提供活动时刻、等待、已知耗时、不足3小时判断和冲突下界，不修改草稿。范围及验收见[CHG-003 F07](docs/changes/CHG-003-planning-performance-observability.md#f07-activity-timing)。
 
 F04b住宿子任务的独立手动核验（会调用配置的LLM和高德MCP）：

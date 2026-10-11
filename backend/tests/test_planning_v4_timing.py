@@ -344,6 +344,132 @@ class PlanningV4TimingTests(unittest.TestCase):
         self.assertEqual(day.scheduling_decision, "conditional")
         self.assertEqual(day.unknown_transitions[0].reason, "missing_route_leg")
 
+    def test_reference_transit_duration_does_not_advance_absolute_times(self):
+        planning_input, draft, facts = full_day_fixture()
+        original_leg = next(leg for leg in draft.legs if leg.leg_id == "leg-full-0")
+        source = FactSource(
+            tool_call_id="reference-transit-source",
+            tool_name="maps_direction_transit_integrated_by_coordinates",
+            api_version="v3",
+            queried_at=datetime.fromisoformat("2026-10-10T08:00:00+08:00"),
+            effective_params={},
+        )
+        route_fact = RouteFact(
+            fact_id="reference-transit-route",
+            origin_poi_id=original_leg.from_endpoint.poi_id,
+            destination_poi_id=original_leg.to_endpoint.poi_id,
+            origin=MapCoordinate(lng=121.0, lat=31.0),
+            destination=MapCoordinate(lng=121.0, lat=31.0),
+            mode="transit",
+            status="available",
+            options=(RouteOption(
+                option_id="reference-transit-option",
+                duration_s=600,
+                geometry_status="missing",
+            ),),
+            source=source,
+        )
+        reference_leg = original_leg.model_copy(update={
+            "mode_results": (RouteModeResult(
+                mode="transit",
+                status="available",
+                route_fact_id=route_fact.fact_id,
+                option_ids=("reference-transit-option",),
+            ),),
+            "selected_mode": "transit",
+            "selected_option_id": "reference-transit-option",
+            "time_basis": "reference",
+        })
+        changed_draft = draft.model_copy(update={
+            "legs": tuple(reference_leg if leg.leg_id == original_leg.leg_id else leg for leg in draft.legs),
+        })
+        changed_facts = facts.model_copy(update={
+            "sources": (*facts.sources, source),
+            "routes": (*facts.routes, route_fact),
+        })
+
+        result = calculate_plan_timing(planning_input, changed_draft, changed_facts)
+        day = next(item for item in result.days if item.day_id == "day-2026-10-11")
+        by_id = {item.activity_id: item for item in day.activities}
+
+        self.assertIsNone(by_id["a-breakfast"].arrive_at)
+        self.assertIsNone(by_id["a-breakfast"].end_at)
+        self.assertIsNone(by_id["a-museum-am"].depart_at)
+        self.assertIsNone(by_id["a-museum-am"].start_at)
+        self.assertEqual(day.unknown_transitions[0].reason, "transit_reference_departure_time")
+        self.assertEqual(day.summary.known_travel_s, 80 * 60)
+        with self.assertRaises(ValueError):
+            calculate_plan_timing(
+                planning_input,
+                changed_draft,
+                changed_facts.model_copy(update={"routes": facts.routes}),
+            )
+
+    def test_reference_transit_return_duration_does_not_prove_conflict(self):
+        planning_input = make_input()
+        day_date = date(2026, 10, 12)
+        spec = ("breakfast", "a-final", "poi-final", "fact-final", "meal", 3600, "default")
+        days = make_days(planning_input, {day_date: (spec,)})
+        outgoing, outgoing_fact = make_route_leg(
+            "reference-return-out", "day-2026-10-12", "lodging", "lodging:day-2026-10-12",
+            "poi-hotel", "activity", "a-final", "poi-final", 60,
+        )
+        returning, _ = make_route_leg(
+            "reference-return", "day-2026-10-12", "activity", "a-final", "poi-final",
+            "departure", "station", "poi-terminal", 12 * 3600,
+        )
+        source = FactSource(
+            tool_call_id="reference-return-transit-source",
+            tool_name="maps_direction_transit_integrated_by_coordinates",
+            api_version="v3",
+            queried_at=datetime.fromisoformat("2026-10-10T08:00:00+08:00"),
+            effective_params={},
+        )
+        return_fact = RouteFact(
+            fact_id="reference-return-transit-fact",
+            origin_poi_id="poi-final",
+            destination_poi_id="poi-terminal",
+            origin=MapCoordinate(lng=121.0, lat=31.0),
+            destination=MapCoordinate(lng=121.0, lat=31.0),
+            mode="transit",
+            status="available",
+            options=(RouteOption(
+                option_id="reference-return-transit-option",
+                duration_s=12 * 3600,
+                geometry_status="missing",
+            ),),
+            source=source,
+        )
+        returning = returning.model_copy(update={
+            "mode_results": (RouteModeResult(
+                mode="transit",
+                status="available",
+                route_fact_id=return_fact.fact_id,
+                option_ids=("reference-return-transit-option",),
+            ),),
+            "selected_mode": "transit",
+            "selected_option_id": "reference-return-transit-option",
+            "time_basis": "reference",
+            "requested_departure_at": datetime.fromisoformat("2026-10-12T09:00:00+08:00"),
+        })
+        facts = make_facts(
+            places=(make_place("fact-hotel", "poi-hotel"), make_place("fact-final", "poi-final"),
+                    make_place("fact-terminal", "poi-terminal")),
+            routes=(outgoing_fact, return_fact),
+        )
+
+        result = calculate_plan_timing(
+            planning_input,
+            make_draft(planning_input, days, (outgoing, returning)),
+            facts,
+            verified_departure_fact_id="fact-terminal",
+        )
+        departure = result.days[-1].return_timing
+        self.assertEqual(departure.status, "unverified")
+        self.assertIsNone(departure.travel_s)
+        self.assertIsNone(departure.overrun_s)
+        self.assertNotEqual(departure.status, "conflict")
+
     def test_first_day_needs_known_ready_time_and_uses_local_timezone(self):
         planning_input = make_input(
             arrival="2026-10-10T16:00:00+00:00",
