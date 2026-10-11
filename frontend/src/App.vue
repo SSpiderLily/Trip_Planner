@@ -7,7 +7,7 @@
           <span>漫游<span class="brand-dot">.</span></span>
         </router-link>
         <div class="header-caption">A JOURNEY, WELL CONSIDERED</div>
-        <router-link class="header-link" to="/#plan">开始规划 <span aria-hidden="true">↗</span></router-link>
+        <router-link class="header-link" :to="headerLink.to">{{ headerLink.label }} <span aria-hidden="true">↗</span></router-link>
       </header>
       <div class="page-content"><router-view /></div>
       <footer class="site-footer">
@@ -20,7 +20,16 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
+
+const route = useRoute()
+const headerLink = computed(() => {
+  if (route.path === '/preview') return { to: '/plan', label: '开始规划' }
+  if (route.path === '/plan') return { to: '/plan#plan-form-title', label: '开始规划' }
+  return { to: '/#plan', label: '开始规划' }
+})
 </script>
 
 <style>
