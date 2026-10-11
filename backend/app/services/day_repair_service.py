@@ -1139,12 +1139,20 @@ def apply_day_revision(
                 continue
             can_change = old.activity_id in allowed_change_activity_ids
             if can_change:
-                new_activities.append(old.model_copy(update={
-                    "slot_id": proposal.slot_id,
-                    "duration_s": proposal.duration_s if proposal.duration_s is not None else old.duration_s,
-                    "duration_source": "model" if proposal.duration_s is not None else old.duration_source,
-                    "duration_reason": None if proposal.duration_s is not None else old.duration_reason,
-                }))
+                activity_changed = (
+                    proposal.slot_id != old.slot_id
+                    or (proposal.duration_s is not None and proposal.duration_s != old.duration_s)
+                )
+                if old.activity_source == "user" and not activity_changed:
+                    new_activities.append(old)
+                else:
+                    new_activities.append(old.model_copy(update={
+                        "slot_id": proposal.slot_id,
+                        "duration_s": proposal.duration_s if proposal.duration_s is not None else old.duration_s,
+                        "duration_source": "model" if proposal.duration_s is not None else old.duration_source,
+                        "duration_reason": None if proposal.duration_s is not None else old.duration_reason,
+                        "activity_source": "model",
+                    }))
             else:
                 # Existing valid activities are copied from the trusted draft. The model
                 # cannot change their content during a missing-only repair.
@@ -1159,6 +1167,7 @@ def apply_day_revision(
                 duration_s=duration,
                 duration_source="model" if proposal.duration_s is not None else "default",
                 duration_reason=None if proposal.duration_s is not None else "未提供建议时长，默认0秒；不表示该时段已满足完整性要求。",
+                activity_source="model",
                 recommendation_reason=proposal.recommendation_reason,
             ))
             continue
@@ -1181,6 +1190,7 @@ def apply_day_revision(
             duration_s=duration,
             duration_source=source,
             duration_reason=reason,
+            activity_source="model",
             requirement_ids=proposal.requirement_ids,
             recommendation_reason=proposal.recommendation_reason,
         ))

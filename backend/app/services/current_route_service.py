@@ -485,9 +485,17 @@ def _make_edge(
                      origin, destination, "same_poi_fact_conflict")
 
     leg = _pending_leg(leg_id, draft.revision, day.day_id, origin_endpoint, destination_endpoint)
-    if previous is not None and previous.selection_source == "user":
+    if previous is not None and (
+        previous.selection_source == "user" or previous.preferred_mode is not None
+    ):
         # 保留用户明确选择的方式；只有供应商返回该方式的有效方案后才绑定新 option_id。
-        leg = leg.model_copy(update={"selection_source": "user"})
+        preferred_mode = previous.preferred_mode
+        if preferred_mode is None and previous.selection_source == "user":
+            preferred_mode = previous.selected_mode
+        leg = leg.model_copy(update={
+            "selection_source": "user",
+            "preferred_mode": preferred_mode,
+        })
     return _Edge(day.day_id, from_reference_id, destination_endpoint.reference_id, leg,
                  origin, destination)
 
@@ -564,6 +572,40 @@ def _build_edges(
     legs = [edge.leg for edges in by_day.values() for edge in edges if edge.leg is not None]
     untouched = [leg for leg in draft.legs if leg.day_id not in by_day]
     return by_day, untouched + legs
+
+
+def build_pending_route_legs_for_day(
+    planning_input: PlanningInput,
+    draft: PlanDraft,
+    facts: FactStore,
+    day_id: str,
+    *,
+    verified_departure_fact_id: str | None = None,
+) -> tuple[RouteLeg, ...]:
+    """纯构造目标日最新顺序的待核实路线骨架，不访问缓存或外部服务。"""
+    _validate_plan_binding(planning_input, draft)
+    if day_id not in {day.day_id for day in draft.days}:
+        raise CurrentRouteError("requested_live_day_missing")
+    if verified_departure_fact_id is None:
+        departure_ids = {
+            endpoint.reference_id
+            for leg in draft.legs
+            for endpoint in (leg.from_endpoint, leg.to_endpoint)
+            if leg.day_id == day_id and endpoint.kind == "departure"
+        }
+        if len(departure_ids) > 1:
+            raise CurrentRouteError("departure_fact_id_ambiguous")
+        verified_departure_fact_id = next(iter(departure_ids), None)
+    elif not any(place.fact_id == verified_departure_fact_id for place in facts.places):
+        raise CurrentRouteError("verified_departure_fact_missing_or_incomplete")
+
+    by_day, _ = _build_edges(
+        planning_input, draft, facts, verified_departure_fact_id,
+    )
+    return tuple(
+        edge.leg for edge in by_day[day_id]
+        if edge.leg is not None
+    )
 
 
 def _effective_http_params(
@@ -709,8 +751,11 @@ def _select_leg(
             "time_basis": "unspecified",
         })
     chosen = None
-    if original_leg.selection_source == "user" and original_leg.selected_mode is not None:
-        user_candidates = [item for item in candidates if item[3] == original_leg.selected_mode]
+    preferred_mode = original_leg.preferred_mode
+    if preferred_mode is None and original_leg.selection_source == "user":
+        preferred_mode = original_leg.selected_mode
+    if preferred_mode is not None:
+        user_candidates = [item for item in candidates if item[3] == preferred_mode]
         if user_candidates:
             chosen = min(user_candidates, key=lambda item: (item[0], item[2]))
             selection_source = "user"
@@ -959,9 +1004,13 @@ class CurrentRouteService:
                     selected_option_id=selected_leg.selected_option_id,
                     selection_source=selected_leg.selection_source,
                     reason=("user_selected_mode_unavailable"
-                            if original_leg.selection_source == "user"
-                            and original_leg.selected_mode is not None
-                            and selected_leg.selected_mode != original_leg.selected_mode
+                            if (original_leg.preferred_mode or (
+                                original_leg.selected_mode
+                                if original_leg.selection_source == "user" else None
+                            )) is not None
+                            and selected_leg.selected_mode != (
+                                original_leg.preferred_mode or original_leg.selected_mode
+                            )
                             else None),
                     modes=tuple(result.outcome for result in mode_results),
                 ))

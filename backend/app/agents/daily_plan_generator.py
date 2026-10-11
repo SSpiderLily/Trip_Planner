@@ -1233,6 +1233,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                     duration_s=duration,
                     duration_source=duration_source,
                     duration_reason=duration_reason,
+                    activity_source="model",
                     requirement_ids=activity.requirement_ids,
                     recommendation_reason=activity.recommendation_reason,
                 ))

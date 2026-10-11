@@ -84,6 +84,8 @@ def validate_plan_proposal(
     planning_input: PlanningInput,
     candidates: tuple[CandidateRef, ...],
     facts: FactStore,
+    *,
+    user_activity_refs: frozenset[str] = frozenset(),
 ) -> None:
     """确保模型提案只能引用既有候选、有效日期和未跳过时段。"""
     issues: list[ReferenceIssue] = []
@@ -147,7 +149,11 @@ def validate_plan_proposal(
                     expected_category = "sightseeing" if activity.kind == "sightseeing" else "meal"
                     if candidate.category != expected_category:
                         issues.append(ReferenceIssue("candidate_category_mismatch", f"{activity_path}.candidate_ref", "候选类别与活动类型不一致"))
-                    if candidate.slot_ids and activity.slot_id not in candidate.slot_ids:
+                    if (
+                        candidate.slot_ids
+                        and activity.slot_id not in candidate.slot_ids
+                        and activity.proposal_ref not in user_activity_refs
+                    ):
                         issues.append(ReferenceIssue("candidate_slot_mismatch", f"{activity_path}.slot_id", "候选不适用于该时段"))
             unknown_requirements = set(activity.requirement_ids) - req_ids
             if unknown_requirements:
@@ -249,7 +255,11 @@ def validate_preview(
                         issues.append(ReferenceIssue("candidate_category_mismatch", f"{activity_path}.candidate_ref", "候选类别与活动类型不一致"))
                     if candidate.poi_id != activity.poi_id or candidate.place_fact_id != activity.place_fact_id:
                         issues.append(ReferenceIssue("candidate_activity_mismatch", activity_path, "活动身份与候选不一致"))
-                    if candidate.slot_ids and activity.slot_id not in candidate.slot_ids:
+                    if (
+                        candidate.slot_ids
+                        and activity.slot_id not in candidate.slot_ids
+                        and activity.activity_source != "user"
+                    ):
                         issues.append(ReferenceIssue("candidate_slot_mismatch", f"{activity_path}.slot_id", "候选不适用于该时段"))
                 fact = place_by_id.get(activity.place_fact_id or "")
                 if fact is None:
@@ -659,8 +669,11 @@ def validate_day_revision(
             issues.append(ReferenceIssue("invalid_revision_slot", f"{path}.slot_id", "修订活动必须使用未跳过的有效时段"))
         if set(activity.requirement_ids) - requirement_ids:
             issues.append(ReferenceIssue("dangling_revision_requirement", f"{path}.requirement_ids", "修订活动引用了未知硬性需求"))
+        old_activity = next((
+            item for item in old_day.activities
+            if item.activity_id == activity.existing_activity_id
+        ), None) if activity.existing_activity_id is not None else None
         if activity.existing_activity_id:
-            old_activity = next((item for item in old_day.activities if item.activity_id == activity.existing_activity_id), None)
             if old_activity and (activity.candidate_ref != old_activity.candidate_ref or activity.kind != old_activity.kind):
                 issues.append(ReferenceIssue("preserved_activity_identity_changed", path, "既有活动保留时不能改变其地点身份或活动类型"))
         if activity.kind != "free_time":
@@ -672,7 +685,19 @@ def validate_day_revision(
                 fact = place_by_id.get(candidate.place_fact_id)
                 if candidate.category != expected or fact is None or fact.poi_id != candidate.poi_id or fact.location is None:
                     issues.append(ReferenceIssue("invalid_revision_candidate", f"{path}.candidate_ref", "修订候选类别或地点事实无效"))
-                if candidate.slot_ids and activity.slot_id not in candidate.slot_ids:
+                is_exact_preserved_user_activity = (
+                    old_activity is not None
+                    and old_activity.activity_source == "user"
+                    and activity.existing_activity_id in revision.preserve_activity_ids
+                    and activity.candidate_ref == old_activity.candidate_ref
+                    and activity.kind == old_activity.kind
+                    and activity.slot_id == old_activity.slot_id
+                )
+                if (
+                    candidate.slot_ids
+                    and activity.slot_id not in candidate.slot_ids
+                    and not is_exact_preserved_user_activity
+                ):
                     issues.append(ReferenceIssue("invalid_revision_candidate_slot", f"{path}.slot_id", "修订候选不适用于指定时段"))
                 if activity.requirement_ids and not set(activity.requirement_ids).issubset(candidate.requirement_ids):
                     issues.append(ReferenceIssue("invalid_revision_candidate_requirement", f"{path}.requirement_ids", "修订活动不能把无关候选绑定为必去要求"))

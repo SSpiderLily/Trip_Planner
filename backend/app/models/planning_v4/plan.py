@@ -86,6 +86,7 @@ class DraftActivity(ContractModel):
     duration_s: int = Field(ge=0)
     duration_source: Literal["model", "default", "user"]
     duration_reason: str | None = None
+    activity_source: Literal["model", "user"] = "model"
     requirement_ids: tuple[str, ...] = ()
     recommendation_reason: str = ""
 
@@ -165,6 +166,7 @@ class RouteLeg(ContractModel):
     mode_results: tuple[RouteModeResult, ...] = ()
     selected_mode: Literal["transit", "bicycling", "walking"] | None = None
     selected_option_id: str | None = None
+    preferred_mode: Literal["transit", "bicycling", "walking"] | None = None
     selection_source: Literal["backend_fastest_available", "user", "same_place"] | None = None
 
     @model_validator(mode="after")

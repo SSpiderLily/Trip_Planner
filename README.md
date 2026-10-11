@@ -371,3 +371,8 @@ Production deployment test.
 前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。此步只读，首页尚未改为v4提交，浏览器未同步编辑与导出保存后续接入，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
 
 映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
+
+
+### v4按日编辑核心
+
+`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。后续API负责原子存储和路线重算，当前页面尚未开放编辑，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。

@@ -7,6 +7,8 @@ import json
 import time
 import unittest
 
+from pydantic import ValidationError
+
 from app.agents.daily_plan_generator import DailyPlanGenerator
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
@@ -32,11 +34,13 @@ from app.services.day_repair_service import (
     DayRepairService,
     DayRevisionRequest,
     IssueDayAssignment,
+    apply_day_revision,
     assign_repair_issues,
 )
 from app.services.llm_service import LLMCompletion
 from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import validate_daily_plan
+from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
 from test_planning_v4_validation import make_facts_and_candidates, make_filled_draft, make_input, requirement
 
 
@@ -708,6 +712,72 @@ def invoke_day_revision(fake, case):
     )
 
 
+def build_bound_day_revision(case, *, preserve_activity_ids, modifiable_activity_ids=(), response=None):
+    class FakeLLM:
+        def invoke_with_metadata(self, _messages, **_kwargs):
+            return LLMCompletion(response or case["response"], None, "stop")
+
+    return DailyPlanGenerator(llm=FakeLLM()).revise_day(
+        case["planning_input"], case["draft"], case["report"], TARGET_DAY,
+        (case["issue"],), (case["assignment"],),
+        case["candidates"], case["facts"], (), (),
+        preserve_activity_ids=preserve_activity_ids,
+        modifiable_activity_ids=modifiable_activity_ids,
+        removable_activity_ids=("free-dinner-placeholder",),
+    ).revision
+
+
+def narrow_user_activity_search_scope(case):
+    target = next(day for day in case["draft"].days if day.day_id == TARGET_DAY)
+    user_activity = next(activity for activity in target.activities if activity.kind != "free_time")
+    original_candidate = next(
+        candidate for candidate in case["candidates"]
+        if candidate.candidate_id == user_activity.candidate_ref
+    )
+    other_slot = next(
+        slot for day in case["planning_input"].days for slot in day.slots
+        if slot.eligibility != "skipped" and slot.slot_id != user_activity.slot_id
+    )
+    narrowed_candidate = original_candidate.model_copy(update={
+        "candidate_id": "user-activity-search-scope",
+        "slot_ids": (other_slot.slot_id,),
+    })
+    user_day = target.model_copy(update={
+        "activities": tuple(
+            activity.model_copy(update={
+                "activity_source": "user",
+                "candidate_ref": narrowed_candidate.candidate_id,
+            }) if activity.activity_id == user_activity.activity_id else activity
+            for activity in target.activities
+        ),
+    })
+    case["draft"] = case["draft"].model_copy(update={
+        "days": tuple(user_day if day.day_id == TARGET_DAY else day for day in case["draft"].days),
+    })
+    case["candidates"] = (*case["candidates"], narrowed_candidate)
+    response_payload = json.loads(case["response"])
+    proposal = next(
+        activity for activity in response_payload["replacement_day"]["activities"]
+        if activity.get("existing_activity_id") == user_activity.activity_id
+    )
+    proposal["candidate_ref"] = narrowed_candidate.candidate_id
+    case["response"] = json.dumps(response_payload, ensure_ascii=False)
+    return case, user_activity, narrowed_candidate
+
+
+def day_revision_from_response(case, *, preserve_activity_ids, response):
+    payload = json.loads(response)
+    return DayRevision(
+        day_id=TARGET_DAY,
+        base_revision=case["draft"].revision,
+        revision=case["draft"].revision + 1,
+        based_on_report_revision=case["report"].based_on_revision,
+        replacement_day=ProposalDay.model_validate(payload["replacement_day"]),
+        preserve_activity_ids=preserve_activity_ids,
+        source_issue_ids=(case["issue"].issue_id,),
+    )
+
+
 class DayScopedRevisionModelTests(unittest.TestCase):
     def test_revise_day_sends_one_date_and_returns_a_bound_day_revision(self):
         planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
@@ -779,6 +849,148 @@ class DayScopedRevisionModelTests(unittest.TestCase):
         self.assertEqual(execution.revision.based_on_report_revision, report.based_on_revision)
         self.assertEqual(execution.revision.preserve_activity_ids, preserve)
         self.assertAlmostEqual(llm.kwargs["request_timeout"], 17.0, places=1)
+
+    def test_day_revision_preserves_user_source_only_for_unchanged_existing_activities(self):
+        case, user_activity, user_candidate = narrow_user_activity_search_scope(
+            day_revision_model_case(),
+        )
+        revision = build_bound_day_revision(
+            case, preserve_activity_ids=case["preserve"],
+        )
+        revised, changed = apply_day_revision(
+            revision,
+            case["draft"], case["report"], case["planning_input"],
+            case["candidates"], case["facts"],
+            expected_day_id=TARGET_DAY,
+            expected_source_issue_ids=(case["issue"].issue_id,),
+            preserve_activity_ids=case["preserve"],
+            removable_activity_ids=("free-dinner-placeholder",),
+        )
+        revised_day = next(day for day in revised.days if day.day_id == TARGET_DAY)
+        revised_user_activity = next(
+            activity for activity in revised_day.activities
+            if activity.activity_id == user_activity.activity_id
+        )
+        generated_dinner = next(
+            activity for activity in revised_day.activities
+            if activity.slot_id == case["missing_slot"].slot_id
+        )
+        self.assertTrue(changed)
+        self.assertEqual(revised_user_activity.activity_source, "user")
+        self.assertEqual(revised_user_activity.candidate_ref, user_candidate.candidate_id)
+        self.assertEqual(generated_dinner.activity_source, "model")
+
+        with self.assertRaises(ValidationError):
+            ProposalActivity(
+                proposal_ref="model-forged-user", candidate_ref="revision-model-candidate",
+                slot_id=case["missing_slot"].slot_id, kind="meal", activity_source="user",
+            )
+
+    def test_user_search_scope_exception_requires_exact_preserved_activity_binding(self):
+        base_case, user_activity, user_candidate = narrow_user_activity_search_scope(
+            day_revision_model_case(),
+        )
+        payload = json.loads(base_case["response"])
+        proposal = next(
+            activity for activity in payload["replacement_day"]["activities"]
+            if activity.get("existing_activity_id") == user_activity.activity_id
+        )
+        other_sightseeing_slot = next(
+            slot for slot in base_case["planning_input"].days
+            if slot.day_id == TARGET_DAY
+            for slot in slot.slots
+            if slot.eligibility != "skipped"
+            and slot.period in {"morning", "afternoon", "evening"}
+            and slot.slot_id != user_activity.slot_id
+        )
+        alternate_candidate = user_candidate.model_copy(update={
+            "candidate_id": "alternate-user-activity-candidate",
+            "slot_ids": (user_activity.slot_id,),
+        })
+        base_case["candidates"] = (*base_case["candidates"], alternate_candidate)
+
+        changed_kind = "meal" if user_activity.kind == "sightseeing" else "sightseeing"
+        invalid_variants = (
+            ("changed slot", {"slot_id": other_sightseeing_slot.slot_id}, base_case["preserve"]),
+            ("changed candidate", {"candidate_ref": alternate_candidate.candidate_id}, base_case["preserve"]),
+            ("changed kind", {"kind": changed_kind}, base_case["preserve"]),
+            ("not preserved", {}, tuple(
+                activity_id for activity_id in base_case["preserve"]
+                if activity_id != user_activity.activity_id
+            )),
+        )
+        for label, changes, preserve in invalid_variants:
+            with self.subTest(label=label):
+                invalid_payload = json.loads(json.dumps(payload))
+                invalid_proposal = next(
+                    activity for activity in invalid_payload["replacement_day"]["activities"]
+                    if activity.get("existing_activity_id") == user_activity.activity_id
+                )
+                invalid_proposal.update(changes)
+                revision = day_revision_from_response(
+                    base_case,
+                    preserve_activity_ids=preserve,
+                    response=json.dumps(invalid_payload, ensure_ascii=False),
+                )
+                with self.assertRaises(ContractValidationError) as raised:
+                    validate_day_revision(
+                        revision,
+                        base_case["draft"], base_case["report"], base_case["planning_input"],
+                        base_case["candidates"], base_case["facts"],
+                    )
+                codes = {issue.code for issue in raised.exception.issues}
+                self.assertTrue(
+                    {"invalid_revision_candidate_slot", "preserved_activity_identity_changed"} & codes,
+                    codes,
+                )
+
+    def test_model_change_to_user_activity_reclassifies_it_as_model_sourced(self):
+        case = day_revision_model_case()
+        target = next(day for day in case["draft"].days if day.day_id == TARGET_DAY)
+        user_activity = next(activity for activity in target.activities if activity.kind != "free_time")
+        user_day = target.model_copy(update={
+            "activities": tuple(
+                activity.model_copy(update={"activity_source": "user"})
+                if activity.activity_id == user_activity.activity_id else activity
+                for activity in target.activities
+            ),
+        })
+        case["draft"] = case["draft"].model_copy(update={
+            "days": tuple(user_day if day.day_id == TARGET_DAY else day for day in case["draft"].days),
+        })
+        preserve = tuple(
+            activity_id for activity_id in case["preserve"]
+            if activity_id != user_activity.activity_id
+        )
+        response_payload = json.loads(case["response"])
+        existing = next(
+            activity for activity in response_payload["replacement_day"]["activities"]
+            if activity.get("existing_activity_id") == user_activity.activity_id
+        )
+        existing["duration_s"] = user_activity.duration_s + 600
+        revision = build_bound_day_revision(
+            case,
+            preserve_activity_ids=preserve,
+            modifiable_activity_ids=(user_activity.activity_id,),
+            response=json.dumps(response_payload, ensure_ascii=False),
+        )
+        revised, _ = apply_day_revision(
+            revision,
+            case["draft"], case["report"], case["planning_input"],
+            case["candidates"], case["facts"],
+            expected_day_id=TARGET_DAY,
+            expected_source_issue_ids=(case["issue"].issue_id,),
+            preserve_activity_ids=preserve,
+            allowed_change_activity_ids=(user_activity.activity_id,),
+            removable_activity_ids=("free-dinner-placeholder",),
+        )
+        revised_day = next(day for day in revised.days if day.day_id == TARGET_DAY)
+        modified = next(
+            activity for activity in revised_day.activities
+            if activity.activity_id == user_activity.activity_id
+        )
+        self.assertEqual(modified.duration_s, user_activity.duration_s + 600)
+        self.assertEqual(modified.activity_source, "model")
 
     def test_revise_day_invalid_output_retains_completed_call_usage(self):
         case = day_revision_model_case()
