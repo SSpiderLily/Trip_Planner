@@ -1252,6 +1252,39 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             "total_tokens": 360,
         })
 
+    def test_revise_day_format_repair_uses_safe_activity_guidance(self):
+        case = day_revision_model_case()
+        invalid_payload = json.loads(case["response"])
+        target_day = invalid_payload["replacement_day"]
+        target_day["activities"].append({
+            "proposal_ref": "invalid-free-time",
+            "slot_id": case["missing_slot"].slot_id,
+            "kind": "free_time",
+            "candidate_ref": "revision-model-candidate",
+        })
+        invalid_response = json.dumps(invalid_payload, ensure_ascii=False)
+
+        class FakeLLM:
+            def __init__(self):
+                self.responses = [invalid_response, case["response"]]
+                self.calls = []
+
+            def invoke_with_metadata(self, messages, **kwargs):
+                self.calls.append((messages, kwargs))
+                return LLMCompletion(self.responses.pop(0), None, "stop")
+
+        llm = FakeLLM()
+        execution = invoke_day_revision(llm, case)
+
+        repair = llm.calls[1][0][-1]["content"]
+        safe_diagnostics = repair.split("安全诊断如下：", 1)[-1]
+        self.assertEqual(execution.revision.day_id, TARGET_DAY)
+        self.assertEqual(execution.model_calls, 2)
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertIn('"type": "value_error"', safe_diagnostics)
+        self.assertIn("sightseeing/meal必须引用候选", safe_diagnostics)
+        self.assertIn("free_time不得引用POI候选", safe_diagnostics)
+
     def test_revise_day_reference_failure_retains_successful_call_usage(self):
         case = day_revision_model_case()
         payload = json.loads(case["response"])

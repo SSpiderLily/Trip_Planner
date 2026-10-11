@@ -4,11 +4,13 @@ from __future__ import annotations
 from concurrent.futures import Future
 from datetime import date, datetime
 import json
+from pathlib import Path
+import tempfile
 from threading import Event
 import unittest
 from unittest.mock import patch
 
-from app.agents.daily_plan_generator import DailyPlanGenerator
+from app.agents.daily_plan_generator import DailyPlanGenerator, DailyPlanModelOutput
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
     AreaHint,
@@ -32,6 +34,8 @@ from app.models.planning_v4 import (
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from app.models.planning_v4.input import RequirementSource
 from app.services.llm_service import LLMCompletion
+from app.services.observation_service import ObservationService
+from app.services.task_repository import TaskRepository
 from app.services.planning_v4_validation import validate_daily_plan
 
 
@@ -758,10 +762,122 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         self.assertEqual(execution.format_repairs, 1)
         self.assertEqual(execution.usage, {"input_tokens": 240, "output_tokens": 120, "total_tokens": 360})
         repair = fake.calls[1][0][-1]["content"]
-        self.assertIn("只修复格式和结构", repair)
+        self.assertIn("只修复结构诊断中的问题", repair)
         self.assertEqual(fake.calls[0][1]["max_tokens"], 8192)
         self.assertEqual(fake.calls[0][1]["max_retries"], 0)
         self.assertLessEqual(fake.calls[0][1]["request_timeout"], 120)
+
+    def test_format_repair_keeps_safe_type_and_gives_fixed_too_short_guidance(self):
+        planning_input = make_input()
+        valid = make_model_output(planning_input)
+        malformed = json.dumps({"days": [], "missing_notes": []})
+        fake = FakeLLM([malformed, valid])
+
+        execution = DailyPlanGenerator(llm=fake).generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+        )
+
+        repair = fake.calls[1][0][-1]["content"]
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertIn('"type": "too_short"', repair)
+        self.assertIn("保留所有请求日期", repair)
+
+    def test_safe_format_diagnostics_hide_unknown_fields_and_values(self):
+        planning_input = make_input()
+        payload = json.loads(make_model_output(planning_input))
+        day = payload["days"][1]
+        day["activities"].append({
+            "proposal_ref": "synthetic-invalid-free-time",
+            "slot_id": "slot-2026-10-11-evening",
+            "kind": "free_time",
+            "candidate_ref": "sensitive_candidate_value_7913",
+        })
+
+        parsed, diagnostics, issue_count, truncated = DailyPlanGenerator._validate_model_output(
+            json.dumps(payload, ensure_ascii=False), DailyPlanModelOutput,
+        )
+
+        rendered = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertIsNone(parsed)
+        self.assertGreaterEqual(issue_count, 1)
+        self.assertFalse(truncated)
+        self.assertIn('"path": "days[1].activities[0]"', rendered)
+        self.assertIn('"type": "value_error"', rendered)
+        self.assertIn("sightseeing/meal必须引用候选", rendered)
+        self.assertIn("free_time不得引用POI候选", rendered)
+        self.assertNotIn("sensitive_candidate_value_7913", rendered)
+
+        payload["days"][1]["activities"][0]["private_user_value_2648"] = "sensitive_field_value_5821"
+        _, unknown_field_diagnostics, _, _ = DailyPlanGenerator._validate_model_output(
+            json.dumps(payload, ensure_ascii=False), DailyPlanModelOutput,
+        )
+        unknown_field_rendered = json.dumps(unknown_field_diagnostics, ensure_ascii=False)
+        self.assertIn('"path": "days[1].activities[0].unknown_field"', unknown_field_rendered)
+        self.assertNotIn("private_user_value_2648", unknown_field_rendered)
+        self.assertNotIn("sensitive_field_value_5821", unknown_field_rendered)
+
+    def test_format_diagnostic_cap_keeps_actual_issue_count(self):
+        payload = json.loads(make_model_output(make_input()))
+        payload.update({f"unexpected_private_field_{index}": index for index in range(9)})
+
+        parsed, diagnostics, issue_count, truncated = DailyPlanGenerator._validate_model_output(
+            json.dumps(payload), DailyPlanModelOutput,
+        )
+
+        self.assertIsNone(parsed)
+        self.assertEqual(issue_count, 9)
+        self.assertTrue(truncated)
+        self.assertEqual(len(diagnostics), 9)
+        self.assertEqual(diagnostics[-1]["type"], "additional_issues")
+        rendered = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertNotIn("unexpected_private_field", rendered)
+
+    def test_observation_records_safe_output_diagnostics_but_not_model_response(self):
+        planning_input = make_input()
+        valid = make_model_output(planning_input)
+        payload = json.loads(valid)
+        payload["days"][1]["activities"].append({
+            "proposal_ref": "synthetic-invalid-free-time",
+            "slot_id": "slot-2026-10-11-evening",
+            "kind": "free_time",
+            "candidate_ref": "SYNTHETIC_CANDIDATE_SECRET_7913",
+        })
+        payload["private_user_field_2648"] = "SYNTHETIC_INPUT_VALUE_5821"
+        malformed = json.dumps(payload, ensure_ascii=False)
+        fake = FakeLLM([malformed, valid])
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = TaskRepository(Path(directory) / "daily-plan-observation.sqlite3")
+            repository.initialize()
+            repository.create("daily-plan-observation-task", {})
+            with ObservationService(repository).task("daily-plan-observation-task"):
+                execution = DailyPlanGenerator(llm=fake).generate(
+                    planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
+                )
+
+            rows = repository.spans("daily-plan-observation-task")
+            validation_rows = [row for row in rows if row["name"] == "validation.daily_plan_output"]
+            self.assertEqual(len(validation_rows), 2)
+            failed_validation = repository.span("daily-plan-observation-task", validation_rows[0]["span_id"])
+            diagnostic_output = json.dumps(failed_validation["output_data"], ensure_ascii=False)
+            all_observation_data = json.dumps([
+                repository.span("daily-plan-observation-task", row["span_id"])
+                for row in rows
+            ], ensure_ascii=False)
+
+        self.assertEqual(execution.format_repairs, 1)
+        self.assertFalse(failed_validation["output_data"]["valid"])
+        self.assertEqual(failed_validation["output_data"]["issue_count"], 2)
+        self.assertFalse(failed_validation["output_data"]["diagnostics_truncated"])
+        self.assertIn('"path": "days[1].activities[0]"', diagnostic_output)
+        self.assertIn('"type": "value_error"', diagnostic_output)
+        self.assertIn('"path": "unknown_field"', diagnostic_output)
+        self.assertIn('"type": "extra_forbidden"', diagnostic_output)
+        self.assertNotIn("private_user_field_2648", all_observation_data)
+        self.assertNotIn("SYNTHETIC_INPUT_VALUE_5821", all_observation_data)
+        self.assertNotIn("SYNTHETIC_CANDIDATE_SECRET_7913", all_observation_data)
+        self.assertNotIn(malformed, all_observation_data)
 
     def test_cancellation_after_invalid_output_prevents_format_repair_request(self):
         planning_input = make_input()
@@ -796,6 +912,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 planning_input, make_candidates(), make_facts(), make_areas(), (), source_run_id=RUN_ID,
             )
 
+        self.assertEqual(raised.exception.code, "PLAN_OUTPUT_INVALID")
         self.assertEqual(raised.exception.model_calls, 2)
         self.assertEqual(raised.exception.format_repairs, 1)
         self.assertEqual(raised.exception.usage, {

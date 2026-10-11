@@ -65,6 +65,78 @@ class DailyDayRevisionModelOutput(ContractModel):
     replacement_day: ProposalDay
 
 
+_MAX_FORMAT_DIAGNOSTICS = 8
+_SAFE_PATH_FIELDS = {
+    "initial": {"days", "missing_notes"},
+    "revision": {"replacement_day"},
+    "day": {"day_id", "day_date", "theme", "activities", "unfilled_slot_ids", "lodging", "weather_advice"},
+    "activity": {
+        "proposal_ref", "existing_activity_id", "candidate_ref", "slot_id", "kind",
+        "duration_s", "requirement_ids", "recommendation_reason",
+    },
+    "lodging": {"candidate_ref", "area_hint_id", "recommendation_reason"},
+}
+_SAFE_PATH_CHILD = {
+    ("initial", "days"): "day",
+    ("revision", "replacement_day"): "day",
+    ("day", "activities"): "activity",
+    ("day", "lodging"): "lodging",
+}
+_SAFE_VALIDATION_TYPES = frozenset({
+    "missing", "extra_forbidden", "literal_error", "enum", "value_error",
+    "json_invalid", "model_type", "model_attributes_type", "list_type",
+    "tuple_type", "dict_type", "string_type", "int_type", "float_type",
+    "bool_type", "int_from_float", "greater_than_equal", "less_than_equal",
+    "greater_than", "less_than", "finite_number", "date_parsing",
+    "date_from_datetime_parsing", "string_too_short", "string_too_long",
+    "too_short", "too_long",
+})
+_VALIDATION_TYPE_GROUPS = {
+    "missing": "missing_required_field",
+    "extra_forbidden": "unexpected_field",
+    "literal_error": "invalid_choice",
+    "enum": "invalid_choice",
+    "value_error": "invalid_combination",
+    "json_invalid": "invalid_json",
+    "model_type": "invalid_shape",
+    "model_attributes_type": "invalid_shape",
+    "list_type": "invalid_shape",
+    "tuple_type": "invalid_shape",
+    "dict_type": "invalid_shape",
+    "string_type": "invalid_type",
+    "int_type": "invalid_type",
+    "float_type": "invalid_type",
+    "bool_type": "invalid_type",
+    "int_from_float": "invalid_number",
+    "greater_than_equal": "invalid_number",
+    "less_than_equal": "invalid_number",
+    "greater_than": "invalid_number",
+    "less_than": "invalid_number",
+    "finite_number": "invalid_number",
+    "date_parsing": "invalid_date",
+    "date_from_datetime_parsing": "invalid_date",
+    "string_too_short": "invalid_value",
+    "string_too_long": "invalid_value",
+    "too_short": "invalid_size",
+    "too_long": "invalid_size",
+}
+_SAFE_FORMAT_INSTRUCTIONS = {
+    "invalid_json": "输出合法JSON对象；不要添加Markdown围栏或说明文字。",
+    "invalid_shape": "按目标输出结构提供对象、数组和字段类型；只使用输入中的事实与ID。",
+    "invalid_structure": "修复未分类的结构错误；只使用Schema字段，不改变行程语义或增加事实。",
+    "missing_required_field": "补齐该必需字段；只使用输入中已有的日期、时段和候选ID。",
+    "unexpected_field": "删除未定义字段；不要增加Schema以外的信息。",
+    "invalid_choice": "使用Schema为该字段定义的枚举值。",
+    "invalid_combination": "检查活动字段组合：sightseeing/meal必须引用候选；free_time不得引用POI候选。",
+    "invalid_type": "使用Schema要求的数据类型；不要改动活动语义或增加事实。",
+    "invalid_number": "使用非负整数秒数；只修改结构，不调整行程语义。",
+    "invalid_date": "使用输入中对应日期的YYYY-MM-DD值。",
+    "invalid_size": "检查该列表满足Schema规定的项目数量；保留所有请求日期。",
+    "invalid_value": "按该字段的固定Schema约束修复；不要改动行程语义或增加事实。",
+    "additional_issues": "继续检查其他字段的固定Schema约束；不要改动行程语义或增加事实。",
+}
+
+
 @dataclass(frozen=True)
 class DailyPlanExecution:
     proposal: PlanProposal
@@ -324,23 +396,39 @@ class DailyPlanGenerator:
                     {"role": "user", "content": "上次输出因长度限制被截断。只补全目标日期的完整 replacement_day JSON，不新增事实或日期。"},
                 ]
                 continue
-            try:
-                output = DailyDayRevisionModelOutput.model_validate(_parse_json(response))
+            with span(
+                "validation.daily_plan_revision_output",
+                "validation",
+                {"attempt": attempt + 1, "day_id": day_id},
+            ) as validation_record:
+                output, diagnostics, issue_count, truncated = self._validate_model_output(
+                    response, DailyDayRevisionModelOutput,
+                )
+                validation_record.output = {
+                    "valid": output is not None,
+                    "issue_count": issue_count,
+                    "diagnostics_truncated": truncated,
+                    "diagnostics": diagnostics,
+                }
+            if output is not None:
                 break
-            except (ValueError, TypeError, ValidationError, json.JSONDecodeError):
-                if format_repairs >= MAX_FORMAT_REPAIRS:
-                    raise PlanningError(
-                        "PLAN_REVISION_OUTPUT_INVALID",
-                        "日期修订模型输出的 JSON 格式或字段结构无效",
-                        step="daily_plan_revision_output",
-                    ) from None
-                format_repairs += 1
-                _stats.sync(model_calls, format_repairs, usage_totals.value())
-                messages = [
-                    *messages,
-                    {"role": "assistant", "content": response if isinstance(response, str) else ""},
-                    {"role": "user", "content": "上次回答不符合 replacement_day JSON 结构。只修复格式和结构，不改动行程语义，不增加事实或日期。"},
-                ]
+            if format_repairs >= MAX_FORMAT_REPAIRS:
+                raise PlanningError(
+                    "PLAN_REVISION_OUTPUT_INVALID",
+                    "日期修订模型输出的 JSON 格式或字段结构无效",
+                    step="daily_plan_revision_output",
+                ) from None
+            format_repairs += 1
+            _stats.sync(model_calls, format_repairs, usage_totals.value())
+            messages = [
+                *messages,
+                {"role": "assistant", "content": response if isinstance(response, str) else ""},
+                {
+                    "role": "user",
+                    "content": "上次回答不符合 replacement_day JSON 结构。只修复结构诊断中的问题，不改动行程语义，不增加事实。安全诊断如下："
+                    + json.dumps(diagnostics, ensure_ascii=False),
+                },
+            ]
         if output is None:
             raise PlanningError("PLAN_REVISION_OUTPUT_INVALID", "日期修订没有可用结构化输出", step="daily_plan_revision_output")
 
@@ -659,15 +747,18 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                         "validation",
                         {"attempt": attempt + 1, "request_id": planning_input.request.request_id},
                     ) as validation_record:
-                        try:
-                            output = DailyPlanModelOutput.model_validate(_parse_json(response))
+                        output, issues, issue_count, truncated = self._validate_model_output(
+                            response, DailyPlanModelOutput,
+                        )
+                        if output is not None:
                             validation_record.output = {"valid": True, "day_count": len(output.days)}
-                        except (ValueError, TypeError, ValidationError, json.JSONDecodeError):
-                            issues = self._validation_locations(response)
+                        else:
                             validation_record.output = {
                                 "valid": False,
-                                "issue_count": len(issues),
+                                "issue_count": issue_count,
+                                "diagnostics_truncated": truncated,
                                 "issue_types": sorted({issue["type"] for issue in issues}),
+                                "diagnostics": issues,
                             }
                             raise _InvalidModelOutput(issues) from None
                 except _InvalidModelOutput as invalid:
@@ -689,7 +780,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                         {"role": "assistant", "content": response if isinstance(response, str) else ""},
                         {
                             "role": "user",
-                            "content": "上次回答不符合 JSON 格式或字段结构。只修复格式和结构，不改动行程语义，不增加事实。错误位置和类型如下："
+                            "content": "上次回答不符合 JSON 格式或字段结构。只修复结构诊断中的问题，不改动行程语义，不增加事实。安全诊断如下："
                             + json.dumps(invalid.issues, ensure_ascii=False),
                         },
                     ]
@@ -1405,22 +1496,78 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
     def _activity_id(request_id, source_run_id, day_id, proposal_ref):
         return _stable_id("activity", request_id, source_run_id, day_id, proposal_ref)
 
-    @staticmethod
-    def _validation_locations(response):
+    @classmethod
+    def _validate_model_output(cls, response, output_model):
         try:
             payload = _parse_json(response)
-        except (ValueError, TypeError, json.JSONDecodeError):
-            return [{"loc": [], "type": "invalid_json"}]
-        try:
-            DailyPlanModelOutput.model_validate(payload)
-        except ValidationError as exc:
-            return [
-                {"loc": list(error["loc"]), "type": error["type"]}
-                for error in exc.errors(include_input=False)
-            ]
         except (ValueError, TypeError):
-            return [{"loc": [], "type": "invalid_structure"}]
-        return [{"loc": [], "type": "invalid_json"}]
+            return None, [cls._format_diagnostic("json_invalid", "output")], 1, False
+        try:
+            return output_model.model_validate(payload), [], 0, False
+        except ValidationError as exc:
+            raw_errors = exc.errors(
+                include_input=False,
+                include_context=False,
+                include_url=False,
+            )
+            diagnostics = []
+            for error in raw_errors[:_MAX_FORMAT_DIAGNOSTICS]:
+                raw_type = error.get("type")
+                safe_type = (
+                    raw_type
+                    if isinstance(raw_type, str) and raw_type in _SAFE_VALIDATION_TYPES
+                    else "invalid_structure"
+                )
+                path = cls._safe_validation_path(output_model, error.get("loc", ()))
+                diagnostics.append(cls._format_diagnostic(safe_type, path))
+            if not diagnostics:
+                diagnostics.append(cls._format_diagnostic("invalid_structure", "output"))
+            if len(raw_errors) > _MAX_FORMAT_DIAGNOSTICS:
+                diagnostics.append(cls._format_diagnostic("additional_issues", "output"))
+            return None, diagnostics, len(raw_errors), len(raw_errors) > _MAX_FORMAT_DIAGNOSTICS
+        except (ValueError, TypeError):
+            return None, [cls._format_diagnostic("invalid_structure", "output")], 1, False
+
+    @staticmethod
+    def _safe_validation_path(output_model, location):
+        context = "initial" if output_model is DailyPlanModelOutput else "revision"
+        path: list[str] = []
+        segments = location if isinstance(location, (tuple, list)) else ()
+        for segment in tuple(segments)[:12]:
+            if isinstance(segment, int) and not isinstance(segment, bool):
+                index = f"[{segment}]" if 0 <= segment < 10_000 else "[item]"
+                if path:
+                    path[-1] += index
+                else:
+                    path.append(f"output{index}")
+                continue
+            if not isinstance(segment, str) or segment not in _SAFE_PATH_FIELDS.get(context, set()):
+                path.append("unknown_field")
+                break
+            path.append(segment)
+            context = _SAFE_PATH_CHILD.get((context, segment), "")
+        return ".".join(path) or "output"
+
+    @staticmethod
+    def _format_diagnostic(issue_type, path):
+        issue_group = _VALIDATION_TYPE_GROUPS.get(issue_type, "invalid_structure")
+        field = path.rsplit(".", 1)[-1].split("[", 1)[0]
+        if issue_group == "invalid_combination" and ".activities[" in path:
+            guidance = _SAFE_FORMAT_INSTRUCTIONS["invalid_combination"]
+        elif issue_group == "missing_required_field" and field == "candidate_ref":
+            guidance = "为地点活动引用输入中有效候选；free_time不得引用POI候选。"
+        elif issue_group == "missing_required_field" and field == "slot_id":
+            guidance = "使用该日期输入中可用的slot_id。"
+        elif issue_group == "invalid_choice" and field == "kind":
+            guidance = "kind只能使用sightseeing、meal或free_time。"
+        elif issue_group == "invalid_date" and field == "day_date":
+            guidance = _SAFE_FORMAT_INSTRUCTIONS["invalid_date"]
+        else:
+            guidance = _SAFE_FORMAT_INSTRUCTIONS.get(
+                issue_group,
+                _SAFE_FORMAT_INSTRUCTIONS["invalid_structure"],
+            )
+        return {"path": path, "type": issue_type, "guidance": guidance}
 
     @staticmethod
     def _model_error(exc):
