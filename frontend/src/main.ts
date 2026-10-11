@@ -5,7 +5,6 @@ import 'ant-design-vue/dist/reset.css'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import App from './App.vue'
-import Home from './views/Home.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,13 +13,9 @@ const router = createRouter({
     { path: '/observability', name: 'Observability', component: () => import('./views/Observability.vue') },
     {
       path: '/',
-      name: 'Home',
-      component: Home
-    },
-    {
-      path: '/plan',
       name: 'TripPlan',
-      component: () => import('./views/TripPlan.vue')
+      component: () => import('./views/TripPlan.vue'),
+      alias: '/plan'
     },
     {
       path: '/preview',

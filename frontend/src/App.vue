@@ -2,7 +2,7 @@
   <a-config-provider :locale="zhCN">
     <div id="app">
       <header class="site-header">
-        <router-link class="brand" to="/" aria-label="漫游旅行规划首页">
+        <router-link class="brand" to="/#plan-form-title" aria-label="漫游旅行规划首页">
           <span class="brand-mark" aria-hidden="true">✳</span>
           <span>漫游<span class="brand-dot">.</span></span>
         </router-link>
@@ -20,16 +20,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 
-const route = useRoute()
-const headerLink = computed(() => {
-  if (route.path === '/preview') return { to: '/plan', label: '开始规划' }
-  if (route.path === '/plan') return { to: '/plan#plan-form-title', label: '开始规划' }
-  return { to: '/#plan', label: '开始规划' }
-})
+const headerLink = { to: '/#plan-form-title', label: '开始规划' }
 </script>
 
 <style>
