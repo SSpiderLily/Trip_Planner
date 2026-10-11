@@ -27,6 +27,14 @@ from .cost import (
     ReferenceCostFactEvidence,
     ReferenceCostSummary,
 )
+from .destination_search import (
+    DestinationBlockReason,
+    DestinationCategory,
+    DestinationSearchCandidate,
+    DestinationSearchRequest,
+    DestinationSearchResponse,
+    DestinationSourceSummary,
+)
 from .decision import (
     AreaSpec,
     DelegatePayload,
@@ -88,7 +96,7 @@ from .plan import (
 from .tasks import CandidateRef, Subtask, TaskCoverage, TaskResult
 
 __all__ = [
-    "AddActivity", "AreaHint", "AreaSpec", "ArrivalBlockRule", "CandidateRef", "DayConstraint", "DayRevision", "DaySummary", "DayValidation", "DelegatePayload", "DeleteActivity", "DraftActivity", "DraftDay", "EditCommand",
+    "AddActivity", "AreaHint", "AreaSpec", "ArrivalBlockRule", "CandidateRef", "DayConstraint", "DayRevision", "DaySummary", "DayValidation", "DelegatePayload", "DeleteActivity", "DestinationBlockReason", "DestinationCategory", "DestinationSearchCandidate", "DestinationSearchRequest", "DestinationSearchResponse", "DestinationSourceSummary", "DraftActivity", "DraftDay", "EditCommand",
     "FactSource", "FactStore", "HardRequirement", "ItineraryPreview", "MapCoordinate", "MasterDecisionOutcome", "MealAreaSpec",
     "LegEndpoint", "LodgingProposal", "LodgingRef", "MissingField", "PlaceFact", "PlaceSearchData", "PlanDraft", "PlanProposal", "ProposalActivity", "ProposalDay",
     "CostEntryKind", "CostEntryStatus", "CostSummaryStatus", "DayReferenceCostSummary", "ReferenceCostEntry", "ReferenceCostFactEvidence", "ReferenceCostSummary",

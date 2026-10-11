@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request, Query, Header
 from ...services.task_service import TaskError
 from ...models.planning_v4 import TripRequest as PlanningV4TripRequest
 from ...models.planning_v4_preview import (
+    DestinationSelectionRequest,
     PreviewEditJobResponse,
     PreviewEditRequest,
     PreviewEditResponse,
@@ -17,6 +18,7 @@ from ...models.planning_v4_preview import (
     PreviewTaskAccepted,
     PreviewTaskStatus,
 )
+from ...models.planning_v4.destination_search import DestinationSearchRequest, DestinationSearchResponse
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest, RecalculateDayRequest
@@ -97,6 +99,71 @@ async def v4_preview(task_id: str, request: Request, authorization: str | None =
     if payload is None:
         raise HTTPException(status_code=503, detail={"code": "PREVIEW_UNAVAILABLE", "message": "预览暂不可用"})
     return payload
+
+
+@router.post(
+    "/v4/tasks/{task_id}/destinations/search",
+    response_model=DestinationSearchResponse,
+)
+async def v4_destination_search(
+    task_id: str,
+    body: DestinationSearchRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    searcher = getattr(request.app.state, "destination_search_service", None)
+    if searcher is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "DESTINATION_SEARCH_UNAVAILABLE", "message": "目的地搜索暂不可用"},
+        )
+    try:
+        envelope = await request.app.state.preview_task_service.preview(task_id, token)
+    except TaskError as exc:
+        raise task_http(exc)
+    if envelope is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "PREVIEW_NOT_READY", "message": "预览尚未就绪"},
+        )
+    try:
+        return await searcher.search_async(
+            task_id=task_id,
+            plan_id=envelope.plan_id,
+            access_token=token,
+            city=envelope.preview.planning_input.request.city,
+            request=body,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DESTINATION_SEARCH_INVALID", "message": str(exc)},
+        ) from exc
+
+
+@router.post(
+    "/v4/tasks/{task_id}/destinations/select",
+    status_code=202,
+    response_model=PreviewEditResponse,
+)
+async def v4_destination_select(
+    task_id: str,
+    body: DestinationSelectionRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    editor = getattr(request.app.state, "preview_edit_service", None)
+    if editor is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "DESTINATION_SELECT_UNAVAILABLE", "message": "目的地选择暂不可用"},
+        )
+    try:
+        return await editor.add_destination_candidate(task_id, token, body)
+    except TaskError as exc:
+        raise task_http(exc)
 
 
 @router.post(

@@ -11,6 +11,8 @@ from ..services.day_edit_service import DayEditService
 from ..services.preview_repository import PreviewRepository
 from ..services.preview_task_service import PreviewTaskService
 from ..services.planning_v4_pipeline import PlanningV4Pipeline
+from ..services.destination_candidate_repository import DestinationCandidateRepository
+from ..services.destination_search_service import DestinationSearchService
 
 from ..services.planning_v4_preview_edit_service import PlanningV4PreviewEditService
 from ..services.current_route_service import CurrentRouteService
@@ -78,13 +80,31 @@ async def startup_event(application: FastAPI):
     
     if settings.observation_retention_days < 1 or settings.observation_content_limit < 256 or settings.observation_max_bytes < 4096:
         raise ValueError("观测存储配置必须为有效正数（内容上限至少256字节）")
-    if Path(settings.task_db_path).expanduser().resolve() == Path(settings.preview_db_path).expanduser().resolve():
+    task_db = Path(settings.task_db_path).expanduser().resolve()
+    preview_db = Path(settings.preview_db_path).expanduser().resolve()
+    destination_db = Path(settings.destination_candidate_db_path).expanduser().resolve()
+    if task_db == preview_db:
         raise ValueError("preview_db_path 必须与 task_db_path 分开，以隔离预览体积与观测清理")
+    if destination_db in {task_db, preview_db}:
+        raise ValueError("destination_candidate_db_path 必须与任务观测和预览数据库分开")
     repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
     await asyncio.to_thread(repository.initialize)
     observation = ObservationService(repository, settings.observation_content_limit)
     application.state.task_service = TaskService(repository, observation, get_trip_planner_agent)
     application.state.day_edit_service = DayEditService(repository)
+    destination_repository = DestinationCandidateRepository(
+        settings.destination_candidate_db_path,
+        ttl_seconds=settings.destination_candidate_ttl_seconds,
+    )
+    await asyncio.to_thread(destination_repository.initialize)
+    await asyncio.to_thread(destination_repository.cleanup_expired)
+    application.state.destination_candidate_repository = destination_repository
+    destination_search_service = DestinationSearchService(
+        destination_repository,
+        observation_service=observation,
+        tool_timeout_seconds=settings.planner_tool_timeout_seconds,
+    )
+    application.state.destination_search_service = destination_search_service
     preview_repository = PreviewRepository(settings.preview_db_path)
     await asyncio.to_thread(preview_repository.initialize)
     await asyncio.to_thread(preview_repository.recover_jobs)
@@ -109,6 +129,7 @@ async def startup_event(application: FastAPI):
         preview_repository,
         route_service=CurrentRouteService(),
         route_deadline_seconds=settings.planner_edit_route_deadline_seconds,
+        destination_search_service=destination_search_service,
     )
     application.state.preview_task_service.edit_coordinator = application.state.preview_edit_service
     await application.state.preview_edit_service.recover_pending_jobs()
