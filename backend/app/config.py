@@ -46,6 +46,8 @@ class Settings(BaseSettings):
 
     # 本地任务与观测存储
     task_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "tasks.sqlite3")
+    # 预览快照可能很大，必须与受200MiB限制的任务观测库分开。
+    preview_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "previews.sqlite3")
     observation_retention_days: int = 7
     observation_max_bytes: int = 200 * 1024 * 1024
     observation_content_limit: int = 64 * 1024

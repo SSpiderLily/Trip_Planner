@@ -2,11 +2,14 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from ..services.task_repository import TaskRepository
 from ..services.task_service import TaskService
 from ..services.observation_service import ObservationService
 from ..services.day_edit_service import DayEditService
+from ..services.preview_repository import PreviewRepository
+from ..services.preview_task_service import PreviewTaskService
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
@@ -71,10 +74,24 @@ async def startup_event(application: FastAPI):
     
     if settings.observation_retention_days < 1 or settings.observation_content_limit < 256 or settings.observation_max_bytes < 4096:
         raise ValueError("观测存储配置必须为有效正数（内容上限至少256字节）")
+    if Path(settings.task_db_path).expanduser().resolve() == Path(settings.preview_db_path).expanduser().resolve():
+        raise ValueError("preview_db_path 必须与 task_db_path 分开，以隔离预览体积与观测清理")
     repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
     await asyncio.to_thread(repository.initialize)
-    application.state.task_service = TaskService(repository, ObservationService(repository, settings.observation_content_limit), get_trip_planner_agent)
+    observation = ObservationService(repository, settings.observation_content_limit)
+    application.state.task_service = TaskService(repository, observation, get_trip_planner_agent)
     application.state.day_edit_service = DayEditService(repository)
+    preview_repository = PreviewRepository(settings.preview_db_path)
+    await asyncio.to_thread(preview_repository.initialize)
+    await asyncio.to_thread(preview_repository.recover_jobs)
+    application.state.task_service.preview_completion_resolver = preview_repository.ready_task_completion
+    application.state.task_service.preview_completion_batch_resolver = preview_repository.ready_task_completions
+    application.state.preview_repository = preview_repository
+    application.state.preview_task_service = PreviewTaskService(
+        application.state.task_service,
+        preview_repository,
+        getattr(application.state, "planning_v4_pipeline", None),
+    )
 
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")
@@ -86,6 +103,8 @@ async def shutdown_event(application: FastAPI):
     """应用关闭事件"""
     print("\n" + "="*60)
     print("👋 应用正在关闭...")
+    if hasattr(application.state, "preview_task_service"):
+        await application.state.preview_task_service.close()
     if hasattr(application.state, "task_service"):
         await application.state.task_service.close()
     print("="*60 + "\n")

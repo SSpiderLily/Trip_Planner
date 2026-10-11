@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .planning_v4.plan import ItineraryPreview
+from .planning_v4.cost import ReferenceCostSummary
+from .planning_v4_preview import PreviewSnapshot
+from ..services.planning_v4_timing import PlanTimingResult
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,14 @@ class StoredPreview:
     store_version: int
     plan_revision: int
     updated_at: str
+    timing: PlanTimingResult | None = None
+    cost: ReferenceCostSummary | None = None
+
+    @property
+    def snapshot(self) -> PreviewSnapshot | None:
+        if self.timing is None or self.cost is None:
+            return None
+        return PreviewSnapshot(preview=self.preview, timing=self.timing, cost=self.cost)
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,14 @@ class SavedPreview:
     source_store_version: int
     save_id: str
     saved_at: str
+    timing: PlanTimingResult | None = None
+    cost: ReferenceCostSummary | None = None
+
+    @property
+    def snapshot(self) -> PreviewSnapshot | None:
+        if self.timing is None or self.cost is None:
+            return None
+        return PreviewSnapshot(preview=self.preview, timing=self.timing, cost=self.cost)
 
 
 @dataclass(frozen=True)

@@ -13,8 +13,12 @@ from pathlib import Path
 import secrets
 import sqlite3
 from typing import Iterator
+import hmac
 
 from app.models.planning_v4.plan import ItineraryPreview
+from app.models.planning_v4.cost import ReferenceCostSummary
+from app.models.planning_v4_preview import PreviewSnapshot
+from app.services.planning_v4_timing import PlanTimingResult
 from app.models.preview_storage import (
     CreatedPreview,
     DraftWriteResult,
@@ -33,6 +37,8 @@ CREATE TABLE IF NOT EXISTS preview_drafts (
     plan_id TEXT PRIMARY KEY NOT NULL,
     access_token_hash TEXT NOT NULL UNIQUE,
     preview_json TEXT NOT NULL,
+    timing_json TEXT,
+    cost_json TEXT,
     plan_revision INTEGER NOT NULL CHECK (plan_revision > 0),
     store_version INTEGER NOT NULL CHECK (store_version > 0),
     updated_at TEXT NOT NULL
@@ -40,6 +46,8 @@ CREATE TABLE IF NOT EXISTS preview_drafts (
 CREATE TABLE IF NOT EXISTS preview_finals (
     plan_id TEXT PRIMARY KEY NOT NULL,
     preview_json TEXT NOT NULL,
+    timing_json TEXT,
+    cost_json TEXT,
     plan_revision INTEGER NOT NULL CHECK (plan_revision > 0),
     source_store_version INTEGER NOT NULL CHECK (source_store_version > 0),
     save_id TEXT NOT NULL,
@@ -58,6 +66,24 @@ CREATE TABLE IF NOT EXISTS preview_mutations (
 );
 CREATE INDEX IF NOT EXISTS preview_mutations_by_plan
     ON preview_mutations(plan_id, mutation_seq DESC);
+CREATE TABLE IF NOT EXISTS preview_jobs (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    plan_id TEXT NOT NULL UNIQUE,
+    access_token_hash TEXT NOT NULL UNIQUE,
+    generation_state TEXT NOT NULL CHECK (generation_state IN ('accepted','running','ready','failed','interrupted')),
+    generation_finished_at TEXT,
+    generation_stage TEXT NOT NULL,
+    generation_completed INTEGER NOT NULL DEFAULT 0 CHECK (generation_completed >= 0),
+    generation_total INTEGER NOT NULL DEFAULT 0 CHECK (generation_total >= 0),
+    generation_message TEXT,
+    backfill_state TEXT NOT NULL CHECK (backfill_state IN ('not_started','running','completed','failed','interrupted')),
+    backfill_completed INTEGER NOT NULL DEFAULT 0 CHECK (backfill_completed >= 0),
+    backfill_total INTEGER NOT NULL DEFAULT 0 CHECK (backfill_total >= 0),
+    preview_plan_id TEXT,
+    error_code TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS preview_jobs_by_state ON preview_jobs(generation_state, updated_at);
 """
 
 
@@ -109,14 +135,31 @@ class PreviewRepository:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            for table in ("preview_drafts", "preview_finals"):
+                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for field in ("timing_json", "cost_json"):
+                    if field not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
+            job_fields = {row["name"] for row in conn.execute("PRAGMA table_info(preview_jobs)")}
+            if "generation_finished_at" not in job_fields:
+                # 老任务无法可靠还原首屏完成时间，保留 NULL；不使用会被补齐/重启更新的 updated_at 猜测。
+                conn.execute("ALTER TABLE preview_jobs ADD COLUMN generation_finished_at TEXT")
         finally:
             conn.close()
 
-    def create(self, preview: ItineraryPreview) -> CreatedPreview:
-        """保存首个预览，并返回只在本次结果中出现的随机访问标识。"""
-        validated = self._validated_preview(preview)
+    def create(
+        self,
+        preview: ItineraryPreview | PreviewSnapshot,
+        *,
+        access_token: str | None = None,
+    ) -> CreatedPreview:
+        """保存首个预览，并返回只在本次结果中出现的随机访问标识。
+
+        ``access_token`` 仅供受信任的异步任务服务传入预先签发的标识；旧调用仍由仓库生成。
+        """
+        validated, timing_json, cost_json = self._validated_snapshot(preview)
         preview_json = self._dump_preview(validated)
-        token = secrets.token_urlsafe(32)
+        token = self.issue_access_token() if access_token is None else access_token
         token_hash = self._token_hash(token)
         timestamp = self._now()
         with self._write_transaction() as conn:
@@ -124,12 +167,180 @@ class PreviewRepository:
                 raise PreviewIdentityConflict("plan_id 已存在")
             conn.execute(
                 """INSERT INTO preview_drafts
-                   (plan_id,access_token_hash,preview_json,plan_revision,store_version,updated_at)
-                   VALUES (?,?,?,?,1,?)""",
-                (validated.draft.plan_id, token_hash, preview_json, validated.draft.revision, timestamp),
+                   (plan_id,access_token_hash,preview_json,timing_json,cost_json,plan_revision,store_version,updated_at)
+                   VALUES (?,?,?,?,?,?,1,?)""",
+                (validated.draft.plan_id, token_hash, preview_json, timing_json, cost_json,
+                 validated.draft.revision, timestamp),
             )
-        record = StoredPreview(validated, store_version=1, plan_revision=validated.draft.revision, updated_at=timestamp)
+        record = StoredPreview(
+            validated, store_version=1, plan_revision=validated.draft.revision,
+            updated_at=timestamp,
+            timing=self._timing_from_json(timing_json), cost=self._cost_from_json(cost_json),
+        )
         return CreatedPreview(access_token=token, record=record)
+
+    @staticmethod
+    def issue_access_token() -> str:
+        """为异步任务响应预先签发高熵 bearer 标识。"""
+        return secrets.token_urlsafe(32)
+
+    def create_job(self, task_id: str, plan_id: str, access_token: str) -> None:
+        """先保存异步任务的 token hash；明文只由调用方保留并返回一次。"""
+        timestamp = self._now()
+        with self._write_transaction() as conn:
+            conn.execute(
+                """INSERT INTO preview_jobs
+                   (task_id,plan_id,access_token_hash,generation_state,generation_stage,
+                    backfill_state,updated_at) VALUES (?,?,?,'accepted','accepted','not_started',?)""",
+                (self._required_id(task_id, "task_id"), self._required_id(plan_id, "plan_id"),
+                 self._token_hash(access_token), timestamp),
+            )
+
+    def job_status(self, task_id: str, access_token: str) -> dict | None:
+        token_hash = self._token_hash(access_token)
+        with self._read_connection() as conn:
+            row = conn.execute(
+                """SELECT j.*,p.store_version AS actual_store_version
+                   FROM preview_jobs j LEFT JOIN preview_drafts p ON p.plan_id=j.preview_plan_id
+                   WHERE j.task_id=?""",
+                (task_id,),
+            ).fetchone()
+        if row is None or not hmac.compare_digest(row["access_token_hash"], token_hash):
+            return None
+        return self._job_from_row(row)
+
+    def ready_task_completion(self, task_id: str) -> dict | None:
+        """供任务状态恢复核实：仅返回持久化首屏已就绪的观测任务证据。"""
+        with self._read_connection() as conn:
+            row = conn.execute(
+                """SELECT task_id,preview_plan_id,generation_finished_at FROM preview_jobs
+                   WHERE task_id=? AND generation_state='ready' AND preview_plan_id IS NOT NULL""",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def ready_task_completions(self, task_ids: tuple[str, ...] | list[str]) -> dict[str, dict]:
+        """批量读取已就绪任务摘要，不读取预览正文，也不为每个任务单独打开连接。"""
+        ids = tuple(dict.fromkeys(task_id for task_id in task_ids if task_id))
+        if not ids:
+            return {}
+        result: dict[str, dict] = {}
+        # SQLite 的 bind 参数数目有限；用同一个连接分块查询，避免任务列表触发 N+1 连接。
+        with self._read_connection() as conn:
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"""SELECT task_id,preview_plan_id,generation_finished_at FROM preview_jobs
+                        WHERE generation_state='ready' AND preview_plan_id IS NOT NULL
+                          AND task_id IN ({placeholders})""",
+                    batch,
+                ).fetchall()
+                result.update((row["task_id"], dict(row)) for row in rows)
+        return result
+
+    def update_job(
+        self,
+        task_id: str,
+        *,
+        generation_state: str | None = None,
+        generation_stage: str | None = None,
+        generation_completed: int | None = None,
+        generation_total: int | None = None,
+        generation_message: str | None = None,
+        backfill_state: str | None = None,
+        backfill_completed: int | None = None,
+        backfill_total: int | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        allowed = {
+            "generation_state": ("accepted", "running", "ready", "failed", "interrupted"),
+            "backfill_state": ("not_started", "running", "completed", "failed", "interrupted"),
+        }
+        updates = {
+            "generation_state": generation_state,
+            "generation_stage": generation_stage,
+            "generation_completed": generation_completed,
+            "generation_total": generation_total,
+            "generation_message": generation_message,
+            "backfill_state": backfill_state,
+            "backfill_completed": backfill_completed,
+            "backfill_total": backfill_total,
+            "error_code": error_code,
+        }
+        fields = [(key, value) for key, value in updates.items() if value is not None]
+        for key, value in fields:
+            if key in allowed and value not in allowed[key]:
+                raise ValueError(f"{key} 状态无效")
+            if key.endswith("_completed") or key.endswith("_total"):
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"{key} 必须是非负整数")
+        if not fields:
+            return
+        assignments = ",".join(f"{key}=?" for key, _ in fields)
+        with self._write_transaction() as conn:
+            row = conn.execute("SELECT generation_state FROM preview_jobs WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError("预览任务不存在")
+            if row["generation_state"] == "ready" and any(
+                key in {"generation_state", "generation_stage", "generation_completed", "generation_total", "generation_message"}
+                for key, _ in fields
+            ):
+                raise ValueError("预览已就绪，不能覆盖生成状态")
+            conn.execute(
+                f"UPDATE preview_jobs SET {assignments},updated_at=? WHERE task_id=?",
+                (*[value for _, value in fields], self._now(), task_id),
+            )
+
+    def complete_job(self, task_id: str, snapshot: PreviewSnapshot) -> StoredPreview:
+        """在一个事务中写入草稿快照并把任务指针切到 ready。"""
+        validated, timing_json, cost_json = self._validated_snapshot(snapshot)
+        preview_json = self._dump_preview(validated)
+        timestamp = self._now()
+        with self._write_transaction() as conn:
+            job = conn.execute("SELECT * FROM preview_jobs WHERE task_id=?", (task_id,)).fetchone()
+            if job is None or job["generation_state"] not in ("accepted", "running"):
+                raise ValueError("任务状态不允许保存预览")
+            if job["plan_id"] != validated.draft.plan_id:
+                raise PreviewIdentityConflict("任务计划 ID 与预览不一致")
+            conn.execute(
+                """INSERT INTO preview_drafts
+                   (plan_id,access_token_hash,preview_json,timing_json,cost_json,plan_revision,store_version,updated_at)
+                   VALUES (?,?,?,?,?,?,1,?)""",
+                (validated.draft.plan_id, job["access_token_hash"], preview_json, timing_json, cost_json,
+                 validated.draft.revision, timestamp),
+            )
+            conn.execute(
+                """UPDATE preview_jobs SET generation_state='ready',generation_stage='ready',
+                   generation_finished_at=?,generation_completed=generation_total,generation_message=NULL,
+                   preview_plan_id=?,updated_at=?
+                   WHERE task_id=?""",
+                (timestamp, validated.draft.plan_id, timestamp, task_id),
+            )
+        return StoredPreview(
+            validated, store_version=1, plan_revision=validated.draft.revision,
+            updated_at=timestamp, timing=self._timing_from_json(timing_json),
+            cost=self._cost_from_json(cost_json),
+        )
+
+    def recover_jobs(self) -> None:
+        """进程重启后标记未就绪的生成与后台任务为中断；就绪预览保留。"""
+        with self._write_transaction() as conn:
+            conn.execute(
+                """UPDATE preview_jobs SET generation_state='interrupted',generation_stage='interrupted',
+                   error_code='PROCESS_INTERRUPTED',updated_at=?
+                   WHERE generation_state IN ('accepted','running')""",
+                (self._now(),),
+            )
+            conn.execute(
+                "UPDATE preview_jobs SET backfill_state='interrupted',updated_at=? WHERE backfill_state='running'",
+                (self._now(),),
+            )
+
+    def delete_job(self, task_id: str) -> None:
+        """回滚尚未接受成功的任务登记。"""
+        with self._write_transaction() as conn:
+            conn.execute("DELETE FROM preview_jobs WHERE task_id=?", (task_id,))
 
     def get_preview(self, access_token: str) -> StoredPreview | None:
         """按不透明访问标识读取草稿；无效标识与不存在记录均返回 None。"""
@@ -143,14 +354,14 @@ class PreviewRepository:
     def replace_preview(
         self,
         access_token: str,
-        preview: ItineraryPreview,
+        preview: ItineraryPreview | PreviewSnapshot,
         *,
         expected_store_version: int,
         expected_plan_revision: int,
         command_id: str,
     ) -> DraftWriteResult:
         """通过双版本 CAS 原子替换整份草稿，并按 command_id 幂等重放。"""
-        validated = self._validated_preview(preview)
+        validated, timing_json, cost_json = self._validated_snapshot(preview)
         preview_json = self._dump_preview(validated)
         command_id = self._required_id(command_id, "command_id")
         expected_store_version = self._positive_version(expected_store_version, "expected_store_version")
@@ -159,6 +370,8 @@ class PreviewRepository:
             "expected_store_version": expected_store_version,
             "expected_plan_revision": expected_plan_revision,
             "preview_json": preview_json,
+            "timing_json": timing_json,
+            "cost_json": cost_json,
         })
         token_hash = self._token_hash(access_token)
 
@@ -204,10 +417,12 @@ class PreviewRepository:
             timestamp = self._now()
             changed = conn.execute(
                 """UPDATE preview_drafts
-                   SET preview_json=?,plan_revision=?,store_version=?,updated_at=?
+                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
                    WHERE plan_id=? AND store_version=? AND plan_revision=?""",
                 (
                     preview_json,
+                    timing_json,
+                    cost_json,
                     validated.draft.revision,
                     new_store_version,
                     timestamp,
@@ -297,10 +512,12 @@ class PreviewRepository:
                 receipt_version = source_store_version
                 conn.execute(
                     """INSERT INTO preview_finals
-                       (plan_id,preview_json,plan_revision,source_store_version,save_id,saved_at)
-                       VALUES (?,?,?,?,?,?)
+                       (plan_id,preview_json,timing_json,cost_json,plan_revision,source_store_version,save_id,saved_at)
+                       VALUES (?,?,?,?,?,?,?,?)
                        ON CONFLICT(plan_id) DO UPDATE SET
                          preview_json=excluded.preview_json,
+                         timing_json=excluded.timing_json,
+                         cost_json=excluded.cost_json,
                          plan_revision=excluded.plan_revision,
                          source_store_version=excluded.source_store_version,
                          save_id=excluded.save_id,
@@ -308,6 +525,8 @@ class PreviewRepository:
                     (
                         plan_id,
                         row["preview_json"],
+                        row["timing_json"],
+                        row["cost_json"],
                         current_preview.draft.revision,
                         source_store_version,
                         save_id,
@@ -408,6 +627,37 @@ class PreviewRepository:
         value = preview.model_dump(mode="json") if isinstance(preview, ItineraryPreview) else preview
         return ItineraryPreview.model_validate(value)
 
+    @classmethod
+    def _validated_snapshot(
+        cls, value: ItineraryPreview | PreviewSnapshot
+    ) -> tuple[ItineraryPreview, str | None, str | None]:
+        if isinstance(value, PreviewSnapshot):
+            snapshot = value
+        else:
+            snapshot = None
+        preview = cls._validated_preview(snapshot.preview if snapshot else value)
+        if snapshot is None:
+            return preview, None, None
+        validated = PreviewSnapshot.model_validate(snapshot.model_dump(mode="json"))
+        return (
+            preview,
+            cls._dump_model(validated.timing),
+            cls._dump_model(validated.cost),
+        )
+
+    @staticmethod
+    def _dump_model(value) -> str:
+        return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
+
+    @staticmethod
+    def _timing_from_json(value: str | None) -> PlanTimingResult | None:
+        return PlanTimingResult.model_validate_json(value) if value else None
+
+    @staticmethod
+    def _cost_from_json(value: str | None) -> ReferenceCostSummary | None:
+        return ReferenceCostSummary.model_validate_json(value) if value else None
+
     @staticmethod
     def _dump_preview(preview: ItineraryPreview) -> str:
         return json.dumps(
@@ -429,6 +679,8 @@ class PreviewRepository:
             store_version=row["store_version"],
             plan_revision=row["plan_revision"],
             updated_at=row["updated_at"],
+            timing=self._timing_from_json(row["timing_json"]),
+            cost=self._cost_from_json(row["cost_json"]),
         )
 
     def _final_from_row(self, row: sqlite3.Row) -> SavedPreview:
@@ -439,7 +691,30 @@ class PreviewRepository:
             source_store_version=row["source_store_version"],
             save_id=row["save_id"],
             saved_at=row["saved_at"],
+            timing=self._timing_from_json(row["timing_json"]),
+            cost=self._cost_from_json(row["cost_json"]),
         )
+
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> dict:
+        return {
+            "task_id": row["task_id"],
+            "plan_id": row["plan_id"],
+            "status": row["generation_state"],
+            "stage": row["generation_stage"],
+            "completed": row["generation_completed"],
+            "total": row["generation_total"],
+            "message": row["generation_message"],
+            "backfill": {
+                "status": row["backfill_state"],
+                "completed": row["backfill_completed"],
+                "total": row["backfill_total"],
+            },
+            "preview_ready": row["preview_plan_id"] is not None,
+            "store_version": row["actual_store_version"],
+            "error_code": row["error_code"],
+            "updated_at": row["updated_at"],
+        }
 
     @staticmethod
     def _token_hash(access_token: str) -> str:

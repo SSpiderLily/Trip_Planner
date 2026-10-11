@@ -1,8 +1,10 @@
 """旅行规划API路由"""
 
 import asyncio
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query, Header
 from ...services.task_service import TaskError
+from ...models.planning_v4 import TripRequest as PlanningV4TripRequest
+from ...models.planning_v4_preview import PreviewEnvelope, PreviewTaskAccepted, PreviewTaskStatus
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest, RecalculateDayRequest
@@ -30,6 +32,59 @@ async def create_task(body: TripRequest, request: Request):
         return await service(request).submit(body)
     except TaskError as exc:
         raise task_http(exc)
+
+
+def _v4_bearer(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "PREVIEW_ACCESS_REQUIRED", "message": "需要预览访问标识"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": "PREVIEW_ACCESS_REQUIRED", "message": "需要预览访问标识"})
+    return token
+
+
+@router.post("/v4/tasks", status_code=202, response_model=PreviewTaskAccepted)
+async def create_v4_preview(body: PlanningV4TripRequest, request: Request):
+    try:
+        return await request.app.state.preview_task_service.submit(body)
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.get("/v4/tasks/{task_id}", response_model=PreviewTaskStatus)
+async def v4_preview_status(task_id: str, request: Request, authorization: str | None = Header(default=None)):
+    token = _v4_bearer(authorization)
+    try:
+        record = await request.app.state.preview_task_service.status(task_id, token)
+    except TaskError as exc:
+        raise task_http(exc)
+    if record is None:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "message": "任务不存在"})
+    return record
+
+
+@router.get("/v4/tasks/{task_id}/preview", response_model=PreviewEnvelope)
+async def v4_preview(task_id: str, request: Request, authorization: str | None = Header(default=None)):
+    token = _v4_bearer(authorization)
+    try:
+        record = await request.app.state.preview_task_service.status(task_id, token)
+    except TaskError as exc:
+        raise task_http(exc)
+    if record is None:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "message": "任务不存在"})
+    if not record["preview_ready"]:
+        raise HTTPException(status_code=409, detail={"code": "PREVIEW_NOT_READY", "message": "预览尚未就绪"})
+    try:
+        payload = await request.app.state.preview_task_service.preview(task_id, token)
+    except TaskError as exc:
+        raise task_http(exc)
+    if payload is None:
+        raise HTTPException(status_code=503, detail={"code": "PREVIEW_UNAVAILABLE", "message": "预览暂不可用"})
+    return payload
 
 
 @router.get("/tasks")

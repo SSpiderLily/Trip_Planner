@@ -356,3 +356,11 @@ CC BY-NC-SA 4.0
 Production deployment test.
 
 按日期修正可用独立的 `DayRepairService(collect=..., revise=..., recalculate=...).run_async(...)` 组合已核实事实、当前草稿和F09报告。`DailyPlanGenerator.revise_day(...)` 只输出一个日期的修订；重算回调可使用F08的 `only_day_id` 和同一 `route_context`。每日期业务修正合计最多3轮，单次格式修复不另计轮；错误输出保留旧草稿，未知价格/天气/路线不单独触发修正。此模块尚未接入F05定向搜集适配器及正式API，边界见[CHG-003 F09b](docs/changes/CHG-003-planning-performance-observability.md#f09b-day-repair)。
+
+### v4预览任务接口基础
+
+`POST /api/trip/v4/tasks`接收`planning_v4.TripRequest`，立即返回task_id、plan_id和一次性返回的access_token；后端负责需求解释和规则，不接受客户端提供模型整理结果。`GET /api/trip/v4/tasks/{task_id}`及其`/preview`使用`Authorization: Bearer <access_token>`；访问标识不放URL。状态、草稿、活动时间与消费摘要使用同一预览版本。
+
+预览库通过`PREVIEW_DB_PATH`配置，默认`backend/data/previews.sqlite3`，必须与`TASK_DB_PATH`分开。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
+
+目前这是可注入`PlanningV4Pipeline`的基础接口，完整规划链尚未接入默认应用，未配置pipeline时提交返回503；首页仍使用既有入口。实施、故障验收与后续接线见[CHG-003 F10a](docs/changes/CHG-003-planning-performance-observability.md#f10a-preview-task)。
