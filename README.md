@@ -376,3 +376,10 @@ Production deployment test.
 ### v4按日编辑核心
 
 `PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。后续API负责原子存储和路线重算，当前页面尚未开放编辑，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
+
+
+### v4最终结果保存与还原
+
+`GET /api/trip/v4/tasks/{task_id}/final`返回上次成功保存的元数据；`POST .../final/save`携带`save_id`与`source_store_version`，只复制同版本服务端草稿。`POST .../final/restore`携带`restore_id`、`expected_store_version`、`expected_plan_revision`及`expected_save_id`，原子还原成新草稿版本。均使用该任务Bearer标识，不接受客户端快照，不提供历史列表。
+
+保存过期返回`stale`；还原版本冲突或最后保存变化返回409，存储不可用返回503。完整旧快照可还原，缺少时间/消费的旧记录返回明确不可还原状态。图片下载与保存结果分开处理的前端接线见[当前进度](docs/changes/CHG-003-planning-performance-observability.md#v4-final-save)。

@@ -118,6 +118,173 @@ class PreviewTaskApiTest(unittest.TestCase):
         app.state.preview_task_service = PreviewTaskService(self.task_service, self.previews, pipeline)
         return app, TestClient(app)
 
+    def submit_ready_preview(self, client):
+        response = client.post("/api/trip/v4/tasks", json=request_body().model_dump(mode="json"))
+        self.assertEqual(response.status_code, 202)
+        accepted = response.json()
+        token, task_id = accepted["access_token"], accepted["task_id"]
+        status = None
+        for _ in range(100):
+            response = client.get(
+                f"/api/trip/v4/tasks/{task_id}", headers={"Authorization": f"Bearer {token}"}
+            )
+            status = response.json()
+            if status["status"] in ("ready", "failed"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["status"], "ready")
+        self.assertTrue(status["preview_ready"])
+        return accepted
+
+    def test_final_save_read_and_restore_api_are_bearer_bound_and_idempotent(self):
+        _, client = self.make_client(FakePipeline())
+        with client:
+            accepted = self.submit_ready_preview(client)
+            token, task_id, plan_id = accepted["access_token"], accepted["task_id"], accepted["plan_id"]
+            headers = {"Authorization": f"Bearer {token}"}
+            final_url = f"/api/trip/v4/tasks/{task_id}/final"
+            save_url = f"{final_url}/save"
+            restore_url = f"{final_url}/restore"
+
+            self.assertEqual(client.get(final_url).status_code, 401)
+            self.assertEqual(client.get(final_url, headers={"Authorization": "Bearer wrong"}).status_code, 404)
+            empty = client.get(final_url, headers=headers)
+            self.assertEqual(empty.status_code, 200)
+            self.assertEqual(empty.json(), {
+                "task_id": task_id,
+                "plan_id": plan_id,
+                "restorable": False,
+                "final": None,
+                "unavailable_reason": None,
+            })
+
+            saved = client.post(save_url, headers=headers, json={
+                "save_id": "api-save-original", "source_store_version": 1,
+            })
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.json()["status"], "saved")
+            self.assertTrue(saved.json()["restorable"])
+            original_final = self.previews.read_final(token)
+            self.assertEqual(original_final.save_id, "api-save-original")
+            self.assertTrue(client.get(final_url, headers=headers).json()["restorable"])
+
+            forged = client.post(save_url, headers=headers, json={
+                "save_id": "api-save-forged", "source_store_version": 1,
+                "preview": self.previews.get_preview(token).preview.model_dump(mode="json"),
+            })
+            self.assertEqual(forged.status_code, 422)
+
+            restore_body = {
+                "restore_id": "api-restore-once",
+                "expected_store_version": 1,
+                "expected_plan_revision": 1,
+                "expected_save_id": "api-save-original",
+            }
+            restored = client.post(restore_url, headers=headers, json=restore_body)
+            self.assertEqual(restored.status_code, 200)
+            restored_body = restored.json()
+            self.assertEqual(set(restored_body), {
+                "envelope", "restored_from", "replayed", "receipt_store_version",
+            })
+            self.assertEqual(restored_body["envelope"]["store_version"], 2)
+            self.assertEqual(restored_body["envelope"]["plan_revision"], 2)
+            self.assertEqual(restored_body["restored_from"]["save_id"], "api-save-original")
+            self.assertFalse(restored_body["replayed"])
+            self.assertEqual(self.previews.read_final(token), original_final)
+
+            saved_again = client.post(save_url, headers=headers, json={
+                "save_id": "api-save-after-restore", "source_store_version": 2,
+            })
+            self.assertEqual(saved_again.status_code, 200)
+            self.assertEqual(saved_again.json()["status"], "saved")
+            replay = client.post(restore_url, headers=headers, json=restore_body)
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(replay.json()["receipt_store_version"], 2)
+            self.assertEqual(replay.json()["restored_from"]["save_id"], "api-save-original")
+            self.assertEqual(replay.json()["envelope"]["store_version"], 2)
+            self.assertEqual(self.previews.read_final(token).save_id, "api-save-after-restore")
+
+            changed_final = client.post(restore_url, headers=headers, json={
+                "restore_id": "api-restore-changed-final",
+                "expected_store_version": 2,
+                "expected_plan_revision": 2,
+                "expected_save_id": "api-save-original",
+            })
+            self.assertEqual(changed_final.status_code, 409)
+            self.assertEqual(changed_final.json()["detail"]["code"], "FINAL_CHANGED")
+            self.assertEqual(changed_final.json()["detail"]["final"]["save_id"], "api-save-after-restore")
+
+            stale_restore = client.post(restore_url, headers=headers, json={
+                **restore_body,
+                "restore_id": "api-restore-stale",
+            })
+            self.assertEqual(stale_restore.status_code, 409)
+            self.assertEqual(stale_restore.json()["detail"]["code"], "PREVIEW_VERSION_CONFLICT")
+            stale_save = client.post(save_url, headers=headers, json={
+                "save_id": "api-save-stale", "source_store_version": 1,
+            })
+            self.assertEqual(stale_save.status_code, 200)
+            self.assertEqual(stale_save.json()["status"], "stale")
+            self.assertEqual(self.previews.read_final(token).save_id, "api-save-after-restore")
+
+    def test_final_storage_failures_return_retryable_api_error(self):
+        _, client = self.make_client(FakePipeline())
+        with client:
+            accepted = self.submit_ready_preview(client)
+            token, task_id = accepted["access_token"], accepted["task_id"]
+            headers = {"Authorization": f"Bearer {token}"}
+            final_url = f"/api/trip/v4/tasks/{task_id}/final"
+
+            with patch.object(self.previews, "read_final", side_effect=sqlite3.OperationalError("injected read failure")):
+                response = client.get(final_url, headers=headers)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["detail"]["code"], "PREVIEW_STORAGE_UNAVAILABLE")
+
+            with patch.object(self.previews, "restore_final", side_effect=sqlite3.OperationalError("injected restore failure")):
+                response = client.post(f"{final_url}/restore", headers=headers, json={
+                    "restore_id": "api-restore-failure",
+                    "expected_store_version": 1,
+                    "expected_plan_revision": 1,
+                    "expected_save_id": "saved-before-failure",
+                })
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["detail"]["code"], "PREVIEW_STORAGE_UNAVAILABLE")
+
+            with patch.object(self.previews, "save_final", side_effect=sqlite3.OperationalError("injected save failure")):
+                response = client.post(f"{final_url}/save", headers=headers, json={
+                    "save_id": "api-save-failure", "source_store_version": 1,
+                })
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["detail"]["code"], "PREVIEW_STORAGE_UNAVAILABLE")
+
+    def test_legacy_final_without_calculations_is_reported_unavailable(self):
+        _, client = self.make_client(FakePipeline())
+        with client:
+            accepted = self.submit_ready_preview(client)
+            token, task_id = accepted["access_token"], accepted["task_id"]
+            headers = {"Authorization": f"Bearer {token}"}
+            self.previews.save_final(token, save_id="legacy-final", source_store_version=1)
+            with sqlite3.connect(self.preview_db) as conn:
+                conn.execute(
+                    "UPDATE preview_finals SET timing_json=NULL,cost_json=NULL WHERE save_id='legacy-final'"
+                )
+
+            state = client.get(f"/api/trip/v4/tasks/{task_id}/final", headers=headers)
+            self.assertEqual(state.status_code, 200)
+            self.assertFalse(state.json()["restorable"])
+            self.assertEqual(state.json()["final"]["save_id"], "legacy-final")
+            self.assertEqual(state.json()["unavailable_reason"], "snapshot_incomplete")
+
+            restored = client.post(f"/api/trip/v4/tasks/{task_id}/final/restore", headers=headers, json={
+                "restore_id": "restore-incomplete-legacy",
+                "expected_store_version": 1,
+                "expected_plan_revision": 1,
+                "expected_save_id": "legacy-final",
+            })
+            self.assertEqual(restored.status_code, 409)
+            self.assertEqual(restored.json()["detail"]["code"], "FINAL_SNAPSHOT_UNAVAILABLE")
+
     def test_post_returns_token_early_status_and_preview_survive_reopen_and_final_save(self):
         app, client = self.make_client(FakePipeline())
         with client:

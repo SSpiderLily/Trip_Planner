@@ -1150,3 +1150,11 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - 修改：`PlanningV4EditService`以活动ID编辑并原子返回新版本，新增`activity_source`区分可信用户编辑和模型提案，`preferred_mode`保存用户意图。模型修订仅能原样保留指定的已有用户活动，不能伪造用户来源或任意跨搜索时段。目标日路线先失效，时间与缺项按新顺序计算，其他日保留。
 - 验收：根独立491项后端测试通过；上海既有地点回放新增/单项删除/清空首日，另两日保持不变，3个新版本均通过公开契约校验及JSON往返。未新增模型/MCP调用；此步不代表页面编辑已接线。实现与测试位于`planning_v4_edit_service.py`、`test_planning_v4_edit_service.py`及每日提案/修订校验测试。
 - 文档：README、CHG-003和设计页同步；工作区INDEX沿用现有入口。临时回放未提交。
+
+<a id="v4-final-save-2026-10-11"></a>
+## 最终保存、还原与迟到请求（2026-10-11）
+
+- 问题：导出时的旧版本可能在后台重算或用户继续编辑后才发起保存；还原若直接复用旧revision，会允许迟到路线覆盖新草稿。
+- 修改：保存只接受当前store version；还原复制完整已存快照并生成新的plan/store版本，最后保存保持不变。版本检查、草稿更新与有界幂等收据处于同一事务，重放保留原还原来源；不向客户端接受改写快照。
+- 验收：根独立503项后端测试通过，覆盖身份隔离、CAS、并发唯一胜者、回滚、最后保存变化、幂等与收据淘汰、旧不完整快照及pending/failed保留。上海真实地点的既有三日部分草稿在API替身流程中保存、编辑和还原，恢复内容完全匹配，重启后草稿/最终结果分别保持版本3/1。0新增外部调用，正式库未改。
+- 边界：浏览器文件下载与错误提示留后续前端验收。实现位于`preview_repository.py`、`preview_task_service.py`及相应测试；README、CHG-003、设计页同步，INDEX导航仍有效。

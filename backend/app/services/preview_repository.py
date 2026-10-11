@@ -26,8 +26,12 @@ from app.models.preview_storage import (
     IdempotencyConflict,
     PreviewAccessError,
     PreviewConflict,
+    PreviewFinalChanged,
+    PreviewFinalUnavailable,
     PreviewIdentityConflict,
+    PreviewRestoreResult,
     SavedPreview,
+    SavedPreviewMetadata,
     StoredPreview,
 )
 
@@ -66,6 +70,21 @@ CREATE TABLE IF NOT EXISTS preview_mutations (
 );
 CREATE INDEX IF NOT EXISTS preview_mutations_by_plan
     ON preview_mutations(plan_id, mutation_seq DESC);
+CREATE TABLE IF NOT EXISTS preview_restore_receipts (
+    restore_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL,
+    restore_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_store_version INTEGER NOT NULL CHECK (result_store_version > 0),
+    source_save_id TEXT NOT NULL,
+    source_saved_at TEXT NOT NULL,
+    source_store_version INTEGER NOT NULL CHECK (source_store_version > 0),
+    source_plan_revision INTEGER NOT NULL CHECK (source_plan_revision > 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (plan_id, restore_id)
+);
+CREATE INDEX IF NOT EXISTS preview_restore_receipts_by_plan
+    ON preview_restore_receipts(plan_id, restore_seq DESC);
 CREATE TABLE IF NOT EXISTS preview_jobs (
     task_id TEXT PRIMARY KEY NOT NULL,
     plan_id TEXT NOT NULL UNIQUE,
@@ -568,6 +587,172 @@ class PreviewRepository:
             ).fetchone()
         return self._final_from_row(row) if row else None
 
+    def restore_final(
+        self,
+        access_token: str,
+        *,
+        restore_id: str,
+        expected_store_version: int,
+        expected_plan_revision: int,
+        expected_save_id: str,
+    ) -> PreviewRestoreResult:
+        """原子地把最近一次完整成功保存复制为新的草稿版本。"""
+        restore_id = self._required_id(restore_id, "restore_id")
+        expected_store_version = self._positive_version(expected_store_version, "expected_store_version")
+        expected_plan_revision = self._positive_version(expected_plan_revision, "expected_plan_revision")
+        expected_save_id = self._required_id(expected_save_id, "expected_save_id")
+        request_hash = self._fingerprint({
+            "expected_store_version": expected_store_version,
+            "expected_plan_revision": expected_plan_revision,
+            "expected_save_id": expected_save_id,
+        })
+        token_hash = self._token_hash(access_token)
+
+        with self._write_transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE access_token_hash=?", (token_hash,)
+            ).fetchone()
+            if row is None:
+                raise PreviewAccessError("预览访问标识无效")
+            plan_id = row["plan_id"]
+            receipt = conn.execute(
+                """SELECT * FROM preview_restore_receipts WHERE plan_id=? AND restore_id=?""",
+                (plan_id, restore_id),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_hash"] != request_hash:
+                    raise IdempotencyConflict("restore_id 已用于不同请求")
+                return PreviewRestoreResult(
+                    record=self._stored_from_row(row),
+                    restored_from=SavedPreviewMetadata(
+                        plan_revision=receipt["source_plan_revision"],
+                        source_store_version=receipt["source_store_version"],
+                        save_id=receipt["source_save_id"],
+                        saved_at=receipt["source_saved_at"],
+                    ),
+                    receipt_store_version=receipt["result_store_version"],
+                    replayed=True,
+                )
+
+            current = self._stored_from_row(row)
+            if (
+                current.store_version != expected_store_version
+                or current.plan_revision != expected_plan_revision
+            ):
+                raise PreviewConflict(
+                    "草稿版本已变化",
+                    current_store_version=current.store_version,
+                    current_plan_revision=current.plan_revision,
+                )
+
+            final_row = conn.execute(
+                "SELECT * FROM preview_finals WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+            if final_row is None:
+                raise PreviewFinalUnavailable("not_saved")
+            final_metadata = self._final_metadata_from_row(final_row)
+            if final_metadata.save_id != expected_save_id:
+                raise PreviewFinalChanged(final_metadata)
+            final = self._final_from_row(final_row)
+            try:
+                source_snapshot = final.snapshot
+            except (TypeError, ValueError):
+                source_snapshot = None
+            if source_snapshot is None:
+                raise PreviewFinalUnavailable("snapshot_incomplete")
+
+            restored_snapshot = self._rebind_snapshot_for_restore(
+                source_snapshot, base_revision=current.plan_revision,
+            )
+            validated, timing_json, cost_json = self._validated_snapshot(restored_snapshot)
+            preview_json = self._dump_preview(validated)
+            new_store_version = current.store_version + 1
+            timestamp = self._now()
+            changed = conn.execute(
+                """UPDATE preview_drafts
+                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
+                   WHERE plan_id=? AND store_version=? AND plan_revision=?""",
+                (
+                    preview_json,
+                    timing_json,
+                    cost_json,
+                    validated.draft.revision,
+                    new_store_version,
+                    timestamp,
+                    plan_id,
+                    expected_store_version,
+                    expected_plan_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise PreviewConflict(
+                    "草稿版本已变化",
+                    current_store_version=current.store_version,
+                    current_plan_revision=current.plan_revision,
+                )
+            conn.execute(
+                """INSERT INTO preview_restore_receipts
+                   (plan_id,restore_id,request_hash,result_store_version,source_save_id,source_saved_at,
+                    source_store_version,source_plan_revision,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    plan_id,
+                    restore_id,
+                    request_hash,
+                    new_store_version,
+                    final_metadata.save_id,
+                    final_metadata.saved_at,
+                    final_metadata.source_store_version,
+                    final_metadata.plan_revision,
+                    timestamp,
+                ),
+            )
+            self._prune_restore_receipts(conn, plan_id)
+            updated_row = conn.execute(
+                "SELECT * FROM preview_drafts WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+            return PreviewRestoreResult(
+                record=self._stored_from_row(updated_row),
+                restored_from=final_metadata,
+                receipt_store_version=new_store_version,
+                replayed=False,
+            )
+
+    @staticmethod
+    def _rebind_snapshot_for_restore(snapshot: PreviewSnapshot, *, base_revision: int) -> PreviewSnapshot:
+        new_revision = base_revision + 1
+        draft = snapshot.preview.draft.model_copy(update={
+            "revision": new_revision,
+            "base_revision": base_revision,
+            "legs": tuple(leg.model_copy(update={"plan_revision": new_revision}) for leg in snapshot.preview.draft.legs),
+        })
+        validation = snapshot.preview.validation.model_copy(update={
+            "based_on_revision": new_revision,
+            "issues": tuple(
+                issue.model_copy(update={"based_on_revision": new_revision})
+                for issue in snapshot.preview.validation.issues
+            ),
+        })
+        preview = snapshot.preview.model_copy(update={
+            "draft": draft,
+            "validation": validation,
+            "calculation": snapshot.preview.calculation.model_copy(update={"based_on_revision": new_revision}),
+        })
+        return PreviewSnapshot.model_validate({
+            "preview": preview.model_dump(mode="json"),
+            "timing": snapshot.timing.model_copy(update={"based_on_revision": new_revision}).model_dump(mode="json"),
+            "cost": snapshot.cost.model_copy(update={"based_on_revision": new_revision}).model_dump(mode="json"),
+        })
+
+    @staticmethod
+    def _final_metadata_from_row(row: sqlite3.Row) -> SavedPreviewMetadata:
+        return SavedPreviewMetadata(
+            plan_revision=row["plan_revision"],
+            source_store_version=row["source_store_version"],
+            save_id=row["save_id"],
+            saved_at=row["saved_at"],
+        )
+
     def _insert_receipt(
         self,
         conn: sqlite3.Connection,
@@ -597,6 +782,18 @@ class PreviewRepository:
             conn.executemany(
                 "DELETE FROM preview_mutations WHERE mutation_seq=?",
                 ((row["mutation_seq"],) for row in expired),
+            )
+
+    def _prune_restore_receipts(self, conn: sqlite3.Connection, plan_id: str) -> None:
+        expired = conn.execute(
+            """SELECT restore_seq FROM preview_restore_receipts WHERE plan_id=?
+               ORDER BY restore_seq DESC LIMIT -1 OFFSET ?""",
+            (plan_id, self.receipt_limit),
+        ).fetchall()
+        if expired:
+            conn.executemany(
+                "DELETE FROM preview_restore_receipts WHERE restore_seq=?",
+                ((row["restore_seq"],) for row in expired),
             )
 
     @staticmethod
