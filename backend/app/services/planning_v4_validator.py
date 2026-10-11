@@ -105,6 +105,12 @@ def validate_plan_proposal(
     area_by_id = {area.area_hint_id: area for area in proposal.area_hints}
     if len(area_by_id) != len(proposal.area_hints):
         issues.append(ReferenceIssue("duplicate_area_hint", "proposal.area_hints", "area_hint_id 必须唯一"))
+    for candidate in candidates:
+        if candidate.area_hint_id and candidate.area_hint_id not in area_by_id:
+            issues.append(ReferenceIssue(
+                "dangling_candidate_area", f"candidate:{candidate.candidate_id}.area_hint_id",
+                "住宿候选引用的区域不存在",
+            ))
     fact_ids = set(place_by_id) | {item.fact_id for item in facts.weather} | {item.fact_id for item in facts.routes}
     poi_ids = {place.poi_id for place in facts.places}
     for area_index, area in enumerate(proposal.area_hints):
@@ -163,6 +169,8 @@ def validate_plan_proposal(
                     issues.append(ReferenceIssue("invalid_lodging_candidate", f"{path}.lodging.candidate_ref", "住宿必须引用已核实的酒店候选"))
                 elif candidate.place_fact_id not in place_by_id or candidate.poi_id != place_by_id[candidate.place_fact_id].poi_id:
                     issues.append(ReferenceIssue("lodging_candidate_mismatch", f"{path}.lodging.candidate_ref", "住宿候选必须关联对应地点事实"))
+                elif candidate.area_hint_id and lodging.area_hint_id != candidate.area_hint_id:
+                    issues.append(ReferenceIssue("lodging_area_mismatch", f"{path}.lodging.area_hint_id", "住宿区域必须与候选关联的来源区域一致"))
             if lodging.area_hint_id and lodging.area_hint_id not in area_by_id:
                 issues.append(ReferenceIssue("dangling_lodging_area", f"{path}.lodging.area_hint_id", "住宿区域引用不存在"))
     _raise_if_any(issues)
@@ -205,6 +213,12 @@ def validate_preview(
         issues.append(ReferenceIssue("day_date_set_mismatch", "draft.days", "草稿日期必须覆盖 PlanningInput 日期"))
 
     proposal_area_ids = {area.area_hint_id for area in draft.area_hints}
+    for candidate in preview.candidates:
+        if candidate.area_hint_id and candidate.area_hint_id not in proposal_area_ids:
+            issues.append(ReferenceIssue(
+                "dangling_candidate_area", f"candidate:{candidate.candidate_id}.area_hint_id",
+                "住宿候选引用的区域不存在",
+            ))
     known_requirement_ids = {requirement.requirement_id for requirement in planning_input.requirements.hard_requirements}
     activity_by_id: dict[str, tuple[str, object]] = {}
     slot_activity_ids: dict[str, set[str]] = {}
@@ -284,6 +298,8 @@ def validate_preview(
                     issues.append(ReferenceIssue("invalid_lodging_candidate", f"{day_path}.lodging.candidate_ref", "住宿候选不存在或类别不符"))
                 elif candidate.poi_id != lodging.poi_id or candidate.place_fact_id != lodging.place_fact_id:
                     issues.append(ReferenceIssue("lodging_candidate_mismatch", f"{day_path}.lodging", "住宿信息与候选不一致"))
+                elif candidate.area_hint_id and lodging.area_hint_id != candidate.area_hint_id:
+                    issues.append(ReferenceIssue("lodging_area_mismatch", f"{day_path}.lodging.area_hint_id", "住宿区域必须与候选关联的来源区域一致"))
             if lodging.area_hint_id and lodging.area_hint_id not in proposal_area_ids:
                 issues.append(ReferenceIssue("dangling_lodging_area", f"{day_path}.lodging.area_hint_id", "住宿区域不存在"))
 
@@ -575,6 +591,13 @@ def validate_day_revision(
     slots = {slot.slot_id: slot for slot in constraint.slots}
     candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
     place_by_id = {place.fact_id: place for place in facts.places}
+    draft_area_ids = {area.area_hint_id for area in draft.area_hints}
+    for candidate in candidates:
+        if candidate.area_hint_id and candidate.area_hint_id not in draft_area_ids:
+            issues.append(ReferenceIssue(
+                "dangling_candidate_area", f"candidate:{candidate.candidate_id}.area_hint_id",
+                "住宿候选引用的区域不存在",
+            ))
     requirement_ids = {item.requirement_id for item in planning_input.requirements.hard_requirements}
     activity_slots: set[str] = set()
     for index, activity in enumerate(revision.replacement_day.activities):
@@ -614,8 +637,18 @@ def validate_day_revision(
             issues.append(ReferenceIssue("revision_slot_unaccounted", f"revision.replacement_day.{slot.slot_id}", "修订必须安排活动或显式记录缺项"))
     if revision.replacement_day.lodging:
         lodging = revision.replacement_day.lodging
+        if lodging.area_hint_id and lodging.area_hint_id not in draft_area_ids:
+            issues.append(ReferenceIssue(
+                "dangling_lodging_area", "revision.replacement_day.lodging.area_hint_id",
+                "修订住宿区域不存在",
+            ))
         if lodging.candidate_ref:
             candidate = candidate_by_id.get(lodging.candidate_ref)
             if candidate is None or candidate.category != "lodging":
                 issues.append(ReferenceIssue("invalid_revision_lodging", "revision.replacement_day.lodging.candidate_ref", "修订住宿必须引用已核实酒店候选"))
+            elif candidate.area_hint_id and lodging.area_hint_id != candidate.area_hint_id:
+                issues.append(ReferenceIssue(
+                    "lodging_area_mismatch", "revision.replacement_day.lodging.area_hint_id",
+                    "住宿区域必须与候选关联的来源区域一致",
+                ))
     _raise_if_any(issues)

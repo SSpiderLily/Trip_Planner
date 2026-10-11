@@ -129,7 +129,8 @@ def make_facts():
 def make_candidates():
     return (
         CandidateRef(candidate_id="candidate-bund", category="sightseeing", poi_id="poi-bund", place_fact_id="fact-bund"),
-        CandidateRef(candidate_id="candidate-hotel", category="lodging", poi_id="poi-hotel", place_fact_id="fact-hotel"),
+        CandidateRef(candidate_id="candidate-hotel", category="lodging", poi_id="poi-hotel", place_fact_id="fact-hotel",
+                     area_hint_id="area-bund"),
     )
 
 
@@ -401,6 +402,41 @@ def make_full_baseline_preview():
 
 
 class PlanningV4ContractTest(unittest.TestCase):
+    def test_candidate_area_hint_is_optional_and_lodging_only(self):
+        legacy_candidate = CandidateRef(
+            candidate_id="legacy-hotel", category="lodging", poi_id="hotel", place_fact_id="hotel-fact",
+        )
+        self.assertIsNone(legacy_candidate.area_hint_id)
+        with self.assertRaises(ValidationError):
+            CandidateRef(
+                candidate_id="bad-area-candidate", category="meal", poi_id="meal", place_fact_id="meal-fact",
+                area_hint_id="area-bund",
+            )
+        with self.assertRaises(ValidationError):
+            CandidateRef(
+                candidate_id="empty-area-candidate", category="lodging", poi_id="hotel", place_fact_id="hotel-fact",
+                area_hint_id="",
+            )
+
+        planning_input, facts, candidates, proposal, preview = make_preview()
+        validate_plan_proposal(proposal, planning_input, candidates, facts)
+        validate_preview(preview)
+
+        mismatched_lodging = proposal.days[0].model_copy(update={
+            "lodging": proposal.days[0].lodging.model_copy(update={"area_hint_id": "other-area"}),
+        })
+        with self.assertRaises(ContractValidationError) as caught:
+            validate_plan_proposal(
+                proposal.model_copy(update={"days": (mismatched_lodging, *proposal.days[1:])}),
+                planning_input, candidates, facts,
+            )
+        self.assertIn("lodging_area_mismatch", {item.code for item in caught.exception.issues})
+
+        dangling_candidate = candidates[1].model_copy(update={"area_hint_id": "unknown-area"})
+        with self.assertRaises(ContractValidationError) as caught:
+            validate_plan_proposal(proposal, planning_input, (candidates[0], dangling_candidate), facts)
+        self.assertIn("dangling_candidate_area", {item.code for item in caught.exception.issues})
+
     def test_raw_remarks_are_preserved_and_arrival_departure_are_required(self):
         planning_input = make_input()
         self.assertEqual(planning_input.request.remarks, "  必须去外滩；不要去动物园 \n")
@@ -547,6 +583,15 @@ class PlanningV4ContractTest(unittest.TestCase):
             preserve_activity_ids=("activity-1",), source_issue_ids=("issue-repair",),
         )
         validate_day_revision(revision, preview.draft, report, planning_input, candidates, facts)
+        bad_lodging_day = revision.replacement_day.model_copy(update={
+            "lodging": LodgingProposal(candidate_ref="candidate-hotel", area_hint_id="other-area"),
+        })
+        with self.assertRaises(ContractValidationError) as caught:
+            validate_day_revision(
+                revision.model_copy(update={"replacement_day": bad_lodging_day}),
+                preview.draft, report, planning_input, candidates, facts,
+            )
+        self.assertIn("lodging_area_mismatch", {item.code for item in caught.exception.issues})
         invalid = revision.model_copy(update={"replacement_day": revision.replacement_day.model_copy(update={"activities": ()})})
         with self.assertRaises(ContractValidationError):
             validate_day_revision(invalid, preview.draft, report, planning_input, candidates, facts)

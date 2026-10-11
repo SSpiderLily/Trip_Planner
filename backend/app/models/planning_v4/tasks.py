@@ -54,9 +54,16 @@ class CandidateRef(ContractModel):
     category: Literal["sightseeing", "meal", "lodging"]
     poi_id: str = Field(min_length=1)
     place_fact_id: str = Field(min_length=1)
+    area_hint_id: str | None = Field(default=None, min_length=1)
     slot_ids: tuple[str, ...] = ()
     requirement_ids: tuple[str, ...] = ()
     recommendation_reason: str = ""
+
+    @model_validator(mode="after")
+    def validate_area_hint(self):
+        if self.area_hint_id is not None and self.category != "lodging":
+            raise ValueError("只有住宿候选可以关联 area_hint_id")
+        return self
 
 
 class TaskCoverage(ContractModel):
