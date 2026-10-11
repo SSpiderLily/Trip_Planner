@@ -319,4 +319,3 @@ class DestinationSearchModelTests(unittest.TestCase):
             DestinationSearchRequest(keywords="餐馆", category="restaurant")
         request = DestinationSearchRequest(keywords="景点", category="sightseeing", page=3)
         self.assertEqual(request.page, 3)
-

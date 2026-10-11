@@ -405,4 +405,3 @@ def _best_effort_task_observation(observation_service, task_id: str):
             scope.__exit__(None, None, None)
         except Exception:
             pass
-

@@ -65,4 +65,3 @@ class DestinationSearchResponse(ContractModel):
     candidates: tuple[DestinationSearchCandidate, ...] = ()
     omitted_count: int = Field(default=0, ge=0)
     error: ToolError | None = None
-

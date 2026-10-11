@@ -206,4 +206,3 @@ def _token_hash(value: str, *, max_length: int = 2048) -> str:
 def _dump(value) -> str:
     return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
                       separators=(",", ":"), allow_nan=False)
-
