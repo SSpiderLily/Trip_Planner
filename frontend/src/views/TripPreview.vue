@@ -51,7 +51,7 @@
       </section>
       <section v-if="pendingEdit" class="pending-edit-banner" :class="{ conflict: pendingEdit.status === 'conflict' }" aria-live="polite">
         <div class="pending-edit-copy">
-          <b>{{ pendingEdit.status === 'conflict' ? '这项编辑与最新行程有冲突' : pendingEdit.status === 'sending' ? '正在同步这项编辑' : '这项编辑尚未同步' }}</b>
+          <b>{{ pendingEdit.status === 'conflict' ? '这项操作与最新行程有冲突' : pendingEdit.status === 'sending' ? (pendingEdit.kind === 'destination_selection' ? '正在加入所选地点' : '正在同步这项编辑') : (pendingEdit.kind === 'destination_selection' ? '地点选择尚未同步' : '这项编辑尚未同步') }}</b>
           <p>{{ pendingEdit.summary }}</p>
           <ul v-if="pendingEdit.details.length"><li v-for="detail in pendingEdit.details" :key="detail">{{ detail }}</li></ul>
           <small v-if="pendingEdit.conflictMessage">{{ pendingEdit.conflictMessage }}</small>
@@ -286,6 +286,55 @@
             </ul>
             <p v-else class="muted">当前没有可展示的候选地点。</p>
           </section>
+
+          <section class="destination-card destination-search">
+            <div class="section-heading"><div><span class="eyebrow">SEARCH PLACES</span><h3>搜索其他地点</h3></div></div>
+            <p class="muted">搜索当前城市的景点或餐馆。搜索不会修改行程；选择后再加入当天。</p>
+            <form class="destination-search-form" @submit.prevent="searchDestinations(1)">
+              <select v-model="destinationSearchCategory" aria-label="搜索类别">
+                <option value="sightseeing">景点</option>
+                <option value="meal">餐馆</option>
+              </select>
+              <input v-model="destinationSearchKeywords" type="search" maxlength="120" placeholder="输入地点名称或关键词" aria-label="地点搜索关键词">
+              <button class="small-action" type="submit" :disabled="destinationSearchBusy || !destinationSearchKeywords.trim()">
+                {{ destinationSearchBusy ? '正在搜索…' : '搜索' }}
+              </button>
+            </form>
+            <p v-if="destinationSearchError" class="search-error" role="alert">{{ destinationSearchError }}</p>
+            <p v-else-if="destinationSearchBusy" class="muted search-state" aria-live="polite">正在查找当前城市的地点。</p>
+            <template v-else-if="destinationSearchResponse">
+              <p v-if="destinationSearchResponse.status === 'error'" class="search-error" role="alert">
+                地点搜索暂时失败，请稍后重试。
+              </p>
+              <p v-else-if="destinationSearchResponse.candidates.length === 0" class="muted search-state">没有找到可展示的地点，可以更换关键词再试。</p>
+              <ul v-if="destinationSearchResponse.status !== 'error' && destinationSearchResponse.candidates.length" class="destination-search-results">
+                <li v-for="(candidateView, index) in destinationSearchCandidateViews" :key="candidateView.key">
+                  <div class="search-result-heading">
+                    <span class="candidate-type">{{ destinationSearchResponse.category === 'meal' ? '餐馆' : '景点' }}</span>
+                    <b>{{ candidateView.name }}</b>
+                  </div>
+                  <small>{{ candidateView.city ? `${candidateView.city} · ` : '' }}{{ candidateView.address }}<template v-if="candidateView.typeName"> · {{ candidateView.typeName }}</template></small>
+                  <small>{{ candidateView.costLabel }}</small>
+                  <small>{{ candidateView.openingHoursLabel }}</small>
+                  <small v-if="candidateView.missingFieldsLabel" class="muted">{{ candidateView.missingFieldsLabel }}</small>
+                  <small class="search-source">来源：{{ candidateView.sourceLabel }} · 查询于 {{ candidateView.queriedAtLabel }}</small>
+                  <div v-if="candidateView.canSelect && destinationSearchResponse.category" class="candidate-add-row">
+                    <select :value="searchSlotChoice(index, destinationSearchResponse.category)" :disabled="editingBlocked" :aria-label="`选择${candidateView.name}的安排时段`" @change="setSearchSlotChoice(index, destinationSearchResponse.category, $event)">
+                      <option v-for="slot in availableSlotsFor(destinationSearchResponse.category)" :key="slot.id" :value="slot.id">{{ slot.label }}</option>
+                    </select>
+                    <button class="small-action" type="button" :disabled="editingBlocked || !searchSlotChoice(index, destinationSearchResponse.category)" @click="selectDestinationSearchResult(index)">加入当天</button>
+                  </div>
+                  <small v-else class="search-blocked">{{ candidateView.blockedReasonLabel || '当前不能加入，请重新搜索后再试。' }}</small>
+                </li>
+              </ul>
+              <p v-if="destinationSearchResponse.omitted_count > 0" class="muted omitted-results">另有 {{ destinationSearchResponse.omitted_count }} 条候选未展示。</p>
+              <div v-if="showDestinationSearchPagination" class="search-pagination">
+                <button class="small-action" type="button" :disabled="destinationSearchBusy || destinationSearchResponse.page <= 1" @click="searchDestinations(destinationSearchResponse.page - 1)">返回上一页</button>
+                <small>第 {{ destinationSearchResponse.page }} 页<template v-if="destinationSearchResponse.provider_count !== null"> · 地图来源报告 {{ destinationSearchResponse.provider_count }} 条</template></small>
+                <button class="small-action" type="button" :disabled="destinationSearchBusy || !canLoadNextDestinationPage" @click="searchDestinations(destinationSearchResponse.page + 1)">查询下一页</button>
+              </div>
+            </template>
+          </section>
         </aside>
       </div>
     </template>
@@ -308,14 +357,20 @@ import {
   restoreV4Final,
   retrySavePreviewAccess,
   saveV4Final,
+  searchV4Destinations,
+  selectV4Destination,
   submitV4Edit,
   v4FinalErrorMessage,
   v4EditErrorMessage,
+  v4DestinationSearchErrorMessage,
+  v4DestinationSelectErrorMessage,
   v4PreviewErrorMessage,
 } from '@/services/v4Preview'
-import type { V4EditOperation, V4FinalSaveResponse, V4FinalState, V4PreviewAccess, V4PreviewEnvelope } from '@/types/v4Preview'
+import type { V4DestinationCategory, V4DestinationSearchResponse, V4EditOperation, V4FinalSaveResponse, V4FinalState, V4PreviewAccess, V4PreviewEnvelope } from '@/types/v4Preview'
 import { formatReferenceDuration, mapV4Preview, type PreviewActivityView, type PreviewLegView, type PreviewModeView, type TripPreviewView } from '@/utils/v4PreviewMapper'
 import { groupV4DestinationActivities } from '@/utils/v4PreviewEditMapper'
+import { mapV4DestinationSearchCandidate, type V4DestinationSearchCandidateView } from '@/utils/v4DestinationSearchMapper'
+import { canQueryNextDestinationPage, shouldShowDestinationSearchPagination } from '@/utils/v4DestinationSearchPagination'
 import {
   canApplyV4Restore,
   captureV4PreviewExport,
@@ -327,6 +382,7 @@ import {
 import {
   clearV4PendingEdit,
   createV4PendingEdit,
+  createV4PendingDestinationSelection,
   hasStoredV4PendingEdit,
   isV4EnvelopeAtLeastAsNew,
   markV4PendingEdit,
@@ -365,6 +421,21 @@ const accessPersistencePending = ref(false)
 const accessStorageRetrying = ref(false)
 const selectedPoiIds = ref<string[]>([])
 const slotChoices = ref<Record<string, string>>({})
+const destinationSearchCategory = ref<V4DestinationCategory>('sightseeing')
+const destinationSearchKeywords = ref('')
+const destinationSearchResponse = ref<V4DestinationSearchResponse | null>(null)
+const destinationSearchBusy = ref(false)
+const destinationSearchError = ref('')
+const destinationSearchCandidateViews = computed<V4DestinationSearchCandidateView[]>(() => (
+  destinationSearchResponse.value?.candidates.map(mapV4DestinationSearchCandidate) ?? []
+))
+const canLoadNextDestinationPage = computed(() => {
+  const response = destinationSearchResponse.value
+  return Boolean(response && canQueryNextDestinationPage(response))
+})
+const showDestinationSearchPagination = computed(() => Boolean(
+  destinationSearchResponse.value && shouldShowDestinationSearchPagination(destinationSearchResponse.value),
+))
 const draggingId = ref('')
 const dropId = ref('')
 const localDirty = computed(() => Boolean(pendingEdit.value || pendingEditCacheBroken.value))
@@ -375,6 +446,8 @@ let requestGeneration = 0
 let finalStateGeneration = 0
 let routeJobGeneration = 0
 let editRequestSequence = 0
+let destinationSearchGeneration = 0
+let destinationSearchAbort: AbortController | null = null
 let dragOrigin: { id: string; pointerId: number } | null = null
 
 class PreviewPageError extends Error {}
@@ -395,10 +468,9 @@ const editingBlocked = computed(() => pageState.value !== 'ready'
   || pendingEditCacheBroken.value
   || restoring.value)
 const canRetryConflict = computed(() => Boolean(
-  pendingEdit.value?.status !== 'conflict'
-  || (envelope.value && pendingEdit.value && (
-    envelope.value.store_version > pendingEdit.value.request.expected_store_version
-    || envelope.value.plan_revision > pendingEdit.value.request.command.base_revision
+  pendingEdit.value?.status !== 'conflict' || (envelope.value && pendingEdit.value && (
+    envelope.value.store_version > pendingExpectedStoreVersion(pendingEdit.value)
+    || envelope.value.plan_revision > pendingExpectedPlanRevision(pendingEdit.value)
   )),
 ))
 const dayLevelIssues = computed(() => activeDay.value?.issues.filter((issue) => issue.scope === 'day') ?? [])
@@ -419,6 +491,116 @@ watch(activeIndex, () => {
   cancelDrag()
 })
 
+watch([destinationSearchKeywords, destinationSearchCategory, activeIndex], () => {
+  invalidateDestinationSearch()
+})
+
+function invalidateDestinationSearch(): void {
+  destinationSearchGeneration++
+  destinationSearchAbort?.abort()
+  destinationSearchAbort = null
+  destinationSearchBusy.value = false
+  destinationSearchError.value = ''
+  destinationSearchResponse.value = null
+}
+
+async function searchDestinations(page: number): Promise<void> {
+  const access = activeAccess.value
+  const dayId = activeDay.value?.id
+  const keywords = destinationSearchKeywords.value.trim()
+  if (!access || !dayId || !keywords || !Number.isInteger(page) || page < 1 || destinationSearchBusy.value) return
+  destinationSearchAbort?.abort()
+  const controller = new AbortController()
+  destinationSearchAbort = controller
+  const generation = ++destinationSearchGeneration
+  const pageGeneration = requestGeneration
+  const category = destinationSearchCategory.value
+  destinationSearchBusy.value = true
+  destinationSearchError.value = ''
+  destinationSearchResponse.value = null
+  try {
+    const response = await searchV4Destinations(access, { keywords, category, page }, controller.signal)
+    if (disposed || generation !== destinationSearchGeneration || pageGeneration !== requestGeneration
+      || activeDay.value?.id !== dayId || activeAccess.value?.taskId !== access.taskId) return
+    const normalizedResponseKeywords = response.keywords.trim().replace(/\s+/g, ' ')
+    const normalizedRequestKeywords = keywords.replace(/\s+/g, ' ')
+    if (response.category !== category || response.page !== page
+      || normalizedResponseKeywords !== normalizedRequestKeywords) {
+      throw new Error('搜索结果与当前关键词不匹配。')
+    }
+    destinationSearchResponse.value = response
+  } catch (error) {
+    if (disposed || generation !== destinationSearchGeneration || controller.signal.aborted) return
+    destinationSearchError.value = v4DestinationSearchErrorMessage(error)
+  } finally {
+    if (generation === destinationSearchGeneration) {
+      destinationSearchBusy.value = false
+      if (destinationSearchAbort === controller) destinationSearchAbort = null
+    }
+  }
+}
+
+function searchSlotChoice(index: number, category: V4DestinationCategory): string {
+  const searchId = destinationSearchResponse.value?.search_id ?? 'current'
+  const key = `search:${searchId}:${index}`
+  return slotChoice(key, category)
+}
+
+function setSearchSlotChoice(index: number, category: V4DestinationCategory, event: Event): void {
+  setSlotChoice(`search:${destinationSearchResponse.value?.search_id ?? 'current'}:${index}`, event)
+  // A category change invalidates the result set; this guard also prevents stale DOM events
+  // from keeping a meal slot selected for a sightseeing candidate (or the reverse).
+  const selected = (event.target as HTMLSelectElement).value
+  if (!availableSlotsFor(category).some((slot) => slot.id === selected)) {
+    const key = `search:${destinationSearchResponse.value?.search_id ?? 'current'}:${index}`
+    const next = { ...slotChoices.value }
+    delete next[`${activeDay.value?.id ?? ''}:${key}`]
+    slotChoices.value = next
+  }
+}
+
+async function selectDestinationSearchResult(index: number): Promise<void> {
+  const response = destinationSearchResponse.value
+  const candidate = response?.candidates[index]
+  const access = activeAccess.value
+  const current = envelope.value
+  const dayId = activeDay.value?.id
+  const category = response?.category
+  if (!candidate || !access || !current || !dayId || !category || editingBlocked.value) return
+  const candidateView = destinationSearchCandidateViews.value[index]
+  const slotId = searchSlotChoice(index, category)
+  const slotLabel = availableSlotsFor(category).find((slot) => slot.id === slotId)?.label
+  if (!candidateView?.canSelect || !candidate.candidate_token || !slotId || !slotLabel) {
+    message.info('请选择一个可安排的时段后再加入。')
+    return
+  }
+  let pending: V4PendingEdit
+  try {
+    pending = createV4PendingDestinationSelection({
+      envelope: current,
+      candidateToken: candidate.candidate_token,
+      category,
+      dayId,
+      slotId,
+      commandId: newRequestId('destination'),
+      clientRef: newRequestId('client'),
+      name: candidateView.name,
+      slotLabel,
+    })
+    // Persist the complete opaque-token request before sending. A lost response can then
+    // replay the identical command even if the search token later expires.
+    persistV4PendingEdit(pending)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '无法保留这项地点选择，尚未发送。')
+    return
+  }
+  routeJobGeneration++
+  routeJobState.value = 'idle'
+  routeJobMessage.value = ''
+  pendingEdit.value = pending
+  await sendPendingEdit(pending, access, requestGeneration)
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     pendingTimer = window.setTimeout(() => {
@@ -430,6 +612,7 @@ function wait(milliseconds: number): Promise<void> {
 
 async function loadLatest(): Promise<void> {
   const generation = ++requestGeneration
+  invalidateDestinationSearch()
   routeJobGeneration++
   routeJobState.value = 'idle'
   routeJobMessage.value = ''
@@ -646,7 +829,9 @@ async function sendPendingEdit(
   const requestSequence = ++editRequestSequence
   editRequestInFlight.value = true
   try {
-    const response = await submitV4Edit(access, sending.request)
+    const response = sending.kind === 'destination_selection'
+      ? await selectV4Destination(access, sending.request)
+      : await submitV4Edit(access, sending.request)
     if (disposed || pageGeneration !== requestGeneration) return
     if (response.envelope.task_id !== access.taskId || response.envelope.plan_id !== access.planId) {
       throw new Error('编辑响应与当前行程不匹配。')
@@ -661,12 +846,15 @@ async function sendPendingEdit(
     if (cacheCleared) {
       pendingEdit.value = null
       pendingEditCacheBroken.value = false
-      message.success(response.replayed ? '已恢复并同步这项编辑。' : '编辑已保存到当前预览。')
+      invalidateDestinationSearch()
+      message.success(response.replayed
+        ? (sending.kind === 'destination_selection' ? '已恢复并加入所选地点。' : '已恢复并同步这项编辑。')
+        : (sending.kind === 'destination_selection' ? '已将所选地点加入当天。' : '编辑已保存到当前预览。'))
     } else {
       const retained = markV4PendingEdit(sending, 'retry', '服务端已保存这项编辑，但浏览器暂时无法清除本机缓存。重试会使用同一命令安全核对保存结果。')
       pendingEdit.value = retained
       try { persistV4PendingEdit(retained) } catch { /* Keep the prior exact request for idempotent recovery. */ }
-      message.warning('编辑已保存，但本机缓存暂未清除。可以重试以安全核对结果。')
+      message.warning('操作已保存，但本机缓存暂未清除。可以重试以安全核对结果。')
     }
     const currentEnvelope = envelope.value
     if (currentEnvelope) void startRouteJobForEnvelope(access, currentEnvelope, pageGeneration)
@@ -697,13 +885,16 @@ async function sendPendingEdit(
       )
       pendingEdit.value = conflict
       try { persistV4PendingEdit(conflict) } catch { /* The sending request is already stored. */ }
-      message.warning('行程已有变化。这项编辑已保留，请确认后重试，或读取服务端结果。')
+      message.warning('行程已有变化。这项操作已保留，请确认后重试，或读取服务端结果。')
       if (envelope.value) void startRouteJobForEnvelope(access, envelope.value, pageGeneration)
     } else {
-      const retry = markV4PendingEdit(sending, 'retry', v4EditErrorMessage(error))
+      const errorText = sending.kind === 'destination_selection'
+        ? v4DestinationSelectErrorMessage(error)
+        : v4EditErrorMessage(error)
+      const retry = markV4PendingEdit(sending, 'retry', errorText)
       pendingEdit.value = retry
       try { persistV4PendingEdit(retry) } catch { /* The exact request was persisted before submission. */ }
-      message.warning(v4EditErrorMessage(error))
+      message.warning(errorText)
     }
   } finally {
     if (requestSequence === editRequestSequence) editRequestInFlight.value = false
@@ -746,7 +937,8 @@ async function discardPendingEdit(): Promise<void> {
       readLatest: () => getV4Preview(access),
       adopt: (latest) => {
         if (disposed || pageGeneration !== requestGeneration
-          || pendingEdit.value?.request.command.command_id !== pending.request.command.command_id) {
+          || !pendingEdit.value
+          || pendingCommandId(pendingEdit.value) !== pendingCommandId(pending)) {
           throw new Error('页面状态已变化，未清除这项编辑。')
         }
         envelope.value = latest
@@ -765,9 +957,10 @@ async function discardPendingEdit(): Promise<void> {
       message.error('已刷新服务端结果，但浏览器无法清除编辑缓存；操作仍保留，请稍后重试。')
       return
     }
-    if (pendingEdit.value?.request.command.command_id !== pending.request.command.command_id) return
+    if (!pendingEdit.value || pendingCommandId(pendingEdit.value) !== pendingCommandId(pending)) return
     pendingEdit.value = null
     pendingEditCacheBroken.value = false
+    invalidateDestinationSearch()
     message.info('已停止重试，并刷新为服务端结果。若这项编辑此前已提交，其结果仍会保留。')
   } catch {
     if (!disposed && pageGeneration === requestGeneration) {
@@ -1106,6 +1299,22 @@ function newRequestId(prefix: string): string {
   return randomId ? `${prefix}_${randomId}` : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`
 }
 
+function pendingExpectedStoreVersion(pending: V4PendingEdit): number {
+  return pending.request.expected_store_version
+}
+
+function pendingExpectedPlanRevision(pending: V4PendingEdit): number {
+  return pending.kind === 'destination_selection'
+    ? pending.request.expected_plan_revision
+    : pending.request.command.base_revision
+}
+
+function pendingCommandId(pending: V4PendingEdit): string {
+  return pending.kind === 'destination_selection'
+    ? pending.request.command_id
+    : pending.request.command.command_id
+}
+
 function startImageDownload(url: string, filename: string): void {
   const anchor = document.createElement('a')
   anchor.href = url
@@ -1192,6 +1401,7 @@ onMounted(() => { void loadLatest() })
 onUnmounted(() => {
   disposed = true
   requestGeneration++
+  invalidateDestinationSearch()
   if (pendingTimer !== null) window.clearTimeout(pendingTimer)
   revokeExportLinks()
 })
@@ -1322,6 +1532,19 @@ onUnmounted(() => {
 .candidate-list li > small { display: block; margin: 5px 0; }
 .candidate-list p { margin: 5px 0 0; color: #718173; font-size: 10px; line-height: 1.7; }
 .candidate-add-row { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.destination-search > p { margin: 8px 0; font-size: 10px; }
+.destination-search-form { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; margin-top: 12px; }
+.destination-search-form select, .destination-search-form input { min-width: 0; border: 1px solid #d8e0d2; background: #fffdfa; padding: 7px 8px; color: #526d54; font: inherit; font-size: 10px; }
+.destination-search-results { list-style: none; margin: 12px 0 0; padding: 0; }
+.destination-search-results li { padding: 12px 0; border-bottom: 1px solid #edf0e9; }
+.destination-search-results small { display: block; margin-top: 5px; color: #718173; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; }
+.search-result-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.search-result-heading b { color: #355342; font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.destination-search-results .search-source { color: #77856e; }
+.destination-search-results .search-blocked, .destination-search .search-error { color: #9a6445; }
+.search-pagination { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 11px; }
+.search-pagination small { color: #718173; font-size: 9px; text-align: center; }
+.omitted-results { margin-top: 8px !important; }
 .empty-day { padding: 24px; border: 1px dashed #b7c9a8; color: #748467; }
 .empty-day h3 { font: 19px 'Songti SC', 'Noto Serif SC', serif; }
 .empty-day p { font-size: 11px; }
@@ -1338,5 +1561,5 @@ onUnmounted(() => {
 .loading-line i:nth-child(2) { animation-delay: .15s; }.loading-line i:nth-child(3) { animation-delay: .3s; }
 @keyframes pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-4px); } }
 @media (max-width: 940px) { .day-layout { grid-template-columns: 1fr; }.map-column { position: static; order: -1; }.hero { align-items: start; }.daily-facts { max-width: 430px; } }
-@media (max-width: 620px) { .preview-shell { padding: 20px 16px 55px; }.page-topline { align-items: flex-start; }.preview-actions { max-width: 74%; }.pending-edit-banner { flex-direction: column; }.pending-edit-actions { width: 100%; }.hero { display: block; padding: 25px 0; }.hero h1 { font-size: 39px; }.cost-summary { margin-top: 19px; min-width: 0; max-width: none; }.day-overview { display: block; }.daily-facts { justify-content: start; margin-top: 12px; }.lodging-grid { grid-template-columns: 1fr; gap: 13px; }.area-reference { border-left: 0; border-top: 1px solid #dce3d3; padding: 13px 0 0; }.mode-list { gap: 5px; }.mode-chip { padding: 7px; }.activity-card { padding: 16px; }.activity-title h3 { font-size: 19px; }.activity-meta { align-items: flex-start; }.activity-actions { flex-wrap: wrap; justify-content: flex-end; }.destination-list li { grid-template-columns: auto auto minmax(0, 1fr); gap: 6px; }.destination-actions { grid-column: 1 / -1; }.map-column { order: 0; } }
+@media (max-width: 620px) { .preview-shell { padding: 20px 16px 55px; }.page-topline { align-items: flex-start; }.preview-actions { max-width: 74%; }.pending-edit-banner { flex-direction: column; }.pending-edit-actions { width: 100%; }.hero { display: block; padding: 25px 0; }.hero h1 { font-size: 39px; }.cost-summary { margin-top: 19px; min-width: 0; max-width: none; }.day-overview { display: block; }.daily-facts { justify-content: start; margin-top: 12px; }.lodging-grid { grid-template-columns: 1fr; gap: 13px; }.area-reference { border-left: 0; border-top: 1px solid #dce3d3; padding: 13px 0 0; }.mode-list { gap: 5px; }.mode-chip { padding: 7px; }.activity-card { padding: 16px; }.activity-title h3 { font-size: 19px; }.activity-meta { align-items: flex-start; }.activity-actions { flex-wrap: wrap; justify-content: flex-end; }.destination-list li { grid-template-columns: auto auto minmax(0, 1fr); gap: 6px; }.destination-actions { grid-column: 1 / -1; }.destination-search-form { grid-template-columns: minmax(0, 1fr) auto; }.destination-search-form select { grid-column: 1 / -1; }.map-column { order: 0; } }
 </style>
