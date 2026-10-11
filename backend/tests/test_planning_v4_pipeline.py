@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
+import json
 from threading import Event
 from types import SimpleNamespace
 import unittest
@@ -23,7 +24,10 @@ from app.models.planning_v4 import (
     RepairState,
     RequirementSummary,
     TripRequest,
+    WeatherFact,
+    WeatherForecast,
 )
+from app.agents.daily_plan_generator import DailyPlanGenerator
 from app.models.planning_v4.plan import PlanDraft, ValidationIssue
 from app.services.day_repair_service import (
     DayRepairCollectionRequest,
@@ -36,6 +40,7 @@ from app.services.endpoint_verification_service import (
 )
 from app.services.planning_dispatch_service import DispatchError, PlanningDispatchResult
 from app.services.day_repair_service import DayRepairService
+from app.services.daily_plan_adapter import DailyPlanGeneratorAdapter
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from app.services.planning_v4_pipeline import PlanningV4Pipeline, PlanningV4PipelineError
 from app.services.planning_v4_rules import default_planning_v4_rules
@@ -327,6 +332,102 @@ class FakeRepair:
 
 
 class PlanningV4PipelineTests(unittest.TestCase):
+    def test_actual_f06_weather_fallback_reaches_pipeline_preview_offline(self):
+        request = request_fixture()
+        endpoint_facts, endpoint = endpoint_fixture(request, run_id="pipeline-weather-fallback-task")
+        weather_source = FactSource(
+            tool_call_id="weather-source",
+            tool_name="weather_query",
+            api_version="v4",
+            queried_at=datetime.fromisoformat("2026-10-10T01:00:00+00:00"),
+            effective_params={"city": "上海", "date": "2026-10-10"},
+        )
+        weather = WeatherFact(
+            fact_id="weather-day-one",
+            city="上海",
+            forecasts=(WeatherForecast(
+                forecast_date=date(2026, 10, 10),
+                day_weather="多云",
+                day_temp_c=22,
+                night_temp_c=17,
+            ),),
+            source=weather_source,
+        )
+        facts = FactStore(
+            sources=(*endpoint_facts.sources, weather_source),
+            places=endpoint_facts.places,
+            weather=(weather,),
+        )
+        tracker = {}
+
+        class OneResponseLLM:
+            def __init__(self, response):
+                self.response = response
+                self.calls = 0
+
+            def invoke_with_usage(self, _messages, **_kwargs):
+                self.calls += 1
+                return self.response, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+
+        class ActualF06Adapter:
+            async def generate(
+                self, planning_input, candidates, actual_facts, area_hints, task_results,
+                *, source_run_id, plan_id, cancel_event,
+            ):
+                payload = {"days": [], "missing_notes": []}
+                for day in planning_input.days:
+                    payload["days"].append({
+                        "day_id": day.day_id,
+                        "day_date": day.day_date.isoformat(),
+                        "theme": "上海城市漫步",
+                        "activities": [],
+                        "unfilled_slot_ids": [
+                            slot.slot_id for slot in day.slots if slot.eligibility != "skipped"
+                        ],
+                        "lodging": None,
+                        "weather_advice": None,
+                    })
+                llm = OneResponseLLM(json.dumps(payload, ensure_ascii=False))
+                adapter = DailyPlanGeneratorAdapter(DailyPlanGenerator(llm=llm))
+                execution = await adapter.generate(
+                    planning_input,
+                    candidates,
+                    actual_facts,
+                    area_hints,
+                    task_results,
+                    source_run_id=source_run_id,
+                    plan_id=plan_id,
+                    cancel_event=cancel_event,
+                )
+                tracker["execution"] = execution
+                tracker["llm_calls"] = llm.calls
+                return execution
+
+        pipeline = PlanningV4Pipeline(
+            requirement_interpreter_factory=lambda _timeout: FakeInterpreter(tracker),
+            dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
+            daily_plan_adapter_factory=lambda _timeout: ActualF06Adapter(),
+            current_route_service_factory=lambda: FakeRouteService(tracker),
+            route_backfill_service_factory=lambda: FakeBackfill(tracker),
+            day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
+        )
+
+        result = asyncio.run(pipeline.run(
+            request,
+            task_id="pipeline-weather-fallback-task",
+            plan_id="plan-weather-fallback",
+            progress=lambda _update: None,
+        ))
+
+        day = result.snapshot.preview.draft.days[0]
+        self.assertEqual(day.weather_fact_id, weather.fact_id)
+        self.assertEqual(
+            day.weather_advice,
+            "天气已查询，出行建议暂未生成，请结合当天天气调整。",
+        )
+        self.assertEqual(tracker["llm_calls"], 1)
+        self.assertEqual(tracker["execution"].format_repairs, 0)
+
     def test_f09_scope_keeps_area_anchors_on_their_actual_target_day(self):
         request = request_fixture(departure_query=None)
         planning_input = build_planning_input(PlanningInputBuildRequest(

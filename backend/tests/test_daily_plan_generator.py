@@ -484,6 +484,32 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 payload = json.loads(fake.calls[0][0][1]["content"])
                 self.assertEqual(payload["weather_facts"], [])
 
+    def test_valid_weather_without_model_advice_keeps_fact_and_uses_missing_advice_note(self):
+        planning_input = make_input()
+        for label, advice in (("missing", None), ("blank", " \t ")):
+            with self.subTest(label=label):
+                raw = json.loads(make_model_output(planning_input, weather=False))
+                raw["days"][0]["weather_advice"] = advice
+                fake = FakeLLM([json.dumps(raw, ensure_ascii=False)])
+
+                execution = DailyPlanGenerator(llm=fake).generate(
+                    planning_input,
+                    make_candidates(),
+                    make_facts(),
+                    make_areas(),
+                    (),
+                    source_run_id=RUN_ID,
+                )
+
+                day = execution.draft.days[0]
+                self.assertEqual(day.weather_fact_id, "fact-weather")
+                self.assertEqual(
+                    day.weather_advice,
+                    "天气已查询，出行建议暂未生成，请结合当天天气调整。",
+                )
+                self.assertEqual(execution.model_calls, 1)
+                self.assertEqual(execution.format_repairs, 0)
+
     def test_rejects_sightseeing_in_lunch_even_when_candidate_slot_allows_it(self):
         planning_input = make_input()
         day_id = planning_input.days[1].day_id
