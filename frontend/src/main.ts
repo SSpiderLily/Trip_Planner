@@ -18,6 +18,11 @@ const router = createRouter({
       component: Home
     },
     {
+      path: '/preview',
+      name: 'TripPreview',
+      component: () => import('./views/TripPreview.vue')
+    },
+    {
       path: '/result',
       name: 'Result',
       component: () => import('./views/RouteResult.vue')

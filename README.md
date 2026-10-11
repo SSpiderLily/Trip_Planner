@@ -364,3 +364,10 @@ Production deployment test.
 预览库通过`PREVIEW_DB_PATH`配置，默认`backend/data/previews.sqlite3`，必须与`TASK_DB_PATH`分开。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
 
 目前这是可注入`PlanningV4Pipeline`的基础接口，完整规划链尚未接入默认应用，未配置pipeline时提交返回503；首页仍使用既有入口。实施、故障验收与后续接线见[CHG-003 F10a](docs/changes/CHG-003-planning-performance-observability.md#f10a-preview-task)。
+
+
+### v4用户预览页面
+
+前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。此步只读，首页尚未改为v4提交，浏览器未同步编辑与导出保存后续接入，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
+
+映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
