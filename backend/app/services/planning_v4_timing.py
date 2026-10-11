@@ -543,6 +543,15 @@ def _resolve_leg_duration(
         return _LegDuration(leg_id=leg.leg_id, reason="route_duration_unknown")
     if option.duration_s < 0:
         raise ValueError(f"RouteLeg {leg.leg_id} 的路线耗时不能为负数")
+    if leg.selected_mode == "transit" and leg.time_basis != "computed":
+        # 参考时刻下的公交耗时不能推进后续绝对时刻，也不能作为返程冲突的耗时下界。
+        # RouteFact 仍保留供预览展示同源的参考方案与耗时，并先完成事实绑定校验。
+        reason = (
+            "transit_reference_departure_time"
+            if leg.time_basis == "reference"
+            else "transit_departure_time_unspecified"
+        )
+        return _LegDuration(leg_id=leg.leg_id, reason=reason)
     return _LegDuration(leg_id=leg.leg_id, duration_s=float(option.duration_s))
 
 

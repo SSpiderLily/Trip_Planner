@@ -160,6 +160,7 @@ class RouteLeg(ContractModel):
     from_endpoint: LegEndpoint
     to_endpoint: LegEndpoint
     requested_departure_at: AwareDatetime | None = None
+    time_basis: Literal["computed", "reference", "unspecified"] = "unspecified"
     mode_results: tuple[RouteModeResult, ...] = ()
     selected_mode: Literal["transit", "bicycling", "walking"] | None = None
     selected_option_id: str | None = None
