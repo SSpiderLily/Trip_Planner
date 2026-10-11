@@ -23,6 +23,7 @@ from app.models.planning_v4 import (
     PlanningInput,
     RequirementSummary,
     TripRequest,
+    ValidationIssue,
 )
 from app.models.planning_v4_preview import PreviewSnapshot
 from app.services.day_repair_service import (
@@ -132,6 +133,7 @@ class PlanningV4Pipeline:
         cancel_event = Event()
         route_context = None
         retain_route_context = False
+        initial_dispatch_recovery_code: str | None = None
         await self._progress(progress, "planning_input", 0, 1, "整理原始需求")
         try:
             requirements = await self._interpret_requirements(request, deadline, cancel_event)
@@ -173,22 +175,54 @@ class PlanningV4Pipeline:
             if initial_timeout <= 0:
                 raise PlanningV4PipelineError("PIPELINE_DEADLINE_BEFORE_COLLECTION", "dispatch")
             dispatch_service = self.dispatch_service_factory(initial_timeout)
+            dispatch_context = PlanningDispatchContext(
+                planning_input=planning_input,
+                run_id=task_id,
+                context_revision=1,
+                base_revision=None,
+            )
             dispatch_result = await self._await_global_deadline(
-                dispatch_service.run_async(PlanningDispatchContext(
-                    planning_input=planning_input,
-                    run_id=task_id,
-                    context_revision=1,
-                    base_revision=None,
-                )),
+                dispatch_service.run_async(dispatch_context),
                 deadline=deadline,
                 stage="dispatch",
                 cancel_event=cancel_event,
             )
             self._validate_dispatch_result(dispatch_result, planning_input, task_id, 1, None)
             if dispatch_result.stop_reason == "technical_error":
-                raise PlanningV4PipelineError(
-                    dispatch_result.error.code if dispatch_result.error else "DISPATCH_TECHNICAL_ERROR",
+                error_code = dispatch_result.error.code if dispatch_result.error else "DISPATCH_TECHNICAL_ERROR"
+                if self._is_dispatch_data_corruption(error_code):
+                    raise PlanningV4PipelineError(error_code, "dispatch")
+                try:
+                    dispatch_result = PlanningDispatchService.validate_result_snapshot(
+                        dispatch_context,
+                        dispatch_result,
+                    )
+                except Exception as exc:
+                    raise PlanningV4PipelineError(
+                        self._safe_code(exc, "DISPATCH_PARTIAL_SNAPSHOT_INVALID"),
+                        "dispatch",
+                    ) from None
+                initial_dispatch_recovery_code = error_code
+                with span("planning.dispatch_partial_recovery", "planning", {
+                    "request_id": request.request_id,
+                    "error_code": error_code,
+                    "place_fact_count": len(dispatch_result.fact_store.places),
+                    "weather_fact_count": len(dispatch_result.fact_store.weather),
+                    "route_fact_count": len(dispatch_result.fact_store.routes),
+                    "candidate_count": len(dispatch_result.candidate_refs),
+                    "task_result_count": len(dispatch_result.task_results),
+                }) as recovery_span:
+                    recovery_span.output = {
+                        "snapshot_valid": True,
+                        "partial_snapshot_used": True,
+                        "prior_facts_preserved": True,
+                    }
+                await self._progress(
+                    progress,
                     "dispatch",
+                    1,
+                    1,
+                    "信息收集未能全部完成；已核实信息已保留，继续生成带缺项的草稿",
                 )
 
             facts = dispatch_result.fact_store
@@ -469,6 +503,25 @@ class PlanningV4Pipeline:
                 )
             failed_route_days.update(self._failed_route_days(draft))
             current_routes_status = "failed" if failed_route_days else "completed"
+            if initial_dispatch_recovery_code is not None:
+                report = report.model_copy(update={
+                    "issues": (*report.issues, ValidationIssue(
+                        issue_id="dispatch-partial-collection",
+                        code="DISPATCH_COLLECTION_PARTIAL",
+                        category="unknown_info",
+                        severity="warning",
+                        scope="plan",
+                        message="信息收集阶段提前结束；草稿仅使用已核实结果，仍可能有相关缺项。",
+                        triggers_repair=False,
+                        based_on_revision=draft.revision,
+                    )),
+                })
+                with span("validation.dispatch_partial_notice", "validation", {
+                    "error_code": initial_dispatch_recovery_code,
+                    "plan_id": draft.plan_id,
+                    "revision": draft.revision,
+                }) as notice_span:
+                    notice_span.output = {"warning_added": True, "based_on_revision": draft.revision}
 
             await self._progress(progress, "cost", 0, 1, "汇总已知消费参考")
             cost = aggregate_reference_costs(planning_input, draft, facts)
