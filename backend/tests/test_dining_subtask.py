@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.agents.dining_subtask import (
     _is_specific_restaurant_name,
 )
 from app.models.planning_v4 import (
+    CandidateRef,
     FactSource,
     FactStore,
     HardRequirement,
@@ -38,6 +40,7 @@ from app.models.planning_v4.tasks import Subtask, TaskDependency, TaskScope
 from app.services.amap_contract_adapter import AmapContractAdapter
 from app.services.mcp_tool_executor import MCPToolExecutor
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
+from app.services.planning_dispatch_service import PlanningDispatchService
 from scripts.run_requirement_interpreter import shanghai_request
 
 
@@ -406,6 +409,46 @@ class DiningSubtaskTests(unittest.TestCase):
         self.assertEqual(result.task_result.candidates[0].slot_ids, ())
         self.assertEqual(result.task_result.coverage[0].status, "missing")
 
+    def test_reusing_candidate_with_updated_reason_returns_new_stable_identity(self):
+        dinner = active_meal_slots(1, "dinner")[0]
+        task, context = dining_context({
+            dinner: ("area-dinner", "anchor-dinner", 121.4900, 31.2410),
+        })
+        restaurant_source = source("existing-meal-source", tool_name="maps_around_search")
+        restaurant_fact = fact(
+            "existing-meal-fact", "meal-one", "餐馆一",
+            MapCoordinate(lng=121.491, lat=31.241), restaurant_source.tool_call_id,
+        )
+        old_candidate = CandidateRef(
+            candidate_id="existing-meal-candidate", category="meal", poi_id=restaurant_fact.poi_id,
+            place_fact_id=restaurant_fact.fact_id, slot_ids=(dinner,),
+            recommendation_reason="旧推荐理由",
+        )
+        context = replace(
+            context,
+            fact_store=FactStore(
+                sources=(*context.fact_store.sources, restaurant_source),
+                places=(*context.fact_store.places, restaurant_fact),
+            ),
+            candidate_refs=(old_candidate,),
+        )
+        llm = FakeLLM([action_finish([{
+            "poi_id": restaurant_fact.poi_id,
+            "slot_ids": [dinner],
+            "recommendation_reason": "更新后的餐次推荐理由",
+        }])])
+
+        result = DiningSubtaskRunner(
+            llm=llm, adapter=AmapContractAdapter(tool_runner=lambda *_: self.fail("must reuse")),
+        ).run(task, context)
+
+        updated = next(item for item in result.task_result.candidates if item.poi_id == restaurant_fact.poi_id)
+        self.assertNotEqual(updated.candidate_id, old_candidate.candidate_id)
+        self.assertEqual(updated.recommendation_reason, "更新后的餐次推荐理由")
+        self.assertEqual(context.candidate_refs, (old_candidate,), "不能原地改写旧候选版本")
+        merged = PlanningDispatchService._merge_candidates((old_candidate,), (updated,))
+        self.assertEqual({item.candidate_id for item in merged}, {old_candidate.candidate_id, updated.candidate_id})
+
     def test_candidate_target_is_a_distinct_candidate_count_contract(self):
         dinner = active_meal_slots(1, "dinner")[0]
         task, context = dining_context({
@@ -488,7 +531,10 @@ class DiningSubtaskTests(unittest.TestCase):
         )
 
         DiningSubtaskRunner._append_result(tool_result, store)
-        merged = next(item for item in store["places"] if item.fact_id == "derived:dining:meal-poi")
+        dining_versions = [item for item in store["places"]
+                           if item.fact_id.startswith("derived:dining:")]
+        self.assertEqual(len(dining_versions), 1)
+        merged = dining_versions[0]
 
         self.assertIn(foreign_derived, store["places"])
         self.assertEqual(merged.source_refs, ("attraction-provider", "dining-query"))

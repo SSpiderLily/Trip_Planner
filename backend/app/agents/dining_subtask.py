@@ -7,7 +7,7 @@ import math
 import re
 import time
 import unicodedata
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Iterable, Literal, Union
 from uuid import uuid4
 
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
@@ -24,9 +24,11 @@ from app.agents.attraction_subtask import (
     _place_fields,
     _requirement_matches_name,
 )
+from app.agents.candidate_identity import version_candidate_ref
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
     CandidateRef,
+    FactStore,
     HardRequirement,
     MapCoordinate,
     MissingField,
@@ -120,6 +122,57 @@ def _dining_category(place: PlaceFact) -> Literal["dining", "excluded", "unknown
     )):
         return "dining"
     return "unknown"
+
+
+def eligible_dining_slot_ids(
+    place: PlaceFact,
+    *,
+    city: str,
+    fact_store: FactStore,
+    area_hints: Iterable[AreaHint],
+    meal_areas: Iterable[DiningMealAreaBinding],
+    allowed_slot_ids: Iterable[str],
+    excluded_poi_ids: Iterable[str] = (),
+    blocked_requirements: Iterable[HardRequirement] = (),
+    radius_m: int = SEARCH_RADIUS_METERS[0],
+) -> set[str]:
+    """纯函数：返回地点在当前AreaHint、时段和半径内可用的餐次。"""
+    if (place.location is None or place.poi_id in set(excluded_poi_ids)
+            or not _city_matches(city, place.city) or _dining_category(place) != "dining"
+            or any(_requirement_matches_name(req, place.name) for req in blocked_requirements)):
+        return set()
+    allowed = set(allowed_slot_ids)
+    hints = {hint.area_hint_id: hint for hint in area_hints}
+    result: set[str] = set()
+    for binding in meal_areas:
+        if binding.slot_id not in allowed:
+            continue
+        hint = hints.get(binding.area_hint_id)
+        if hint is None or binding.anchor_poi_id not in hint.anchor_poi_ids:
+            continue
+        anchor = next((item for item in fact_store.places
+                       if item.poi_id == binding.anchor_poi_id
+                       and item.fact_id in hint.basis_fact_ids
+                       and item.location is not None and _city_matches(city, item.city)), None)
+        if (anchor is not None and _haversine_meters(anchor.location, place.location) <= radius_m):
+            result.add(binding.slot_id)
+    return result
+
+
+def eligible_named_restaurant_requirement_ids(
+    place: PlaceFact,
+    *,
+    must_eat_restaurants: Iterable[Any],
+    allowed_requirement_ids: Iterable[str],
+) -> set[str]:
+    """只保留当前任务中与已知餐馆事实精确匹配的命名要求绑定。"""
+    allowed = set(allowed_requirement_ids)
+    normalized_name = _normalize(place.name)
+    return {
+        item.requirement_id for item in must_eat_restaurants
+        if item.requirement_id in allowed
+        and normalized_name == _normalize(item.restaurant_name)
+    }
 
 
 def _is_specific_restaurant_name(name: str, requirement: HardRequirement) -> bool:
@@ -345,20 +398,30 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
     def _place_meets_slot(
         self, place: PlaceFact, slot_id: str, context: DiningExecutionContext, *, radius_m: int | None = None,
     ) -> bool:
-        if (place.location is None or not _city_matches(context.planning_input.request.city, place.city)
-                or _dining_category(place) != "dining" or place.poi_id in self._current_excluded_ids):
-            return False
-        if any(_requirement_matches_name(req, place.name) for req in self._blocked_requirements):
-            return False
-        _, anchor = self._anchor_for_slot(slot_id, context)
         radius = radius_m if radius_m is not None else self._searched_radius_by_slot.get(slot_id, SEARCH_RADIUS_METERS[0])
-        return _haversine_meters(anchor.location, place.location) <= radius
+        return slot_id in eligible_dining_slot_ids(
+            place,
+            city=context.planning_input.request.city,
+            fact_store=context.fact_store,
+            area_hints=context.area_hints,
+            meal_areas=context.meal_areas,
+            allowed_slot_ids=(slot_id,),
+            excluded_poi_ids=self._current_excluded_ids,
+            blocked_requirements=self._blocked_requirements,
+            radius_m=radius,
+        )
 
     def _eligible_slot_ids(self, place: PlaceFact, context: DiningExecutionContext) -> set[str]:
-        return {
-            binding.slot_id for binding in context.meal_areas
-            if self._place_meets_slot(place, binding.slot_id, context)
-        }
+        return eligible_dining_slot_ids(
+            place,
+            city=context.planning_input.request.city,
+            fact_store=context.fact_store,
+            area_hints=context.area_hints,
+            meal_areas=context.meal_areas,
+            allowed_slot_ids=(item.slot_id for item in context.meal_areas),
+            excluded_poi_ids=self._current_excluded_ids,
+            blocked_requirements=self._blocked_requirements,
+        )
 
     def _matches_restaurant_binding(
         self, place: PlaceFact, requirement_id: str, context: DiningExecutionContext,
@@ -379,6 +442,7 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
 
     def _available_places(
         self, subtask: Subtask, context: AttractionExecutionContext, places: list[PlaceFact],
+        *, sources=None,
     ) -> list[PlaceFact]:
         if not isinstance(context, DiningExecutionContext):
             return []
@@ -399,15 +463,24 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
             if not spatially_eligible and not explicitly_named:
                 continue
             grouped.setdefault(place.poi_id, []).append(place)
-        return [
-            max(rows, key=lambda item: (len(_place_fields(item)), len(item.source_refs)))
-            for _, rows in sorted(grouped.items())
-        ]
+        source_by_id = {
+            source.tool_call_id: source
+            for source in (sources if sources is not None else context.fact_store.sources)
+        }
+        return [max(rows, key=lambda item: (
+            len(_place_fields(item)),
+            len(set(item.field_sources.values())),
+            len(set(item.source_refs)),
+            max((source_by_id[source_id].queried_at.timestamp()
+                 for source_id in item.source_refs if source_id in source_by_id), default=0),
+        )) for _, rows in sorted(grouped.items())]
 
     def _eligible_field_index(
         self, subtask: Subtask, context: AttractionExecutionContext, places: list[PlaceFact],
+        *, sources=None,
     ) -> dict[str, frozenset[str]]:
-        return {item.poi_id: _place_fields(item) for item in self._available_places(subtask, context, places)}
+        return {item.poi_id: _place_fields(item)
+                for item in self._available_places(subtask, context, places, sources=sources)}
 
     def _messages(
         self, subtask: Subtask, context: AttractionExecutionContext, candidates: list[PlaceFact],
@@ -614,11 +687,12 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
             if place.poi_id in by_poi:
                 index = by_poi[place.poi_id]
                 old = candidate_refs[index]
-                candidate_refs[index] = old.model_copy(update={
-                    "slot_ids": tuple(dict.fromkeys((*old.slot_ids, *selection.slot_ids))),
-                    "requirement_ids": tuple(dict.fromkeys((*old.requirement_ids, *selection.requirement_ids))),
-                    "recommendation_reason": selection.recommendation_reason or old.recommendation_reason,
-                })
+                candidate_refs[index] = version_candidate_ref(
+                    old,
+                    slot_ids=tuple(dict.fromkeys((*old.slot_ids, *selection.slot_ids))),
+                    requirement_ids=tuple(dict.fromkeys((*old.requirement_ids, *selection.requirement_ids))),
+                    recommendation_reason=selection.recommendation_reason or old.recommendation_reason,
+                )
                 continue
             by_poi[place.poi_id] = len(candidate_refs)
             candidate_refs.append(CandidateRef(
@@ -637,13 +711,13 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
             }
             for binding in context.must_eat_restaurants
         }
-        candidate_refs = [candidate.model_copy(update={
-            "requirement_ids": tuple(
+        candidate_refs = [version_candidate_ref(candidate,
+            requirement_ids=tuple(
                 requirement_id for requirement_id in candidate.requirement_ids
                 if len(matching_by_requirement.get(requirement_id, set())) == 1
                 and candidate.poi_id in matching_by_requirement[requirement_id]
             ),
-        }) for candidate in candidate_refs]
+        ) for candidate in candidate_refs]
 
         coverage: list[TaskCoverage] = []
         for slot_id in sorted(allowed_slots):

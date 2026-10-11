@@ -29,6 +29,7 @@ from app.models.planning_v4 import (
 from app.models.planning_v4.input import RequirementSource
 from app.models.planning_v4.tasks import Subtask, TaskDependency, TaskScope
 from app.services.amap_contract_adapter import AmapContractAdapter
+from app.services.planning_dispatch_service import PlanningDispatchService
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from scripts.run_requirement_interpreter import shanghai_request
 from scripts.run_lodging_subtask import build_context as build_live_context
@@ -460,6 +461,46 @@ class LodgingSubtaskTests(unittest.TestCase):
         self.assertEqual(result.task_result.status, "complete")
         self.assertEqual(result.task_result.candidates[0].poi_id, "existing-home")
         self.assertEqual(result.tool_calls, ())
+
+    def test_reusing_candidate_with_area_binding_returns_new_stable_identity(self):
+        task, context = build_context()
+        source = FactSource(
+            tool_call_id="existing-hotel-source", provider="amap", tool_name="maps_around_search",
+            api_version="v3", queried_at=datetime(2026, 10, 11, tzinfo=timezone.utc),
+            effective_params={"radius": "5000"},
+        )
+        hotel = PlaceFact(
+            fact_id="existing-hotel-fact", poi_id="existing-hotel", name="附近酒店",
+            location=MapCoordinate(lng=121.471, lat=31.231), city="上海市",
+            type_name="住宿服务;酒店", typecode="100100", source_refs=(source.tool_call_id,),
+            field_sources={"poi_id": source.tool_call_id, "name": source.tool_call_id,
+                           "location": source.tool_call_id, "city": source.tool_call_id},
+        )
+        old_candidate = CandidateRef(
+            candidate_id="existing-hotel-candidate", category="lodging", poi_id=hotel.poi_id,
+            place_fact_id=hotel.fact_id, recommendation_reason="旧住宿理由",
+        )
+        context = replace(
+            context,
+            fact_store=FactStore(
+                places=(*context.fact_store.places, hotel),
+                sources=(*context.fact_store.sources, source),
+            ),
+            candidate_refs=(old_candidate,),
+        )
+        llm = FakeLLM([action_finish(hotel.poi_id, "stay-area-1", reason="更新后的住宿理由")])
+
+        result = LodgingSubtaskRunner(
+            llm=llm, adapter=AmapContractAdapter(tool_runner=lambda *_: self.fail("must reuse")),
+        ).run(task, context)
+
+        updated = result.task_result.candidates[0]
+        self.assertNotEqual(updated.candidate_id, old_candidate.candidate_id)
+        self.assertEqual(updated.area_hint_id, "stay-area-1")
+        self.assertEqual(updated.recommendation_reason, "更新后的住宿理由")
+        self.assertEqual(context.candidate_refs, (old_candidate,), "不能原地改写旧候选版本")
+        merged = PlanningDispatchService._merge_candidates((old_candidate,), (updated,))
+        self.assertEqual({item.candidate_id for item in merged}, {old_candidate.candidate_id, updated.candidate_id})
 
     def test_existing_recommendation_cannot_claim_a_distant_area_hint(self):
         task, context = build_context(area_count=2)

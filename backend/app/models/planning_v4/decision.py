@@ -51,7 +51,10 @@ class TaskSpec(ContractModel):
     known_fact_ids: tuple[str, ...] = ()
     requirement_ids: tuple[str, ...] = ()
     excluded_poi_ids: tuple[str, ...] = ()
-    candidate_target: int = Field(ge=1, le=20)
+    candidate_target: int | None = Field(
+        default=None,
+        description="兼容旧模型输出的字段；不作为派发权限，由后端按已验证任务范围计算。",
+    )
     preference_refs: tuple[str, ...] = ()
     meal_areas: tuple[MealAreaSpec, ...] = ()
     must_eat_restaurants: tuple[NamedRestaurantSpec, ...] = ()
