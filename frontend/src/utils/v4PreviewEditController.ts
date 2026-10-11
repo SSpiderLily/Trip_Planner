@@ -1,18 +1,37 @@
-import type { V4EditOperation, V4EditRequest, V4PreviewAccess, V4PreviewEnvelope } from '@/types/v4Preview'
+import type {
+  V4DestinationCategory,
+  V4DestinationSelectionRequest,
+  V4EditOperation,
+  V4EditRequest,
+  V4PreviewAccess,
+  V4PreviewEnvelope,
+} from '@/types/v4Preview'
 
 const PENDING_EDIT_PREFIX = 'trip_planner_v4_pending_edit_v1:'
 const MAX_EDIT_OPERATIONS = 20
 
-export interface V4PendingEdit {
+interface V4PendingEditBase {
   taskId: string
   planId: string
   summary: string
   details: string[]
-  request: V4EditRequest
   status: 'sending' | 'retry' | 'conflict'
   conflictMessage?: string
   createdAt: string
 }
+
+export interface V4PendingCommandEdit extends V4PendingEditBase {
+  kind: 'edit'
+  request: V4EditRequest
+}
+
+export interface V4PendingDestinationSelection extends V4PendingEditBase {
+  kind: 'destination_selection'
+  category: V4DestinationCategory
+  request: V4DestinationSelectionRequest
+}
+
+export type V4PendingEdit = V4PendingCommandEdit | V4PendingDestinationSelection
 
 export function createV4PendingEdit(args: {
   envelope: V4PreviewEnvelope
@@ -20,7 +39,7 @@ export function createV4PendingEdit(args: {
   operations: V4EditOperation[]
   summary: string
   details?: string[]
-}): V4PendingEdit {
+}): V4PendingCommandEdit {
   const { envelope, commandId, operations } = args
   const dayIds = new Set(operations.map((operation) => operation.day_id))
   if (operations.length === 0 || operations.length > MAX_EDIT_OPERATIONS) {
@@ -41,6 +60,7 @@ export function createV4PendingEdit(args: {
     operations: cloneJson(operations),
   }
   return {
+    kind: 'edit',
     taskId: envelope.task_id,
     planId: envelope.plan_id,
     summary: args.summary,
@@ -48,6 +68,60 @@ export function createV4PendingEdit(args: {
     request: {
       command,
       expected_store_version: envelope.store_version,
+    },
+    status: 'sending',
+    createdAt: new Date().toISOString(),
+  }
+}
+
+export function createV4PendingDestinationSelection(args: {
+  envelope: V4PreviewEnvelope
+  candidateToken: string
+  category: V4DestinationCategory
+  dayId: string
+  slotId: string
+  commandId: string
+  clientRef: string
+  name: string
+  slotLabel: string
+}): V4PendingDestinationSelection {
+  const { envelope } = args
+  if (envelope.plan_id !== envelope.preview.draft.plan_id
+    || envelope.plan_revision !== envelope.preview.draft.revision) {
+    throw new Error('当前行程版本信息不一致，请刷新后重试。')
+  }
+  if (!nonEmpty(args.candidateToken) || args.candidateToken.length < 32 || args.candidateToken.length > 128) {
+    throw new Error('搜索结果已失效，请重新搜索后再选择。')
+  }
+  if (!nonEmpty(args.commandId) || !nonEmpty(args.clientRef)) {
+    throw new Error('无法保留这项选择，请重试。')
+  }
+  const day = envelope.preview.planning_input.days.find((item) => item.day_id === args.dayId)
+  const slot = day?.slots.find((item) => item.slot_id === args.slotId)
+  if (!slot || slot.eligibility === 'skipped'
+    || (args.category === 'meal' && !['breakfast', 'lunch', 'dinner'].includes(slot.period))
+    || (args.category === 'sightseeing' && !['morning', 'afternoon', 'evening'].includes(slot.period))) {
+    throw new Error('所选时段不适合安排这个地点，请重新选择时段。')
+  }
+  return {
+    kind: 'destination_selection',
+    category: args.category,
+    taskId: envelope.task_id,
+    planId: envelope.plan_id,
+    summary: `将“${args.name}”加入${args.slotLabel}`,
+    details: [
+      `类别：${args.category === 'meal' ? '餐馆' : '景点'}`,
+      `时段：${args.slotLabel}`,
+      '地点由当前城市的搜索结果提供。',
+    ],
+    request: {
+      candidate_token: args.candidateToken,
+      day_id: args.dayId,
+      slot_id: args.slotId,
+      expected_store_version: envelope.store_version,
+      expected_plan_revision: envelope.plan_revision,
+      command_id: args.commandId,
+      client_ref: args.clientRef,
     },
     status: 'sending',
     createdAt: new Date().toISOString(),
@@ -73,6 +147,27 @@ export function rebaseV4PendingEdit(
 ): V4PendingEdit {
   if (pending.taskId !== envelope.task_id || pending.planId !== envelope.plan_id) {
     throw new Error('这项编辑属于另一份行程，不能重试。')
+  }
+  if (pending.kind === 'destination_selection') {
+    const day = envelope.preview.planning_input.days.find((item) => item.day_id === pending.request.day_id)
+    const slot = day?.slots.find((item) => item.slot_id === pending.request.slot_id)
+    const allowed = pending.category === 'meal'
+      ? ['breakfast', 'lunch', 'dinner']
+      : ['morning', 'afternoon', 'evening']
+    if (!slot || slot.eligibility === 'skipped' || !allowed.includes(slot.period)) {
+      throw new Error('原选择时段已不可用，不能重试。')
+    }
+    return {
+      ...pending,
+      request: {
+        ...pending.request,
+        expected_store_version: envelope.store_version,
+        expected_plan_revision: envelope.plan_revision,
+        command_id: commandId,
+      },
+      status: 'sending',
+      conflictMessage: undefined,
+    }
   }
   if (pending.request.command.day_id !== pending.request.command.operations[0]?.day_id) {
     throw new Error('这项编辑的日期信息不完整，不能重试。')
@@ -126,8 +221,11 @@ export function readV4PendingEdit(taskId: string): V4PendingEdit | null {
   if (!serialized) return null
   try {
     const value: unknown = JSON.parse(serialized)
-    if (!isPendingEditRecord(value, taskId)) return null
-    return value
+    if (!isRecord(value)) return null
+    // Older cached edit requests predate the `kind` discriminator.
+    const normalized = value.kind === undefined ? { ...value, kind: 'edit' } : value
+    if (!isPendingEditRecord(normalized, taskId)) return null
+    return normalized
   } catch {
     return null
   }
@@ -217,7 +315,22 @@ function isPendingEditRecord(value: unknown, taskId: string): value is V4Pending
     || !value.details.every((detail) => typeof detail === 'string')
     || typeof value.createdAt !== 'string'
     || !['sending', 'retry', 'conflict'].includes(String(value.status))) return false
-  if (!isRecord(value.request) || !Number.isInteger(value.request.expected_store_version)
+  if (!isRecord(value.request)) return false
+  if (value.kind === 'destination_selection') {
+    return (value.category === 'sightseeing' || value.category === 'meal')
+      && nonEmpty(value.request.candidate_token)
+      && value.request.candidate_token.length >= 32
+      && value.request.candidate_token.length <= 128
+      && nonEmpty(value.request.day_id)
+      && nonEmpty(value.request.slot_id)
+      && Number.isInteger(value.request.expected_store_version)
+      && Number(value.request.expected_store_version) > 0
+      && Number.isInteger(value.request.expected_plan_revision)
+      && Number(value.request.expected_plan_revision) > 0
+      && nonEmpty(value.request.command_id)
+      && nonEmpty(value.request.client_ref)
+  }
+  if (value.kind !== 'edit' || !Number.isInteger(value.request.expected_store_version)
     || Number(value.request.expected_store_version) < 1 || !isRecord(value.request.command)) return false
   const command = value.request.command
   if (command.plan_id !== value.planId || typeof command.day_id !== 'string'

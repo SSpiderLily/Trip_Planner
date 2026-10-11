@@ -56,6 +56,7 @@ const pending = controller.createV4PendingEdit({
   summary: '调整当天活动顺序',
   details: ['1. 下午安排', '2. 午餐安排', '3. 上午安排'],
 })
+assert.equal(pending.kind, 'edit')
 assert.equal(pending.request.command.plan_id, envelope.plan_id)
 assert.equal(pending.request.command.base_revision, envelope.plan_revision)
 assert.equal(pending.request.expected_store_version, envelope.store_version)
@@ -67,6 +68,67 @@ assert.deepEqual(controller.readV4PendingEdit(envelope.task_id), pending,
   'refresh recovery must retain the exact request, command id, and visible intent')
 assert.equal(controller.markV4PendingEdit(pending, 'retry', 'network unavailable').request.command.command_id,
   'edit-original', 'retry keeps the idempotency key unless the user explicitly rebases a conflict')
+
+const priorFormatEdit = { ...pending }
+delete priorFormatEdit.kind
+memory.set(`trip_planner_v4_pending_edit_v1:${encodeURIComponent(envelope.task_id)}`, JSON.stringify(priorFormatEdit))
+assert.equal(controller.readV4PendingEdit(envelope.task_id).kind, 'edit',
+  'browser caches written before the kind discriminator remain readable')
+controller.persistV4PendingEdit(pending)
+
+const destinationPending = controller.createV4PendingDestinationSelection({
+  envelope,
+  candidateToken: 'synthetic-candidate-token-12345678901234567890',
+  category: 'meal',
+  dayId: envelope.preview.draft.days[0].day_id,
+  slotId: envelope.preview.planning_input.days[0].slots.find(slot => slot.period === 'dinner').slot_id,
+  commandId: 'destination-command-first',
+  clientRef: 'destination-client-first',
+  name: '新搜索餐馆',
+  slotLabel: '晚餐',
+})
+assert.equal(destinationPending.kind, 'destination_selection')
+assert.equal(destinationPending.category, 'meal')
+assert.equal(destinationPending.request.candidate_token, 'synthetic-candidate-token-12345678901234567890')
+assert.equal(destinationPending.request.expected_store_version, envelope.store_version)
+assert.equal(destinationPending.request.expected_plan_revision, envelope.plan_revision)
+controller.persistV4PendingEdit(destinationPending)
+assert.deepEqual(controller.readV4PendingEdit(envelope.task_id), destinationPending,
+  'destination selection persists its exact token and command for response-loss replay')
+const nextEnvelopeForSelection = structuredClone(envelope)
+nextEnvelopeForSelection.store_version += 1
+nextEnvelopeForSelection.plan_revision += 1
+nextEnvelopeForSelection.preview.draft.revision += 1
+const destinationRebased = controller.rebaseV4PendingEdit(destinationPending, nextEnvelopeForSelection, 'destination-command-rebased')
+assert.equal(destinationRebased.kind, 'destination_selection')
+assert.equal(destinationRebased.request.candidate_token, destinationPending.request.candidate_token,
+  'explicit conflict retry retains the opaque candidate until the server accepts the new command')
+assert.equal(destinationRebased.request.command_id, 'destination-command-rebased')
+assert.equal(destinationRebased.request.expected_store_version, nextEnvelopeForSelection.store_version)
+assert.equal(destinationRebased.request.expected_plan_revision, nextEnvelopeForSelection.plan_revision)
+assert.equal(destinationRebased.category, 'meal', 'refresh recovery retains the category needed to revalidate slot eligibility')
+assert.throws(() => controller.createV4PendingDestinationSelection({
+  envelope,
+  candidateToken: 'too-short',
+  category: 'meal',
+  dayId: envelope.preview.draft.days[0].day_id,
+  slotId: envelope.preview.planning_input.days[0].slots.find(slot => slot.period === 'dinner').slot_id,
+  commandId: 'destination-command-bad',
+  clientRef: 'destination-client-bad',
+  name: '无效token',
+  slotLabel: '晚餐',
+}), /重新搜索/)
+assert.throws(() => controller.createV4PendingDestinationSelection({
+  envelope,
+  candidateToken: 'synthetic-candidate-token-12345678901234567890',
+  category: 'sightseeing',
+  dayId: envelope.preview.draft.days[0].day_id,
+  slotId: envelope.preview.planning_input.days[0].slots.find(slot => slot.period === 'lunch').slot_id,
+  commandId: 'destination-command-wrong-slot',
+  clientRef: 'destination-client-wrong-slot',
+  name: '餐时景点',
+  slotLabel: '午餐',
+}), /不适合安排/)
 
 const latest = structuredClone(envelope)
 latest.store_version += 1

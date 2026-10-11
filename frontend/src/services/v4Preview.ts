@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { mapV4DestinationSelectFailure } from '@/utils/v4DestinationSearchMapper'
 import type {
   V4FinalSaveRequest,
   V4FinalSaveResponse,
@@ -7,6 +8,9 @@ import type {
   V4EditRequest,
   V4EditResponse,
   V4EditJobResponse,
+  V4DestinationSearchRequest,
+  V4DestinationSearchResponse,
+  V4DestinationSelectionRequest,
   V4PreviewAccess,
   V4PreviewEnvelope,
   V4RestoreResponse,
@@ -147,6 +151,31 @@ export async function getV4EditJob(
   return response.data as V4EditJobResponse
 }
 
+export async function searchV4Destinations(
+  access: V4PreviewAccess,
+  request: V4DestinationSearchRequest,
+  signal?: AbortSignal,
+): Promise<V4DestinationSearchResponse> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/destinations/search`,
+    request,
+    { headers: authorizationHeader(access), signal },
+  )
+  return response.data as V4DestinationSearchResponse
+}
+
+export async function selectV4Destination(
+  access: V4PreviewAccess,
+  request: V4DestinationSelectionRequest,
+): Promise<V4EditResponse> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/destinations/select`,
+    request,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4EditResponse
+}
+
 export function isV4EditConflict(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 409
 }
@@ -160,6 +189,32 @@ export function v4EditErrorMessage(error: unknown): string {
     if (error.code === 'ECONNABORTED' || !error.response) return '连接暂不可用，具体操作已保留在本机。请恢复连接后重试。'
   }
   return '编辑暂未同步，具体操作已保留在本机。请重试或放弃。'
+}
+
+export function v4DestinationSearchErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    if (error.response?.status === 404) return '无法访问这份行程，请返回首页重新打开。'
+    if (error.response?.status === 422) return '搜索条件无效，请调整关键词后重试。'
+    if (error.response?.status === 503 || (error.response?.status && error.response.status >= 500)) {
+      return '地点搜索暂时不可用，请稍后重试。'
+    }
+    if (error.code === 'ECONNABORTED' || !error.response) return '暂时无法连接地点搜索，请检查网络后重试。'
+  }
+  return '地点搜索暂时失败，请稍后重试。'
+}
+
+export function v4DestinationSelectErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const code = error.response?.data?.detail?.code
+      ?? error.response?.data?.code
+      ?? error.response?.data?.detail?.error_code
+    return mapV4DestinationSelectFailure({
+      status: error.response?.status ?? null,
+      code: typeof code === 'string' ? code : null,
+      unavailable: error.code === 'ECONNABORTED' || !error.response,
+    })
+  }
+  return mapV4DestinationSelectFailure({ status: null, code: null, unavailable: false })
 }
 
 export function v4FinalErrorMessage(error: unknown, action: 'save' | 'restore'): string {

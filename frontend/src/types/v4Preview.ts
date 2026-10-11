@@ -130,6 +130,68 @@ export interface V4EditJobResponse {
   job: V4EditJob
 }
 
+export type V4DestinationCategory = 'sightseeing' | 'meal'
+
+export interface V4DestinationSearchRequest {
+  keywords: string
+  category: V4DestinationCategory
+  page: number
+}
+
+export interface V4DestinationSearchCandidate {
+  candidate_token: string | null
+  name: string
+  address: string | null
+  city: string | null
+  location: MapCoordinate | null
+  type_name: string | null
+  cost: {
+    raw: string | null
+    value: string | number | null
+    unit: 'per_person_reference'
+  }
+  opening_hours_raw: string | null
+  photos: string[]
+  missing_fields: Array<{ field: string; reason: string }>
+  source: {
+    provider: string
+    tool_name: string
+    api_version: 'v3' | 'v4'
+    queried_at: string
+    effective_params: Record<string, string | number | boolean | null>
+  }
+  selectable: boolean
+  selection_block_reason: 'location_unavailable' | 'city_mismatch' | 'category_unverified' | 'source_unclosed' | null
+}
+
+export interface V4DestinationSearchResponse {
+  search_id: string
+  city: string
+  keywords: string
+  category: V4DestinationCategory
+  page: number
+  status: 'ok' | 'empty' | 'error'
+  provider_count: number | null
+  candidates: V4DestinationSearchCandidate[]
+  omitted_count: number
+  error: {
+    category: string
+    provider_code: string | null
+    message: string
+    retryable: boolean
+  } | null
+}
+
+export interface V4DestinationSelectionRequest {
+  candidate_token: string
+  day_id: string
+  slot_id: string
+  expected_store_version: number
+  expected_plan_revision: number
+  command_id: string
+  client_ref: string
+}
+
 export interface ItineraryPreview {
   schema_version: 4
   preview_id: string

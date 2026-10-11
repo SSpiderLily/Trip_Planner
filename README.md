@@ -401,7 +401,7 @@ Production deployment test.
 
 ### v4按日编辑API
 
-`POST /api/trip/v4/tasks/{task_id}/edits`携带`expected_store_version`和`EditCommand`，接受后返回202及同版本envelope、变化活动/路段和可选job。`GET .../edit-jobs/{calculation_id}`读取重算状态及当前预览，均使用该任务Bearer。一个命令只编辑一天，可在operations中原子删除多个活动；新增当前仅引用服务端已核实候选。
+`POST /api/trip/v4/tasks/{task_id}/edits`携带`expected_store_version`和`EditCommand`，接受后返回202及同版本envelope、变化活动/路段和可选job。`GET .../edit-jobs/{calculation_id}`读取重算状态及当前预览，均使用该任务Bearer。一个命令只编辑一天，可在operations中原子删除多个活动；新增引用服务端已核实候选；搜索新地点经独立选择接口加入。
 
 网络结果不明时原样重放同一command_id；改参数必须新ID。409表示版本或幂等冲突，客户端先重新读取当前预览，不自动覆盖。后台路线失败保留已接受编辑；`PLANNER_EDIT_ROUTE_DEADLINE_SECONDS`默认120秒。重启恢复待查任务与具体故障验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-api)。
 
@@ -410,7 +410,7 @@ Production deployment test.
 
 `/preview`左侧拖动调整当天顺序，也可删除某一次活动、切换已查询到的交通方式；地图下方按地点批量删除关联活动，或把已有候选加入可用时段。一次请求未确认时先处理待同步编辑；路线计算期间仍可继续修改。网络响应不明时刷新会重放同一命令，版本冲突需用户明确重试。停止重试会重新读取服务器内容，已接受的编辑仍保留。
 
-验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。搜索新地点继续单独接入；新需求入口为`/plan`。
+验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。地图下已支持搜索新景点和餐馆；新需求入口为`/plan`。
 
 
 ### v4目的地搜索
@@ -430,3 +430,6 @@ v4中已查到有效天气但模型漏写出行建议时，会保留预报并显
 访问`/plan`填写需求，提交后进入`/preview`查看进度和可编辑结果；只保留当前预览访问入口，无历史列表。默认首页`/`仍走原流程，待新规划链真实验收后再切换。日期按中国标准时间输入，预算指全程旅费；返程预留留空采用1小时，另算实际返程交通。
 
 如果浏览器暂时无法保存访问信息，当前页面仍可继续查看预览，但刷新/关闭后可能无法恢复。页面提供重试保存，重试不会重新创建规划任务。验证：`cd frontend && node tests/v4TripRequest.test.mjs`；边界与证据见[新需求填写入口](docs/changes/CHG-003-planning-performance-observability.md#v4-home)。
+
+
+`/preview`地图下的“搜索其他地点”可按景点或餐馆搜索当前城市，查看来源与参考消费，选定时段后加入当天。缺少可靠位置的结果不可加入；候选失效时重新搜索。网络结果不明时保留待同步选择，刷新会安全核对同一命令。验证和浏览器故障回放见[搜索页面](docs/changes/CHG-003-planning-performance-observability.md#v4-destination-ui)。
