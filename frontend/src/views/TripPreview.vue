@@ -1,12 +1,14 @@
 <template>
   <main class="preview-shell">
-    <section v-if="pageState === 'loading'" class="state-page" aria-live="polite">
+    <section v-if="pageState === 'loading'" class="state-page loading-state">
       <span class="eyebrow">TRIP PREVIEW</span>
-      <h1>正在准备你的行程</h1>
-      <p>{{ progressLabel }}。完成后会自动显示；重新打开此页也会继续读取当前预览。</p>
+      <div class="generation-spinner" aria-hidden="true"><span></span></div>
+      <h1>正在生成你的行程</h1>
+      <span class="loading-caption">当前阶段</span>
+      <p class="loading-stage" role="status" aria-live="polite" aria-atomic="true">{{ progressLabel }}</p>
+      <p class="loading-note">页面会按实际规划阶段更新。完成后会自动打开预览。</p>
       <p v-if="accessPersistencePending" class="storage-warning">本机暂未保存恢复信息。当前页可继续查看；刷新或关闭后无法恢复。</p>
       <button v-if="accessPersistencePending" class="quiet-button" :disabled="accessStorageRetrying" @click="retryAccessPersistence">{{ accessStorageRetrying ? '正在保存恢复信息…' : '重试保存恢复信息' }}</button>
-      <div class="loading-line"><i></i><i></i><i></i></div>
     </section>
 
     <section v-else-if="pageState === 'missing_access'" class="state-page">
@@ -18,9 +20,15 @@
 
     <section v-else-if="pageState === 'failed'" class="state-page">
       <span class="eyebrow">TRIP PREVIEW</span>
-      <h1>暂时无法打开这份行程</h1>
+      <h1>{{ failureAction === 'replan' ? '这次没有生成可用行程' : '暂时无法读取这份行程' }}</h1>
       <p>{{ errorMessage }}</p>
-      <div class="state-actions"><button class="quiet-button" @click="loadLatest">重试</button><router-link class="quiet-link" to="/">返回首页</router-link></div>
+      <div v-if="failureAction === 'replan'" class="state-actions">
+        <router-link class="quiet-link" to="/">重新规划</router-link>
+      </div>
+      <div v-else class="state-actions">
+        <button class="quiet-button" @click="loadLatest">重新读取</button>
+        <router-link class="quiet-link" to="/">返回首页</router-link>
+      </div>
     </section>
 
     <template v-else-if="view && activeDay">
@@ -371,6 +379,7 @@ import { formatReferenceDuration, mapV4Preview, type PreviewActivityView, type P
 import { groupV4DestinationActivities } from '@/utils/v4PreviewEditMapper'
 import { mapV4DestinationSearchCandidate, type V4DestinationSearchCandidateView } from '@/utils/v4DestinationSearchMapper'
 import { canQueryNextDestinationPage, shouldShowDestinationSearchPagination } from '@/utils/v4DestinationSearchPagination'
+import { canRetryV4PreviewRead, v4GenerationFailureMessage, v4PreviewStageLabel } from '@/utils/v4PreviewProgress'
 import {
   canApplyV4Restore,
   captureV4PreviewExport,
@@ -397,7 +406,8 @@ import {
 
 const pageState = ref<'loading' | 'missing_access' | 'failed' | 'ready'>('loading')
 const errorMessage = ref('')
-const progressLabel = ref('正在整理旅行需求')
+const failureAction = ref<'read' | 'replan'>('read')
+const progressLabel = ref(v4PreviewStageLabel('planning_input', 'running'))
 const view = ref<TripPreviewView | null>(null)
 const envelope = ref<V4PreviewEnvelope | null>(null)
 const activeAccess = ref<V4PreviewAccess | null>(null)
@@ -450,7 +460,11 @@ let destinationSearchGeneration = 0
 let destinationSearchAbort: AbortController | null = null
 let dragOrigin: { id: string; pointerId: number } | null = null
 
-class PreviewPageError extends Error {}
+class PreviewPageError extends Error {
+  constructor(message: string, readonly action: 'read' | 'replan' = 'replan') {
+    super(message)
+  }
+}
 
 const activeDay = computed(() => view.value?.days[activeIndex.value] ?? null)
 const activeConstraints = computed(() => {
@@ -630,7 +644,8 @@ async function loadLatest(): Promise<void> {
   }
   pageState.value = 'loading'
   errorMessage.value = ''
-  progressLabel.value = '正在整理旅行需求'
+  failureAction.value = 'read'
+  progressLabel.value = v4PreviewStageLabel('planning_input', 'running')
   view.value = null
   envelope.value = null
   activeAccess.value = access
@@ -642,7 +657,16 @@ async function loadLatest(): Promise<void> {
     await loadUntilReady(access, generation)
   } catch (error) {
     if (disposed || generation !== requestGeneration) return
-    errorMessage.value = error instanceof PreviewPageError ? error.message : v4PreviewErrorMessage(error)
+    if (error instanceof PreviewPageError) {
+      errorMessage.value = error.message
+      failureAction.value = error.action
+    } else {
+      errorMessage.value = v4PreviewErrorMessage(error)
+      const response = typeof error === 'object' && error !== null && 'response' in error
+        ? (error as { response?: { status?: number } }).response
+        : undefined
+      failureAction.value = canRetryV4PreviewRead(Boolean(response), response?.status ?? null) ? 'read' : 'replan'
+    }
     pageState.value = 'failed'
   }
 }
@@ -651,15 +675,15 @@ async function loadUntilReady(access: V4PreviewAccess, generation: number): Prom
   while (!disposed && generation === requestGeneration) {
     const status = await getV4TaskStatus(access)
     if (disposed || generation !== requestGeneration) return
-    progressLabel.value = stageLabel(status.stage)
+    progressLabel.value = v4PreviewStageLabel(status.stage, status.status)
     if (status.task_id !== access.taskId || status.plan_id !== access.planId) {
       throw new PreviewPageError('无法恢复这份预览。请从首页重新开始。')
     }
     if (status.status === 'failed') {
-      throw new PreviewPageError('这份行程暂时没有可用预览，请稍后重试。')
+      throw new PreviewPageError(v4GenerationFailureMessage(status.error_code), 'replan')
     }
     if (status.status === 'interrupted') {
-      throw new PreviewPageError('行程准备已中断，请返回首页重新开始。')
+      throw new PreviewPageError('规划任务已中断，没有可预览的行程。请返回首页重新规划。', 'replan')
     }
     if (status.preview_ready || status.status === 'ready') {
       try {
@@ -1334,24 +1358,6 @@ function formatSavedAt(value: string): string {
     : value
 }
 
-function stageLabel(stage: string): string {
-  const labels: Record<string, string> = {
-    accepted: '正在准备行程',
-    planning_input: '正在整理旅行需求',
-    dispatch: '正在查找地点与天气',
-    proposal: '正在安排每天的行程',
-    current_routes: '正在核实交通路线',
-    timing: '正在核对游览时间与返程安排',
-    validation: '正在检查每天的安排',
-    repair: '正在补齐尚未安排的时段',
-    cost: '正在整理消费参考',
-    ready: '行程已准备好',
-    failed: '行程暂时无法完成',
-    interrupted: '行程准备已中断',
-  }
-  return labels[stage] ?? '正在准备行程'
-}
-
 function isPreviewNotReady(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'response' in error
     && (error as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response?.status === 409
@@ -1552,14 +1558,17 @@ onUnmounted(() => {
 .state-page h1 { margin: 13px 0 8px; color: #254130; font: 32px 'Songti SC', 'Noto Serif SC', serif; }
 .state-page p { max-width: 470px; margin: 0; color: #718173; font-size: 12px; line-height: 1.8; }
 .state-page .storage-warning { margin-top: 10px; color: #9a6445; }
+.generation-spinner { width: 58px; height: 58px; display: grid; place-items: center; margin: 30px 0 7px; border: 4px solid #dce5d5; border-top-color: #50775d; border-right-color: #92a688; border-radius: 50%; animation: generation-spin .9s linear infinite; }
+.generation-spinner span { width: 9px; height: 9px; border-radius: 50%; background: #d46b46; }
+.loading-caption { margin-top: 5px; color: #879285; font-size: 10px; letter-spacing: .08em; }
+.state-page p.loading-stage { margin-top: 6px; color: #355b44; font-size: 16px; font-weight: 600; }
+.state-page p.loading-note { margin-top: 10px; }
 .quiet-button { margin-top: 20px; border: 1px solid #cdd8c9; background: #fffdfa; padding: 9px 15px; color: #355b44; cursor: pointer; }
 .quiet-link { display: inline-block; margin-top: 20px; border: 1px solid #cdd8c9; background: #fffdfa; padding: 9px 15px; color: #355b44; text-decoration: none; font-size: 12px; }
 .state-actions { display: flex; align-items: center; gap: 10px; }
 .state-actions .quiet-button, .state-actions .quiet-link { margin-top: 20px; }
-.loading-line { display: flex; gap: 7px; margin-top: 23px; }
-.loading-line i { width: 6px; height: 6px; border-radius: 50%; background: #92a688; animation: pulse 1.1s infinite ease-in-out; }
-.loading-line i:nth-child(2) { animation-delay: .15s; }.loading-line i:nth-child(3) { animation-delay: .3s; }
-@keyframes pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-4px); } }
+@keyframes generation-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .generation-spinner { animation: none; } }
 @media (max-width: 940px) { .day-layout { grid-template-columns: 1fr; }.map-column { position: static; order: -1; }.hero { align-items: start; }.daily-facts { max-width: 430px; } }
 @media (max-width: 620px) { .preview-shell { padding: 20px 16px 55px; }.page-topline { align-items: flex-start; }.preview-actions { max-width: 74%; }.pending-edit-banner { flex-direction: column; }.pending-edit-actions { width: 100%; }.hero { display: block; padding: 25px 0; }.hero h1 { font-size: 39px; }.cost-summary { margin-top: 19px; min-width: 0; max-width: none; }.day-overview { display: block; }.daily-facts { justify-content: start; margin-top: 12px; }.lodging-grid { grid-template-columns: 1fr; gap: 13px; }.area-reference { border-left: 0; border-top: 1px solid #dce3d3; padding: 13px 0 0; }.mode-list { gap: 5px; }.mode-chip { padding: 7px; }.activity-card { padding: 16px; }.activity-title h3 { font-size: 19px; }.activity-meta { align-items: flex-start; }.activity-actions { flex-wrap: wrap; justify-content: flex-end; }.destination-list li { grid-template-columns: auto auto minmax(0, 1fr); gap: 6px; }.destination-actions { grid-column: 1 / -1; }.destination-search-form { grid-template-columns: minmax(0, 1fr) auto; }.destination-search-form select { grid-column: 1 / -1; }.map-column { order: 0; } }
 </style>

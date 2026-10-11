@@ -7,8 +7,16 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const axiosUrl = new URL('../node_modules/axios/index.js', import.meta.url).href
+// Load the real mapper dependency introduced by destination selection; Node does
+// not resolve Vite's @ alias from an in-memory TypeScript module.
+const mapperSource = await readFile(new URL('../src/utils/v4DestinationSearchMapper.ts', import.meta.url), 'utf8')
+const mapperCompiled = ts.transpileModule(mapperSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText
+const mapperUrl = `data:text/javascript;base64,${Buffer.from(mapperCompiled).toString('base64')}`
 const runnable = compiled
   .replace("from 'axios'", `from '${axiosUrl}'`)
+  .replace("from '@/utils/v4DestinationSearchMapper'", `from '${mapperUrl}'`)
   .replace("const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'", "const API_BASE_URL = 'http://localhost:8000'")
 const service = await import(`data:text/javascript;base64,${Buffer.from(runnable).toString('base64')}`)
 
