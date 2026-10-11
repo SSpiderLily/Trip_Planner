@@ -274,6 +274,16 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 命令复用完整的上海三日原始请求构造`PlanningInput`，任务仅覆盖10月10日下午的“必须去外滩”景点子任务，首次规划的`base_revision`为空。模型只返回搜索关键词或已查到的POI选择；后端固定城市、查询参数、事实来源与任务版本。模型输入包含已有候选的坐标、城市、分类、费用原文/数值、营业时间原文及来源引用。营业时间只作原文参考，不推断旅行日期是否开放。模型预期执行一次关键词搜索后结束，但若它继续搜索、需要补真实景点详情或遇到可重试的地图错误，实际地图调用次数会增加。命令不会重跑F01，不生成整趟行程，也不写正式任务数据库。成功输出TaskResult、事实来源、地图调用摘要、Token和耗时；不输出原始模型响应、第三方异常文本或密钥。已完成离线回归及一次上海外滩真实子任务核验；这不代表完整三日行程已经生成，F03进度与验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f03-单个景点子任务2026-10-11授权)。
 
+F04d到离地点核实的独立手动核验（只调用高德MCP，不调用模型）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python -m scripts.verify_endpoints --live
+PYTHONPATH=. venv/bin/python -m scripts.verify_endpoints --live --departure-query '上海虹桥站'
+```
+
+第一条保留原上海三日请求的空端点，因此零工具调用；第二条是明确补充地点的专项场景。只有唯一同城、全名匹配且带来源坐标的结果才标记verified；其他情况保留待确认、无结果或错误原因，不默认选择车站。返回请求与版本标识供后续调用方校验。实现范围及验收见[CHG-003 F04d](docs/changes/CHG-003-planning-performance-observability.md#f04d-endpoint-query)。
+
 F04a餐饮子任务的独立手动核验（会调用配置的LLM和高德MCP，必须显式传入`--live`及来源化区域锚点文件）：
 
 ```bash
