@@ -415,15 +415,6 @@ class DayRepairService:
                         ):
                             break
                         continue
-                    if collected.stop_reason == "technical_error":
-                        if self._record_failed_round(
-                            states, attempts, day_id, round_id, round_number,
-                            issues, policy, state.completed_rounds + 1,
-                            max_rounds, collected_stop="technical_error",
-                            error_code=collected.error_code or "DAY_REPAIR_COLLECT_FAILED",
-                        ):
-                            break
-                        continue
                     try:
                         next_facts = _merge_facts(facts, collected.fact_store)
                         next_candidates = _merge_by_id(candidates, collected.candidates, "candidate_id", "candidate")
@@ -436,6 +427,21 @@ class DayRepairService:
                             unassigned, day_id, round_id, round_number, issues,
                             policy, state.completed_rounds + 1, "DAY_REPAIR_FACT_CONFLICT",
                         )
+                    if collected.stop_reason == "technical_error":
+                        # The collection service can report an ordinary model/provider
+                        # failure after it has already verified useful partial facts.
+                        # Merge that safe snapshot before consuming this round.
+                        facts, candidates, area_hints, task_results = (
+                            next_facts, next_candidates, next_areas, next_tasks,
+                        )
+                        if self._record_failed_round(
+                            states, attempts, day_id, round_id, round_number,
+                            issues, policy, state.completed_rounds + 1,
+                            max_rounds, collected_stop="technical_error",
+                            error_code=collected.error_code or "DAY_REPAIR_COLLECT_FAILED",
+                        ):
+                            break
+                        continue
                 else:
                     collected = DayRepairCollectionResult.empty(facts, candidates, area_hints, task_results)
                     next_facts, next_candidates, next_areas, next_tasks = facts, candidates, area_hints, task_results

@@ -10,6 +10,7 @@ from ..services.observation_service import ObservationService
 from ..services.day_edit_service import DayEditService
 from ..services.preview_repository import PreviewRepository
 from ..services.preview_task_service import PreviewTaskService
+from ..services.planning_v4_pipeline import PlanningV4Pipeline
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
@@ -87,10 +88,18 @@ async def startup_event(application: FastAPI):
     application.state.task_service.preview_completion_resolver = preview_repository.ready_task_completion
     application.state.task_service.preview_completion_batch_resolver = preview_repository.ready_task_completions
     application.state.preview_repository = preview_repository
+    pipeline = getattr(application.state, "planning_v4_pipeline", None)
+    if pipeline is None:
+        pipeline = PlanningV4Pipeline(
+            total_timeout_seconds=settings.planner_v4_total_timeout_seconds,
+            initial_collection_timeout_seconds=settings.planner_v4_initial_collection_timeout_seconds,
+            current_revision_lookup=preview_repository.current_plan_revision,
+        )
+    application.state.planning_v4_pipeline = pipeline
     application.state.preview_task_service = PreviewTaskService(
         application.state.task_service,
         preview_repository,
-        getattr(application.state, "planning_v4_pipeline", None),
+        pipeline,
     )
 
     print("\n" + "="*60)

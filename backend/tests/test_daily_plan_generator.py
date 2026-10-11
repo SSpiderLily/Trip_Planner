@@ -257,6 +257,20 @@ def make_generator(output):
 
 
 class DailyPlanGeneratorTests(unittest.TestCase):
+    def test_preallocated_plan_id_is_bound_to_generated_draft(self):
+        planning_input = make_input()
+        generator, fake = make_generator(make_model_output(planning_input))
+
+        execution = generator.generate(
+            planning_input, make_candidates(), make_facts(), make_areas(), (),
+            source_run_id=RUN_ID, plan_id="plan_preallocated-preview-id",
+        )
+
+        self.assertEqual(execution.draft.plan_id, "plan_preallocated-preview-id")
+        self.assertEqual(execution.draft.source_run_id, RUN_ID)
+        self.assertEqual(execution.proposal.request_id, planning_input.request.request_id)
+        self.assertEqual(len(fake.calls), 1)
+
     def test_three_days_repeat_poi_duration_defaults_area_and_weather(self):
         planning_input = make_input()
         candidates = make_candidates()
@@ -722,6 +736,30 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][1]["max_tokens"], 8192)
         self.assertEqual(fake.calls[0][1]["max_retries"], 0)
         self.assertLessEqual(fake.calls[0][1]["request_timeout"], 120)
+
+    def test_cancellation_after_invalid_output_prevents_format_repair_request(self):
+        planning_input = make_input()
+        malformed = json.dumps({"days": []})
+        cancel_event = Event()
+
+        class CancellingLLM:
+            def __init__(self):
+                self.calls = []
+
+            def invoke_with_usage(self, messages, **kwargs):
+                self.calls.append((messages, kwargs))
+                cancel_event.set()
+                return malformed, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+
+        fake = CancellingLLM()
+        with self.assertRaises(PlanningError) as raised:
+            DailyPlanGenerator(llm=fake).generate(
+                planning_input, make_candidates(), make_facts(), make_areas(), (),
+                source_run_id=RUN_ID, cancel_event=cancel_event,
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_CALL_CANCELLED")
+        self.assertEqual(len(fake.calls), 1)
 
     def test_failed_format_repair_carries_cumulative_execution_stats(self):
         planning_input = make_input()

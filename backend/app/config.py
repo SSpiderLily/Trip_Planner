@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     planner_place_query_limit: int = Field(default=36, ge=4, le=200)
     planner_route_query_limit: int = Field(default=80, ge=1, le=500)
     planner_tool_timeout_seconds: float = Field(default=25, gt=0, le=120)
+    planner_v4_total_timeout_seconds: float = Field(default=1800, gt=0, le=7200)
+    planner_v4_initial_collection_timeout_seconds: float = Field(default=600, gt=0, le=3600)
 
     # 日志配置
     log_level: str = "INFO"

@@ -370,6 +370,15 @@ class PreviewRepository:
             ).fetchone()
         return self._stored_from_row(row) if row else None
 
+    def current_plan_revision(self, plan_id: str) -> int | None:
+        """读取计划当前版本，供后台路线任务在查询前检查是否仍有效。"""
+        plan_id = self._required_id(plan_id, "plan_id")
+        with self._read_connection() as conn:
+            row = conn.execute(
+                "SELECT plan_revision FROM preview_drafts WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+        return int(row["plan_revision"]) if row is not None else None
+
     def replace_preview(
         self,
         access_token: str,

@@ -37,7 +37,27 @@ class DailyPlanGeneratorAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(await call, expected)
         self.assertEqual(seen["args"], (request, candidates, facts, areas, results))
-        self.assertEqual(seen["kwargs"], {"source_run_id": "run-1"})
+        self.assertEqual(seen["kwargs"], {
+            "source_run_id": "run-1", "plan_id": None, "cancel_event": None,
+        })
+
+    async def test_forwards_preallocated_plan_id_and_cancellation_event(self):
+        cancel_event = threading.Event()
+        seen = {}
+
+        class SyncGenerator:
+            def generate(self, *args, **kwargs):
+                seen.update(kwargs)
+                return object()
+
+        adapter = DailyPlanGeneratorAdapter(SyncGenerator())
+        await adapter.generate(
+            *(object() for _ in range(5)), source_run_id="run-2",
+            plan_id="plan-preallocated", cancel_event=cancel_event,
+        )
+
+        self.assertEqual(seen["plan_id"], "plan-preallocated")
+        self.assertIs(seen["cancel_event"], cancel_event)
 
     async def test_preserves_generator_exception(self):
         class SyncGenerator:

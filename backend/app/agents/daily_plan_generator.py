@@ -8,7 +8,7 @@ from datetime import date
 import json
 import math
 import time
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -166,6 +166,8 @@ class DailyPlanGenerator:
         task_results: tuple[TaskResult, ...],
         *,
         source_run_id: str,
+        plan_id: str | None = None,
+        cancel_event: Event | None = None,
     ) -> DailyPlanExecution:
         stats = _GenerationStats()
         try:
@@ -176,6 +178,8 @@ class DailyPlanGenerator:
                 area_hints,
                 task_results,
                 source_run_id=source_run_id,
+                plan_id=plan_id,
+                cancel_event=cancel_event,
                 _stats=stats,
             )
         except Exception as exc:
@@ -202,6 +206,7 @@ class DailyPlanGenerator:
         round_id: str | None = None,
         round_number: int = 1,
         timeout_seconds: float | None = None,
+        cancel_event: Event | None = None,
     ) -> DailyDayRevisionExecution:
         stats = _GenerationStats()
         try:
@@ -215,6 +220,7 @@ class DailyPlanGenerator:
                 round_id=round_id,
                 round_number=round_number,
                 timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
                 _stats=stats,
             )
         except Exception as exc:
@@ -241,6 +247,7 @@ class DailyPlanGenerator:
         round_id: str | None = None,
         round_number: int = 1,
         timeout_seconds: float | None = None,
+        cancel_event: Event | None = None,
         _stats: "_GenerationStats",
     ) -> DailyDayRevisionExecution:
         """只为一个日期调用模型并产生经引用校验的 DayRevision。"""
@@ -288,6 +295,7 @@ class DailyPlanGenerator:
                     attempt=attempt + 1,
                     request_id=planning_input.request.request_id,
                     source_run_id=run_id,
+                    cancel_event=cancel_event,
                 )
             except PlanningError as exc:
                 model_calls += getattr(exc, "model_calls", 0)
@@ -518,6 +526,8 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
         task_results: tuple[TaskResult, ...],
         *,
         source_run_id: str,
+        plan_id: str | None,
+        cancel_event: Event | None,
         _stats: "_GenerationStats",
     ) -> DailyPlanExecution:
         started = time.monotonic()
@@ -583,6 +593,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                         attempt=attempt + 1,
                         request_id=planning_input.request.request_id,
                         source_run_id=source_run_id,
+                        cancel_event=cancel_event,
                     )
                 except PlanningError as exc:
                     model_calls += getattr(exc, "model_calls", 0)
@@ -709,6 +720,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
 
                 draft = self._build_draft(
                     proposal, planning_input, candidates, facts, area_hints, source_run_id,
+                    plan_id=plan_id,
                 )
             except PlanningError:
                 agent_record.output = {
@@ -748,7 +760,14 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
             }
             return execution
 
-    def _invoke_once(self, messages, deadline, *, attempt, request_id, source_run_id):
+    def _invoke_once(
+        self, messages, deadline, *, attempt, request_id, source_run_id,
+        cancel_event: Event | None = None,
+    ):
+        if cancel_event is not None and cancel_event.is_set():
+            error = PlanningError("MODEL_CALL_CANCELLED", "每日安排生成已取消", step="daily_plan_model_call")
+            _attach_call_metadata(error, started=False)
+            raise error from None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             error = PlanningError("MODEL_TIMEOUT", "每日安排模型调用超时", step="daily_plan_model_call")
@@ -770,8 +789,18 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
             safe_context,
             init_state,
             call_state,
+            cancel_event,
         )
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                init_state.cancel_before_start()
+                call_state.cancel_before_start()
+                future.cancel()
+                error = PlanningError(
+                    "MODEL_CALL_CANCELLED", "每日安排生成已取消", step="daily_plan_model_call",
+                )
+                _attach_call_metadata(error, started=call_state.started)
+                raise error from None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 init_state.cancel_before_start()
@@ -806,8 +835,13 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
             raise safe_error from None
         return response, usage, finish_reason, call_state.started
 
-    def _invoke_worker(self, messages, deadline, safe_context, init_state, call_state):
+    def _invoke_worker(self, messages, deadline, safe_context, init_state, call_state, cancel_event=None):
         with span("llm.daily_plan_generation", "llm", safe_context) as llm_record:
+            if cancel_event is not None and cancel_event.is_set():
+                llm_record.output = {"status": "not_started", "reason": "cancelled"}
+                raise PlanningError(
+                    "MODEL_CALL_CANCELLED", "每日安排生成已取消", step="daily_plan_model_call",
+                )
             if not init_state.try_start(deadline):
                 llm_record.output = {"status": "not_started", "reason": "deadline"}
                 raise _CallNotStarted()
@@ -820,6 +854,11 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                     "每日安排模型初始化失败",
                     step="daily_plan_model_initialization",
                 ) from None
+            if cancel_event is not None and cancel_event.is_set():
+                llm_record.output = {"status": "not_started", "reason": "cancelled"}
+                raise PlanningError(
+                    "MODEL_CALL_CANCELLED", "每日安排生成已取消", step="daily_plan_model_call",
+                )
             if not call_state.try_start(deadline):
                 llm_record.output = {"status": "not_started", "reason": "deadline"}
                 raise _CallNotStarted()
@@ -1192,7 +1231,10 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
         if issues:
             raise _InvalidReferences(tuple(sorted(set(issues))))
 
-    def _build_draft(self, proposal, planning_input, candidates, facts, area_hints, source_run_id):
+    def _build_draft(
+        self, proposal, planning_input, candidates, facts, area_hints, source_run_id,
+        *, plan_id: str | None = None,
+    ):
         candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
         place_by_fact = {place.fact_id: place for place in facts.places}
         unique_user_lodging = self._unique_specified_lodging(
@@ -1258,7 +1300,7 @@ replacement_day.day_id 和 day_date 必须与 target_date_only 一致。地点�
                 weather_advice=weather_advice,
                 lodging=lodging,
             ))
-        plan_id = _stable_id("plan", planning_input.request.request_id, source_run_id)
+        plan_id = plan_id or _stable_id("plan", planning_input.request.request_id, source_run_id)
         return PlanDraft(
             plan_id=plan_id,
             request_id=planning_input.request.request_id,

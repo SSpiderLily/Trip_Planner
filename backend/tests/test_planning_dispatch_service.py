@@ -29,6 +29,7 @@ from app.models.planning_v4.input import (
     TripRequest,
 )
 from app.models.planning_v4.plan import AreaHint
+from app.models.planning_v4.dispatch_scope import DispatchScope, DispatchTarget
 from app.models.planning_v4.tasks import CandidateRef, Subtask, TaskDependency, TaskResult, TaskScope
 from app.services.endpoint_verification_service import EndpointVerification, EndpointVerificationExecution
 from app.services.planning_dispatch_service import (
@@ -264,6 +265,121 @@ def make_service(decider, *, runner_factory=None, **kwargs):
 
 
 class PlanningDispatchServiceTests(unittest.TestCase):
+    def test_targeted_dispatch_accepts_area_derived_from_new_target_day_attraction(self):
+        base = make_input()
+        day = base.days[0]
+        morning = f"{day.day_id}-morning"
+        lunch = f"{day.day_id}-lunch"
+        source, place = place_fact()
+        attraction = subtask("target-attraction", day=0, period="morning")
+        attraction_candidate = candidate(
+            "target-attraction-candidate", place, slots=(morning,),
+        )
+        attraction_result = execution(
+            attraction,
+            SimpleNamespace(request_id=base.request.request_id),
+            FactStore(sources=(source,), places=(place,)),
+            (attraction_candidate,),
+            status="partial",
+        ).task_result
+        scope = DispatchScope(targets=(
+            DispatchTarget(
+                target_id="missing-attraction", issue_code="missing_sightseeing",
+                role="attractions", day_id=day.day_id, slot_ids=(morning,),
+            ),
+            DispatchTarget(
+                target_id="missing-lunch", issue_code="missing_meal",
+                role="dining", day_id=day.day_id, slot_ids=(lunch,),
+            ),
+        ))
+        context = planning_context(
+            planning_input=base,
+            facts=FactStore(sources=(source,), places=(place,)),
+            candidates=(attraction_candidate,),
+            tasks=(attraction,),
+            results=(attraction_result,),
+        ).model_copy(update={"dispatch_scope": scope})
+        area = AreaHint(
+            area_hint_id="new-area-from-target-day",
+            label="目标日景点附近",
+            anchor_poi_ids=(place.poi_id,),
+            center=place.location,
+            basis_fact_ids=(place.fact_id,),
+            basis="verified_place_facts",
+        )
+        dining = subtask(
+            "target-lunch", role="dining", day=0, period="lunch",
+            known_fact_ids=(place.fact_id,), area_hint_ids=(area.area_hint_id,),
+        )
+        valid_decision = decision(
+            context,
+            "delegate",
+            tasks=(resolved(dining, meal_areas=(SimpleNamespace(
+                slot_id=lunch,
+                area_hint_id=area.area_hint_id,
+                anchor_poi_id=place.poi_id,
+            ),)),),
+            areas=(area,),
+        )
+        live_context = SimpleNamespace(
+            fact_store=context.fact_store,
+            candidates=context.candidate_refs,
+            existing_tasks=context.existing_tasks,
+            task_results=context.task_results,
+        )
+
+        PlanningDispatchService._validate_delegate_identity(
+            context, valid_decision, live_context=live_context,
+        )
+
+        wrong_day_candidate = candidate(
+            "other-day-candidate", place,
+            slots=(f"{base.days[1].day_id}-morning",),
+        )
+        wrong_day_context = context.model_copy(update={
+            "candidate_refs": (wrong_day_candidate,),
+            "task_results": (attraction_result.model_copy(update={
+                "candidates": (wrong_day_candidate,),
+            }),),
+        })
+        wrong_day_live = SimpleNamespace(
+            fact_store=wrong_day_context.fact_store,
+            candidates=wrong_day_context.candidate_refs,
+            existing_tasks=wrong_day_context.existing_tasks,
+            task_results=wrong_day_context.task_results,
+        )
+        with self.assertRaises(Exception) as raised:
+            PlanningDispatchService._validate_delegate_identity(
+                wrong_day_context,
+                valid_decision,
+                live_context=wrong_day_live,
+            )
+        self.assertEqual(getattr(raised.exception, "code", None), "DISPATCH_SCOPE_AREA_INVALID")
+
+    def test_targeted_dispatch_rejects_fake_decider_task_outside_slot_scope(self):
+        context = planning_context()
+        targeted_slot = context.planning_input.days[0].slots[1].slot_id
+        context = context.model_copy(update={
+            "dispatch_scope": DispatchScope(targets=(DispatchTarget(
+                target_id="missing-morning",
+                issue_code="missing_sightseeing",
+                role="attractions",
+                day_id=context.planning_input.days[0].day_id,
+                slot_ids=(targeted_slot,),
+            ),)),
+        })
+        outside_task = subtask("outside-scope", period="afternoon")
+        tracker = {}
+        decider = ScriptedDecider([decision(context, "delegate", tasks=(resolved(outside_task),))])
+
+        result = asyncio.run(make_service(
+            decider, runner_factory=lambda: ImmediateRunner(tracker),
+        ).run_async(context))
+
+        self.assertEqual(result.stop_reason, "technical_error")
+        self.assertEqual(result.error.code, "DISPATCH_SCOPE_TASK_INVALID")
+        self.assertEqual(tracker.get("calls", []), [])
+
     def test_ready_tasks_run_in_parallel_with_three_dispatch_slots_and_fixed_revision(self):
         context = planning_context()
         tasks = tuple(resolved(subtask(f"task-{index}", objective=f"查询区域 {index}")) for index in range(5))
