@@ -53,6 +53,7 @@ class ProposalDay(ContractModel):
     activities: tuple[ProposalActivity, ...] = ()
     unfilled_slot_ids: tuple[str, ...] = ()
     lodging: LodgingProposal | None = None
+    weather_advice: str | None = None
 
 
 class PlanProposal(ContractModel):

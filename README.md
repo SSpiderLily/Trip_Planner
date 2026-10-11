@@ -276,6 +276,8 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 F05a主智能体决定为独立模块：`MasterDecider.run(MasterDecisionContext(...))`接收固定的PlanningInput、事实、候选及历史任务，返回后端定稿的delegate/plan决定。可执行角色和直接查询由当前依赖收窄；最多一次JSON格式修复，业务引用不合法直接拒绝。它不执行MCP或生成行程；F05b负责调度续派，F06负责每日安排。调用会使用配置的真实LLM。范围及验收见[CHG-003 F05a](docs/changes/CHG-003-planning-performance-observability.md#f05a-master-decision)。
 
+F06每日规划为独立模块：`DailyPlanGenerator.generate(planning_input, candidates, facts, area_hints, task_results, source_run_id=...)`调用配置模型，返回提案、已绑定事实的草稿和调用用量。后端计算缺项清单；空白或占位时段仍是未完成安排。120秒技术期限内最多一次格式修复，模型截断不接受为完整结果。`UsageAwareLLM.invoke_with_metadata`提供结束原因，原`invoke_with_usage`两值接口保持兼容。显式手动核验可用`python -m scripts.run_daily_plan_generator --help`查看输入格式；会调用模型，不调用MCP或写正式数据库。范围见[CHG-003 F06](docs/changes/CHG-003-planning-performance-observability.md#f06-daily-plan)。
+
 F08当前相邻路线为异步服务：`query_current_routes(planning_input, draft, facts, ...)`按模型顺序查三种方式并选择最快有效路线。日内串接F07时刻，跨日并行；使用共享四并发MCP与F11a缓存。若提供F04d execution，必须同时提供当前context_revision并匹配请求、run、版本和端点原文。公共交通使用09:00参考时刻时保留标记，不能当作绝对行程时间。范围见[CHG-003 F08](docs/changes/CHG-003-planning-performance-observability.md#f08-current-routes)。显式真实核验仅查传入草稿的一段：
 
 ```bash
