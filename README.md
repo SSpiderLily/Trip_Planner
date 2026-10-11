@@ -185,7 +185,7 @@ npm run dev
 
 默认入口继续使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色。模型负责理解完整备注、选择景点与提出安排，程序核实地点并计算路线、参考时间和查询费用。开放备注不使用关键词分类，模型价格不进入预算。
 
-2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。该模块尚未接入默认 v3 规划入口，也未实现主从调度、`ActivityTiming`、返程算法、路线缓存、后台补齐或正式前端预览；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
+2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；主从调度、`ActivityTiming`、返程算法、缓存接入、后台补齐和正式前端预览仍待实施；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
 
 当前代码已恢复到性能方案1—3之前，保留各阶段完整 JSON 示例及 `qwen3.7-flash` 配置。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
 

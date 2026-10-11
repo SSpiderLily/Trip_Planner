@@ -888,7 +888,7 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - 离开日先用日开始至`departure_at - return_buffer`的乐观上界判断；严格小于3小时才整日跳过，刚好3小时保留。返程路线未知时`available_end=None`；仅受边界影响的餐次或时段标conditional，白天安排仍可保留。单一候选地点到返程点的耗时不用于取消整日或其他餐次。`required`只表示该时段应被覆盖，不代表时间或交通已验证可行。
 - 到达日以实际到达时刻作为可用时间上界。缺少经核实的`day_ready_at`时，首个可能时段标conditional，且`DayConstraint.available_start`保持为空；提供该时间时按其限制窗口。餐次按可用时段独立判断，够1小时才保留；显式返程缓冲覆盖系统默认，不从备注解析。共享`PlanningInput.boundary_facts`记录本次实际采用的缓冲值及来源、已核实`day_ready_at`、到达乐观起点和离开日活动结束乐观上界；没有把显式值写入`RuleSet.return_buffer_default_s`。
 - 新增 `backend/tests/test_planning_input_builder.py` 的11项离线单测，覆盖上海三日、边界、时区、同日到离、3小时上下界、1小时餐次、缓冲覆盖、PlanningInput JSON往返、day_ready_at及返程耗时与整日规则隔离、返程上界恰好落在餐窗终点。执行方自检及主对话独立复跑的完整后端命令 `PYTHONPATH=. <共用Python解释器> -m unittest discover -s tests -q` 共133项通过；有既有Starlette弃用警告。未调用真实模型/MCP、未启动正式服务、未改数据库。
-- 本项Change已同步F02状态。技术验收通过，交付分支为 `codex/planning-day-rules`；Git状态以该分支PR为准，由用户审查并手动合并。
+- 本项Change已同步F02状态。技术验收通过，交付分支为 `codex/planning-day-rules`；提交时等待用户审查，后续合并见本日志“首批功能审查与合并”。
 
 ## 上海三日时间与交通算法推演（2026-10-10）
 
@@ -929,7 +929,7 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - available步行/骑行缓存3600秒、transit缓存900秒，empty缓存60秒，均从异步loader完成时开始计时。响应入缓存前核对adapter版本、RouteFact方向/端点/坐标/方式、FactSource provider/API/tool和实际参数，以及公交时间证据；缺请求时间元数据的响应不能填充定时公交请求。错误事实、异常和校验失败不缓存并清理in-flight。错误只在同时等待的消费者之间合并；后续调用可以重试。本服务不维护规划轮次错误记忆、重试预算或冷却，后续scheduler应负责轮次内抑制。计数只提供外部加载、缓存命中、in-flight加入和错误数，不扩展观测页。
 - 深拷贝保护 `RouteFact` 内的来源参数、方案属性和分段属性；测试确认调用者修改返回值不会污染后续命中。新模块没有接入 `RouteOptionsService`、正式任务入口、后台矩阵或数据库。
 - 定向验证：使用共用解释器运行 `PYTHONPATH=. .../backend/venv/bin/python -m unittest discover -s tests -p 'test_route_fact_cache.py' -v`，16项通过；覆盖TTL边界/完成起算、方向/坐标/城市/公交时刻和策略变化、跨plan隔离、并发取消、错误不缓存及清理、错误响应拒收、嵌套字典隔离、loop边界、显式关闭、敏感参数拒绝和计数。后端完整回归 `PYTHONPATH=. .../backend/venv/bin/python -m unittest discover -s tests -v` 共138项通过（执行方自检及主对话独立复跑）；输出有既有 Starlette/AnyIO 弃用警告。
-- 验证范围只证明独立缓存服务与固定事实替身的离线行为，不证明真实AMap接入、服务生命周期持有、错误轮次抑制、后台补齐或性能提升。未发起真实MCP/地图调用、未启动服务、未触碰数据库。主对话技术验收通过；Git交付状态以`codex/planning-route-cache`的PR为准，由用户审查并手动合并。
+- 验证范围只证明独立缓存服务与固定事实替身的离线行为，不证明真实AMap接入、服务生命周期持有、错误轮次抑制、后台补齐或性能提升。未发起真实MCP/地图调用、未启动服务、未触碰数据库。主对话技术验收通过；提交时等待用户审查`codex/planning-route-cache`的PR，后续合并见本日志“首批功能审查与合并”。
 
 - 审查修正：骑行MCP入参名与官方HTTP参数不同，缓存按vendor记录的`origin/destination`匹配，公共交通包括展开后的`extensions=base`。新增三种方式的vendor HTTP替身→真实适配器→缓存贯穿测试，并验证loader吞掉取消后不能重新写入已关闭缓存。
 
@@ -985,4 +985,10 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - HTTP客户端调用明确设置默认120秒超时（可配置范围大于0且不超过120秒）和 `max_retries=0`。已核实 OpenAI SDK 客户端默认 `max_retries=2`；F01 通过 `with_options` 覆盖该默认值。仅JSON/结构错误可定向修复一次；超时、认证和来源不匹配不重试。
 - 观测 Span 只保存结构化结果、错误码和真实usage，不保存原始模型响应或第三方错误文本；成功收到的usage会累计，某次调用缺usage时总量保留未知。独立CLI默认不建立观测任务或连接正式数据库；调用方可自行提供现有观测上下文，CLI的stdout仅输出JSON。离线观测测试仅使用临时SQLite文件。
 - 离线验证：新增F01测试18项、planning_v4契约13项、观测7项、旧路线流程14项，共52项通过；主对话随后独立复跑完整后端140项测试通过。CLI捕获测试、帮助入口和`git diff --check`通过。随后使用主目录`.env`按现有python-dotenv方式在当前进程加载配置，运行本分支CLI完成一次真实上海三日需求整理：1次HTTP模型请求、0次格式修复，usage为输入1055、输出2326、合计3381 tokens，耗时18.908秒。结果仅保存结构化摘要、usage、调用次数和耗时到`/private/tmp/trip-small-steps-review/f01-live.json`；未保存原始响应或错误文本。本次输出将“必须去外滩”标为must_visit且引用原文，交通方式、节奏、少折返和午晚餐作为偏好；预算金额、人数、住处及到离地点列为未知，assumptions为空。这是单次语义样本，不保证模型对其他输入均理解正确。
-- 首次两次CLI尝试均在模型初始化阶段失败，没有发出HTTP请求。随后收到自动审查拒绝环境加载启动消息，理由将项目运行时模型qwen3.7-flash与Codex代码执行模型gpt-6-luna视为冲突；该消息到达时获批的单次模型请求已完成。未再调用模型。未调用MCP、未启动服务或改正式数据库；技术验收通过，Git交付状态以`codex/requirements-interpretation`的PR为准，由用户审查并手动合并。
+- 首次两次CLI尝试均在模型初始化阶段失败，没有发出HTTP请求。随后收到自动审查拒绝环境加载启动消息，理由将项目运行时模型qwen3.7-flash与Codex代码执行模型gpt-6-luna视为冲突；该消息到达时获批的单次模型请求已完成。未再调用模型。未调用MCP、未启动服务或改正式数据库；技术验收通过，提交时等待用户审查`codex/requirements-interpretation`的PR，后续合并见本日志“首批功能审查与合并”。
+
+## 首批功能审查与合并（2026-10-11）
+
+- 用户确认已完成审查，并明确授权助手提交合并。复核F01、F02、F11a三个PR的最新提交与已验收版本一致，逐项按预期提交SHA执行合并；未追加功能改动。实际交付与下一步统一见[CHG-003当前状态](changes/CHG-003-planning-performance-observability.md#当前状态)。
+- 本地main快进到功能合并提交`6369454`后，运行`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -q`，167项测试通过。合并前查询三个功能提交均无GitHub检查或状态记录，因此没有远程CI通过结论。此前上海三日真实摘要与组合验证仍适用，本轮没有新增真实模型/MCP请求、重启服务或修改正式数据库。
+- 同步Change与设计页，区分已合并的独立模块和未接入的正式规划流程。同步README的独立模块说明，工作区INDEX无需新增入口；文档链接、JSON示例、图引用和脚本语法复核通过。
