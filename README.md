@@ -185,7 +185,7 @@ npm run dev
 
 默认入口继续使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色。模型负责理解完整备注、选择景点与提出安排，程序核实地点并计算路线、参考时间和查询费用。开放备注不使用关键词分类，模型价格不进入预算。
 
-2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；主从调度、`ActivityTiming`、返程算法、缓存接入、后台补齐和正式前端预览仍待实施；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
+2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；其他后端模块按小步计划独立实施，默认入口与正式前端预览尚待接线；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
 
 当前代码已恢复到性能方案1—3之前，保留各阶段完整 JSON 示例及 `qwen3.7-flash` 配置。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
 
@@ -286,6 +286,8 @@ PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file
 ```
 
 输入文件须包含PlanningInput、PlanDraft与来源闭合的FactStore；命令不会代造POI或运行完整规划。
+
+F11b备用路线为`RouteBackfillService.run_async(planning_input, draft, facts, route_context, ...)`。先由`CurrentRouteService.create_route_context`建立同一行程上下文，当前查询与后台补齐共用该缓存；停止持有行程时调用`aclose()`。后台只查询每天已选地点的不同方向组合，公共交通09:00为参考；传入当前revision回调以阻止旧版本结果进入预览。服务本身不写数据库、不修改草稿；正式任务接线由F10完成。范围见[CHG-003 F11b](docs/changes/CHG-003-planning-performance-observability.md#f11b-route-backfill)。
 
 已知人均消费纯函数为`aggregate_reference_costs(planning_input, draft, facts)`：返回`ReferenceCostSummary`和按日明细，景点同日去重、每次用餐分别计、酒店单列。调用方按覆盖状态显示未知/部分已知，不能把全未知的小计0显示为“免费”或“总旅费0”；只使用cost已有值，不推算人数或全程预算是否足够。范围见[CHG-003消费汇总](docs/changes/CHG-003-planning-performance-observability.md#reference-cost)。
 

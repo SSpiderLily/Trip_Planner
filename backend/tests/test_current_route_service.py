@@ -18,13 +18,19 @@ from app.models.planning_v4.facts import (
 )
 from app.models.planning_v4.input import RequirementSummary, RuleSet, TripRequest
 from app.models.planning_v4.plan import DraftActivity, DraftDay, LodgingRef, PlanDraft
-from app.services.current_route_service import CurrentRouteError, query_current_routes
+from app.services.current_route_service import (
+    CurrentRouteError,
+    CurrentRouteService,
+    PlanRouteContext,
+    query_current_routes,
+)
 from app.services.endpoint_verification_service import (
     EndpointVerification,
     EndpointVerificationExecution,
 )
 from app.services.mcp_tool_executor import MCPToolExecutor
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
+from app.services.route_backfill_service import RouteBackfillService
 
 
 WINDOWS = (
@@ -618,6 +624,240 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
                 tool_executor=self.executor,
                 tool_timeout_seconds=1,
             )
+
+    def test_backfill_builds_distinct_directed_pairs_without_self_routes(self):
+        service = RouteBackfillService()
+        middle_day = self.draft.days[1]
+        repeated = middle_day.activities[0].model_copy(update={
+            "activity_id": "middle-one-repeat",
+            "slot_id": self.input.days[1].slots[1].slot_id,
+        })
+        revised_day = middle_day.model_copy(update={
+            "activities": (*middle_day.activities, repeated),
+        })
+        revised = self.draft.model_copy(update={
+            "days": (self.draft.days[0], revised_day, self.draft.days[2]),
+        })
+
+        jobs = service._build_jobs(revised, self.facts)
+        middle_jobs = [job for job in jobs if job.day_id == revised_day.day_id]
+        pairs = {(job.origin.poi_id, job.destination.poi_id) for job in middle_jobs}
+        self.assertEqual(len(middle_jobs), 6)
+        self.assertEqual(pairs, {
+            ("poi-hotel", "poi-middle-one"), ("poi-middle-one", "poi-hotel"),
+            ("poi-hotel", "poi-middle-two"), ("poi-middle-two", "poi-hotel"),
+            ("poi-middle-one", "poi-middle-two"), ("poi-middle-two", "poi-middle-one"),
+        })
+        self.assertTrue(all(origin != destination for origin, destination in pairs))
+
+    async def test_backfill_reuses_route_context_and_loads_new_revision_pois(self):
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        try:
+            current = await route_service.run_async(
+                self.input, self.draft, self.facts,
+                verified_departure_fact_id="fact-terminal",
+                current_context_revision=7,
+                only_edge=("day-2026-10-11", "middle-one", "middle-two"),
+                route_context=context,
+            )
+            self.assertEqual(len(self.fake_tool.calls), 3)
+            self.assertEqual(current.based_on_revision, self.draft.revision)
+
+            source = self.facts.sources[0]
+            new_place = PlaceFact(
+                fact_id="fact-middle-three",
+                poi_id="poi-middle-three",
+                name="中段景点三",
+                city="上海",
+                location=MapCoordinate(lng=121.500, lat=31.230),
+                source_refs=(source.tool_call_id,),
+            )
+            revised_facts = self.facts.model_copy(update={
+                "places": (*self.facts.places, new_place),
+            })
+            new_activity = DraftActivity(
+                activity_id="middle-three",
+                candidate_ref="candidate-middle-three",
+                slot_id=self.input.days[1].slots[3].slot_id,
+                kind="sightseeing",
+                poi_id=new_place.poi_id,
+                place_fact_id=new_place.fact_id,
+                duration_s=600,
+                duration_source="model",
+            )
+            revised_day = self.draft.days[1].model_copy(update={
+                "activities": (*self.draft.days[1].activities, new_activity),
+            })
+            revised_draft = self.draft.model_copy(update={
+                "revision": self.draft.revision + 1,
+                "base_revision": self.draft.revision,
+                "days": (revised_day,),
+            })
+            backfill = RouteBackfillService()
+            result = await backfill.run_async(
+                self.input, revised_draft, revised_facts, context,
+            )
+
+            # Twelve directed pairs in the edited day, three modes each. The
+            # previously queried middle-one -> middle-two facts are reused.
+            self.assertEqual(result.total_queries, 36)
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(len(self.fake_tool.calls), 36)
+            self.assertTrue(any(
+                arguments.get("origin") == "121.5,31.23"
+                or arguments.get("origin_coordinates") == "121.5,31.23"
+                or arguments.get("destination") == "121.5,31.23"
+                or arguments.get("destination_coordinates") == "121.5,31.23"
+                for _, arguments in self.fake_tool.calls
+            ))
+            transit_calls = [
+                arguments for tool, arguments in self.fake_tool.calls
+                if tool == TOOL_BY_MODE["transit"]
+                and arguments.get("origin") == "121.48,31.23"
+                and arguments.get("destination") == "121.485,31.23"
+            ]
+            self.assertEqual(len(transit_calls), 1)
+            self.assertEqual(transit_calls[0]["date"], "2026-10-11")
+            self.assertEqual(transit_calls[0]["time"], "09:00")
+            self.assertTrue(all(
+                mode.time_basis == ("reference" if mode.mode == "transit" else "unspecified")
+                for pair in result.pair_results for mode in pair.modes
+            ))
+        finally:
+            await context.aclose()
+
+    async def test_stale_backfill_late_result_is_cached_but_not_returned_to_preview(self):
+        self.fake_tool.delay = 0.05
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        latest_revision = [self.draft.revision]
+        try:
+            backfill = RouteBackfillService()
+            task = asyncio.create_task(backfill.run_async(
+                self.input,
+                self.draft.model_copy(update={"days": (self.draft.days[1],)}),
+                self.facts,
+                context,
+                current_revision=lambda: latest_revision[0],
+            ))
+            for _ in range(100):
+                if self.fake_tool.calls:
+                    break
+                await asyncio.sleep(0.002)
+            self.assertTrue(self.fake_tool.calls)
+            latest_revision[0] += 1
+            result = await task
+
+            self.assertEqual(result.status, "cancelled")
+            self.assertEqual(result.completed_queries, 0)
+            self.assertEqual(result.route_facts, ())
+            self.assertEqual(self.draft.revision, 4)
+            self.assertEqual(self.draft.days[1].activities[0].activity_id, "middle-one")
+            self.assertEqual(len(self.fake_tool.calls), 1)
+            self.assertEqual(context.route_cache.stats.external_loads, 1)
+        finally:
+            await context.aclose()
+
+    async def test_backfill_failure_reports_partial_without_changing_preview(self):
+        self.fake_tool.fail_modes.update({"transit", "bicycling", "walking"})
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        draft_before = self.draft.model_dump(mode="json")
+        facts_before = self.facts.model_dump(mode="json")
+        try:
+            result = await RouteBackfillService().run_async(
+                self.input,
+                self.draft.model_copy(update={"days": (self.draft.days[1],)}),
+                self.facts,
+                context,
+            )
+            self.assertEqual(result.status, "partial")
+            self.assertEqual(result.completed_queries, result.total_queries)
+            self.assertTrue(all(
+                mode.status == "error"
+                for pair in result.pair_results for mode in pair.modes
+            ))
+            self.assertEqual(self.draft.model_dump(mode="json"), draft_before)
+            self.assertEqual(self.facts.model_dump(mode="json"), facts_before)
+        finally:
+            await context.aclose()
+
+    async def test_route_context_keeps_first_fact_source_on_same_key_conflict(self):
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        try:
+            context.register_facts(self.facts)
+            original = next(place for place in self.facts.places if place.fact_id == "fact-middle-one")
+            conflicting = original.model_copy(update={
+                "fact_id": "fact-middle-one-alternate-source",
+                "source_refs": ("alternate-source",),
+            })
+            context.register_facts(FactStore(places=(conflicting,)))
+            resolved = context._resolve(
+                original.poi_id,
+                (float(original.location.lng), float(original.location.lat)),
+            )
+            self.assertEqual(context.alternative_source_count, 1)
+            self.assertEqual(resolved.fact_id, original.fact_id)
+            self.assertEqual(resolved.source_refs, original.source_refs)
+        finally:
+            await context.aclose()
+
+    async def test_route_context_coordinate_change_uses_new_cache_key(self):
+        route_service = CurrentRouteService(
+            tool_executor=self.executor, tool_timeout_seconds=1,
+        )
+        context = route_service.create_route_context(self.input, self.draft.plan_id)
+        first_day = self.draft.days[0]
+        first_draft = self.draft.model_copy(update={"days": (first_day,)})
+        original = next(place for place in self.facts.places if place.fact_id == "fact-arrival")
+        moved = original.model_copy(update={
+            "fact_id": "fact-arrival-reverified",
+            "location": MapCoordinate(lng=121.476, lat=31.230),
+        })
+        moved_facts = self.facts.model_copy(update={
+            "places": (*self.facts.places, moved),
+        })
+        revised_activity = first_day.activities[0].model_copy(update={
+            "place_fact_id": moved.fact_id,
+        })
+        revised_day = first_day.model_copy(update={"activities": (revised_activity,)})
+        revised_draft = first_draft.model_copy(update={
+            "revision": first_draft.revision + 1,
+            "base_revision": first_draft.revision,
+            "days": (revised_day,),
+        })
+        try:
+            first_result = await RouteBackfillService().run_async(
+                self.input, first_draft, self.facts, context,
+            )
+            second_result = await RouteBackfillService().run_async(
+                self.input, revised_draft, moved_facts, context,
+            )
+            self.assertEqual(first_result.total_queries, 6)
+            self.assertEqual(second_result.total_queries, 6)
+            self.assertEqual(len(self.fake_tool.calls), 12)
+            self.assertEqual(context.alternative_source_count, 0)
+            resolved = context._resolve("poi-arrival", (121.476, 31.23))
+            self.assertEqual(resolved.fact_id, moved.fact_id)
+            self.assertTrue(any(
+                "121.476,31.23" in {
+                    arguments.get("origin"), arguments.get("destination"),
+                    arguments.get("origin_coordinates"), arguments.get("destination_coordinates"),
+                }
+                for _, arguments in self.fake_tool.calls
+            ))
+        finally:
+            await context.aclose()
 
 
 if __name__ == "__main__":
