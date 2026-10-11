@@ -99,6 +99,17 @@ class TaskRepository:
                 raise RuntimeError('任务状态转换冲突')
             conn.execute('INSERT INTO task_results VALUES (?,?)', (task_id, dumps(result)))
 
+    def mark_preview_succeeded(self, task_id, incomplete=False):
+        """结束 v4 观测任务；预览快照独立保存，不写入 task_results。"""
+        with self.connection() as conn:
+            row = conn.execute(
+                "UPDATE tasks SET status='succeeded',finished_at=?,observation_incomplete=MAX(observation_incomplete,?) "
+                "WHERE task_id=? AND status='running'",
+                (now(), int(incomplete), task_id),
+            )
+            if row.rowcount != 1:
+                raise RuntimeError('任务状态转换冲突')
+
     def fail(self, task_id, code, message, step=None, incomplete=False):
         with self.connection() as conn:
             conn.execute("""UPDATE tasks SET status='failed',finished_at=?,error_code=?,error_message=?,error_step=?,
