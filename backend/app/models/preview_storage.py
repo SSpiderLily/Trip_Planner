@@ -58,11 +58,27 @@ class SavedPreview:
 
 
 @dataclass(frozen=True)
+class SavedPreviewMetadata:
+    plan_revision: int
+    source_store_version: int
+    save_id: str
+    saved_at: str
+
+
+@dataclass(frozen=True)
 class FinalSaveResult:
     status: Literal["saved", "already_saved", "stale"]
     # stale 或重放时仍返回当前最近成功保存的结果（如果存在）。
     final: SavedPreview | None
     current_store_version: int
+    receipt_store_version: int
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class PreviewRestoreResult:
+    record: StoredPreview
+    restored_from: SavedPreviewMetadata
     receipt_store_version: int
     replayed: bool
 
@@ -86,6 +102,22 @@ class PreviewConflict(PreviewRepositoryError):
 
 class PreviewIdentityConflict(PreviewRepositoryError):
     """快照试图改变不可变的计划、需求、运行或规则身份。"""
+
+
+class PreviewFinalUnavailable(PreviewRepositoryError):
+    """最近一次成功保存不存在或缺少可完整还原的计算快照。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class PreviewFinalChanged(PreviewRepositoryError):
+    """用户读取最终结果后，该最终结果已被另一份导出替换。"""
+
+    def __init__(self, latest: SavedPreviewMetadata):
+        super().__init__("最近一次成功保存已变化")
+        self.latest = latest
 
 
 class IdempotencyConflict(PreviewRepositoryError):

@@ -10,7 +10,25 @@ from pydantic import Field
 
 from app.models.planning_v4.base import ContractModel
 from app.models.planning_v4 import TripRequest
-from app.models.planning_v4_preview import PreviewEnvelope, PreviewSnapshot
+from app.models.planning_v4_preview import (
+    PreviewEnvelope,
+    PreviewFinalMetadata,
+    PreviewFinalSaveResponse,
+    PreviewFinalState,
+    PreviewRestoreResponse,
+    PreviewSnapshot,
+)
+from app.models.preview_storage import (
+    FinalSaveResult,
+    IdempotencyConflict,
+    PreviewAccessError,
+    PreviewConflict,
+    PreviewFinalChanged,
+    PreviewFinalUnavailable,
+    PreviewRestoreResult,
+    SavedPreview,
+    StoredPreview,
+)
 from app.services.observation_service import span
 from app.services.task_service import TaskError
 
@@ -241,6 +259,162 @@ class PreviewTaskService:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "预览暂不可用", 503) from exc
         if stored is None or stored.snapshot is None:
             return None
+        return PreviewEnvelope(
+            task_id=task_id,
+            plan_id=stored.preview.draft.plan_id,
+            store_version=stored.store_version,
+            plan_revision=stored.plan_revision,
+            preview=stored.preview,
+            timing=stored.timing,
+            cost=stored.cost,
+        )
+
+    async def final_state(self, task_id: str, access_token: str) -> PreviewFinalState:
+        """返回最近保存是否具备完整快照，可用时只公开元数据。"""
+        job = await self._require_ready_job(task_id, access_token)
+        try:
+            final = await asyncio.to_thread(self.repository.read_final, access_token)
+        except Exception as exc:
+            raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "保存结果暂不可用", 503) from exc
+        if final is None:
+            return PreviewFinalState(task_id=task_id, plan_id=job["plan_id"], restorable=False)
+        metadata = self._final_metadata(final)
+        restorable = self._is_complete_final(final)
+        return PreviewFinalState(
+            task_id=task_id,
+            plan_id=job["plan_id"],
+            restorable=restorable,
+            final=metadata,
+            unavailable_reason=None if restorable else "snapshot_incomplete",
+        )
+
+    async def save_final(
+        self,
+        task_id: str,
+        access_token: str,
+        *,
+        save_id: str,
+        source_store_version: int,
+    ) -> PreviewFinalSaveResponse:
+        job = await self._require_ready_job(task_id, access_token)
+        try:
+            result: FinalSaveResult = await asyncio.to_thread(
+                self.repository.save_final,
+                access_token,
+                save_id=save_id,
+                source_store_version=source_store_version,
+            )
+        except IdempotencyConflict as exc:
+            raise TaskError("IDEMPOTENCY_CONFLICT", str(exc), 409) from exc
+        except PreviewAccessError as exc:
+            raise TaskError("TASK_NOT_FOUND", "预览任务不存在", 404) from exc
+        except ValueError as exc:
+            raise TaskError("INVALID_FINAL_SAVE", str(exc), 422) from exc
+        except Exception as exc:
+            raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "保存最终结果失败", 503) from exc
+
+        final = result.final
+        restorable = final is not None and self._is_complete_final(final)
+        return PreviewFinalSaveResponse(
+            task_id=task_id,
+            plan_id=job["plan_id"],
+            status=result.status,
+            replayed=result.replayed,
+            current_store_version=result.current_store_version,
+            receipt_store_version=result.receipt_store_version,
+            restorable=restorable,
+            final=self._final_metadata(final) if final is not None else None,
+            unavailable_reason="snapshot_incomplete" if final is not None and not restorable else None,
+        )
+
+    async def restore_final(
+        self,
+        task_id: str,
+        access_token: str,
+        *,
+        restore_id: str,
+        expected_store_version: int,
+        expected_plan_revision: int,
+        expected_save_id: str,
+    ) -> PreviewRestoreResponse:
+        await self._require_ready_job(task_id, access_token)
+        try:
+            result: PreviewRestoreResult = await asyncio.to_thread(
+                self.repository.restore_final,
+                access_token,
+                restore_id=restore_id,
+                expected_store_version=expected_store_version,
+                expected_plan_revision=expected_plan_revision,
+                expected_save_id=expected_save_id,
+            )
+        except PreviewConflict as exc:
+            error = TaskError("PREVIEW_VERSION_CONFLICT", str(exc), 409)
+            error.details.update({
+                "current_store_version": exc.current_store_version,
+                "current_plan_revision": exc.current_plan_revision,
+            })
+            raise error from exc
+        except PreviewFinalChanged as exc:
+            error = TaskError("FINAL_CHANGED", str(exc), 409)
+            error.details["final"] = self._metadata_model(exc.latest).model_dump(mode="json")
+            raise error from exc
+        except PreviewFinalUnavailable as exc:
+            code = "FINAL_NOT_AVAILABLE" if exc.reason == "not_saved" else "FINAL_SNAPSHOT_UNAVAILABLE"
+            message = "还没有成功保存的行程" if exc.reason == "not_saved" else "保存结果缺少完整时间或消费信息，暂时无法还原"
+            raise TaskError(code, message, 409) from exc
+        except IdempotencyConflict as exc:
+            raise TaskError("IDEMPOTENCY_CONFLICT", str(exc), 409) from exc
+        except PreviewAccessError as exc:
+            raise TaskError("TASK_NOT_FOUND", "预览任务不存在", 404) from exc
+        except ValueError as exc:
+            raise TaskError("INVALID_FINAL_RESTORE", str(exc), 422) from exc
+        except Exception as exc:
+            raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "还原保存结果失败", 503) from exc
+
+        return PreviewRestoreResponse(
+            envelope=self._preview_envelope(task_id, result.record),
+            restored_from=self._metadata_model(result.restored_from),
+            replayed=result.replayed,
+            receipt_store_version=result.receipt_store_version,
+        )
+
+    async def _require_ready_job(self, task_id: str, access_token: str) -> dict:
+        job = await self.status(task_id, access_token)
+        if job is None:
+            raise TaskError("TASK_NOT_FOUND", "任务不存在", 404)
+        if not job["preview_ready"]:
+            raise TaskError("PREVIEW_NOT_READY", "预览尚未就绪", 409)
+        return job
+
+    @staticmethod
+    def _is_complete_final(final: SavedPreview) -> bool:
+        try:
+            return final.snapshot is not None
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _final_metadata(final: SavedPreview) -> PreviewFinalMetadata:
+        return PreviewFinalMetadata(
+            save_id=final.save_id,
+            saved_at=final.saved_at,
+            source_store_version=final.source_store_version,
+            plan_revision=final.plan_revision,
+        )
+
+    @staticmethod
+    def _metadata_model(metadata) -> PreviewFinalMetadata:
+        return PreviewFinalMetadata(
+            save_id=metadata.save_id,
+            saved_at=metadata.saved_at,
+            source_store_version=metadata.source_store_version,
+            plan_revision=metadata.plan_revision,
+        )
+
+    @staticmethod
+    def _preview_envelope(task_id: str, stored: StoredPreview) -> PreviewEnvelope:
+        if stored.snapshot is None:
+            raise TaskError("PREVIEW_UNAVAILABLE", "预览暂不可用", 503)
         return PreviewEnvelope(
             task_id=task_id,
             plan_id=stored.preview.draft.plan_id,

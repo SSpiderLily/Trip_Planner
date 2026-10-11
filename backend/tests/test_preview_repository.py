@@ -9,13 +9,18 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from app.models.planning_v4.plan import ItineraryPreview
+from app.models.planning_v4_preview import PreviewSnapshot
 from app.models.preview_storage import (
     IdempotencyConflict,
     PreviewAccessError,
     PreviewConflict,
+    PreviewFinalChanged,
+    PreviewFinalUnavailable,
     PreviewIdentityConflict,
 )
+from app.services.planning_v4_timing import DayTimingResult, PlanTimingResult, ReturnTiming
 from app.services.preview_repository import PreviewRepository
+from app.services.reference_cost import aggregate_reference_costs
 from app.services.task_repository import TaskRepository
 from test_planning_v4_contract import make_full_baseline_preview
 
@@ -32,6 +37,44 @@ def database(path: Path):
 
 def baseline_preview() -> ItineraryPreview:
     return make_full_baseline_preview()[-1]
+
+
+def baseline_snapshot() -> PreviewSnapshot:
+    planning_input, facts, _, _, preview = make_full_baseline_preview()
+    summaries = {summary.day_id: summary for summary in preview.day_summaries}
+    timing = PlanTimingResult(
+        plan_id=preview.draft.plan_id,
+        based_on_revision=preview.draft.revision,
+        days=tuple(
+            DayTimingResult(
+                day_id=day.day_id,
+                summary=summaries[day.day_id],
+                scheduling_decision="conditional",
+                return_timing=ReturnTiming(status="not_applicable", buffer_s=0),
+            )
+            for day in preview.draft.days
+        ),
+    )
+    cost = aggregate_reference_costs(planning_input, preview.draft, facts)
+    return PreviewSnapshot(preview=preview, timing=timing, cost=cost)
+
+
+def revised_snapshot(snapshot: PreviewSnapshot, revision: int, calculation_id: str) -> PreviewSnapshot:
+    preview_value = snapshot.preview.model_dump(mode="json")
+    preview_value["draft"]["revision"] = revision
+    preview_value["draft"]["base_revision"] = revision - 1
+    for leg in preview_value["draft"]["legs"]:
+        leg["plan_revision"] = revision
+    preview_value["validation"]["based_on_revision"] = revision
+    for issue in preview_value["validation"]["issues"]:
+        issue["based_on_revision"] = revision
+    preview_value["calculation"]["based_on_revision"] = revision
+    preview_value["calculation"]["calculation_id"] = calculation_id
+    return PreviewSnapshot.model_validate({
+        "preview": preview_value,
+        "timing": snapshot.timing.model_copy(update={"based_on_revision": revision}).model_dump(mode="json"),
+        "cost": snapshot.cost.model_copy(update={"based_on_revision": revision}).model_dump(mode="json"),
+    })
 
 
 def changed_calculation(preview: ItineraryPreview, calculation_id: str) -> ItineraryPreview:
@@ -367,6 +410,250 @@ class PreviewRepositoryTest(unittest.TestCase):
             expected_plan_revision=1, command_id="business-invalid-but-structured",
         )
         self.assertEqual(self.repo.get_preview(self.created.access_token).preview, preview)
+
+
+class PreviewFinalRestoreRepositoryTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "restore.sqlite3"
+        self.repo = PreviewRepository(self.path)
+        self.repo.initialize()
+        self.snapshot = baseline_snapshot()
+        self.created = self.repo.create(self.snapshot)
+        self.saved = self.repo.save_final(
+            self.created.access_token, save_id="save-original", source_store_version=1,
+        ).final
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_restore_creates_new_revision_and_preserves_saved_snapshot_and_final(self):
+        edited = revised_snapshot(self.snapshot, 2, "calc-after-export")
+        self.repo.replace_preview(
+            self.created.access_token, edited, expected_store_version=1,
+            expected_plan_revision=1, command_id="edit-after-export",
+        )
+
+        restored = self.repo.restore_final(
+            self.created.access_token,
+            restore_id="restore-once",
+            expected_store_version=2,
+            expected_plan_revision=2,
+            expected_save_id="save-original",
+        )
+
+        expected = revised_snapshot(self.snapshot, 3, self.snapshot.preview.calculation.calculation_id)
+        self.assertEqual(restored.record.store_version, 3)
+        self.assertEqual(restored.record.plan_revision, 3)
+        self.assertEqual(restored.record.snapshot, expected)
+        self.assertEqual(restored.record.snapshot.preview.draft.base_revision, 2)
+        self.assertEqual(restored.restored_from.save_id, "save-original")
+        self.assertFalse(restored.replayed)
+        self.assertEqual(restored.receipt_store_version, 3)
+        self.assertEqual(self.repo.read_final(self.created.access_token), self.saved)
+
+        with self.assertRaises(PreviewConflict):
+            self.repo.replace_preview(
+                self.created.access_token, self.snapshot,
+                expected_store_version=2,
+                expected_plan_revision=2, command_id="late-pre-restore-route",
+            )
+
+    def test_restore_replay_keeps_original_source_metadata_after_final_changes(self):
+        edited = revised_snapshot(self.snapshot, 2, "calc-before-restore")
+        self.repo.replace_preview(
+            self.created.access_token, edited, expected_store_version=1,
+            expected_plan_revision=1, command_id="edit-before-restore",
+        )
+        request = {
+            "restore_id": "restore-replay",
+            "expected_store_version": 2,
+            "expected_plan_revision": 2,
+            "expected_save_id": "save-original",
+        }
+        first = self.repo.restore_final(self.created.access_token, **request)
+        second_save = self.repo.save_final(
+            self.created.access_token, save_id="save-after-restore", source_store_version=3,
+        )
+        replay = self.repo.restore_final(self.created.access_token, **request)
+
+        self.assertEqual(second_save.status, "saved")
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.record.store_version, 3)
+        self.assertEqual(replay.receipt_store_version, first.receipt_store_version)
+        self.assertEqual(replay.restored_from.save_id, "save-original")
+        self.assertEqual(self.repo.read_final(self.created.access_token).save_id, "save-after-restore")
+
+    def test_restore_id_conflict_and_stale_versions_are_rejected(self):
+        request = {
+            "restore_id": "same-restore-id",
+            "expected_store_version": 1,
+            "expected_plan_revision": 1,
+            "expected_save_id": "save-original",
+        }
+        self.repo.restore_final(self.created.access_token, **request)
+        with self.assertRaises(IdempotencyConflict):
+            self.repo.restore_final(
+                self.created.access_token,
+                restore_id="same-restore-id",
+                expected_store_version=1,
+                expected_plan_revision=1,
+                expected_save_id="another-save",
+            )
+        with self.assertRaises(PreviewConflict):
+            self.repo.restore_final(
+                self.created.access_token,
+                restore_id="stale-restore",
+                expected_store_version=1,
+                expected_plan_revision=1,
+                expected_save_id="save-original",
+            )
+
+    def test_restore_rejects_a_final_replaced_after_the_user_read_it(self):
+        edited = revised_snapshot(self.snapshot, 2, "calc-before-replacement")
+        updated = self.repo.replace_preview(
+            self.created.access_token, edited, expected_store_version=1,
+            expected_plan_revision=1, command_id="edit-before-final-replacement",
+        )
+        self.repo.save_final(
+            self.created.access_token, save_id="save-replacement",
+            source_store_version=updated.record.store_version,
+        )
+
+        with self.assertRaises(PreviewFinalChanged) as raised:
+            self.repo.restore_final(
+                self.created.access_token,
+                restore_id="restore-old-final",
+                expected_store_version=2,
+                expected_plan_revision=2,
+                expected_save_id="save-original",
+            )
+        self.assertEqual(raised.exception.latest.save_id, "save-replacement")
+
+    def test_missing_or_incomplete_final_is_not_restorable(self):
+        other = self.repo.create(changed_plan_identity(baseline_preview(), "plan-incomplete-final"))
+        self.assertRaises(
+            PreviewFinalUnavailable,
+            self.repo.restore_final,
+            other.access_token,
+            restore_id="no-final",
+            expected_store_version=1,
+            expected_plan_revision=1,
+            expected_save_id="missing",
+        )
+        self.repo.save_final(other.access_token, save_id="legacy-final", source_store_version=1)
+        with self.assertRaises(PreviewFinalUnavailable) as raised:
+            self.repo.restore_final(
+                other.access_token,
+                restore_id="incomplete-final",
+                expected_store_version=1,
+                expected_plan_revision=1,
+                expected_save_id="legacy-final",
+            )
+        self.assertEqual(raised.exception.reason, "snapshot_incomplete")
+
+    def test_restore_preserves_pending_and_failed_calculation_states(self):
+        value = self.snapshot.model_dump(mode="json")
+        value["preview"]["calculation"]["current_routes"] = "failed"
+        value["preview"]["calculation"]["alternative_backfill"] = "failed"
+        failed_snapshot = PreviewSnapshot.model_validate(value)
+        repo = PreviewRepository(Path(self.temp.name) / "failed-status.sqlite3")
+        repo.initialize()
+        created = repo.create(failed_snapshot)
+        repo.save_final(created.access_token, save_id="save-failed-status", source_store_version=1)
+
+        restored = repo.restore_final(
+            created.access_token,
+            restore_id="restore-failed-status",
+            expected_store_version=1,
+            expected_plan_revision=1,
+            expected_save_id="save-failed-status",
+        )
+
+        self.assertEqual(restored.record.snapshot.preview.calculation.current_routes, "failed")
+        self.assertEqual(restored.record.snapshot.preview.calculation.alternative_backfill, "failed")
+
+    def test_restore_receipt_failure_rolls_back_draft_update(self):
+        before = self.repo.get_preview(self.created.access_token)
+        with database(self.path) as conn:
+            conn.execute(
+                """CREATE TRIGGER fail_restore_receipt BEFORE INSERT ON preview_restore_receipts
+                   BEGIN SELECT RAISE(ABORT, 'injected restore receipt failure'); END"""
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repo.restore_final(
+                self.created.access_token,
+                restore_id="restore-transaction-failure",
+                expected_store_version=1,
+                expected_plan_revision=1,
+                expected_save_id="save-original",
+            )
+        with database(self.path) as conn:
+            conn.execute("DROP TRIGGER fail_restore_receipt")
+            receipt = conn.execute(
+                "SELECT 1 FROM preview_restore_receipts WHERE restore_id='restore-transaction-failure'"
+            ).fetchone()
+        after = self.repo.get_preview(self.created.access_token)
+        self.assertEqual(after, before)
+        self.assertIsNone(receipt)
+        self.assertEqual(self.repo.read_final(self.created.access_token), self.saved)
+
+    def test_concurrent_restores_with_same_base_have_one_winner(self):
+        barrier = threading.Barrier(2)
+        outcomes = []
+        lock = threading.Lock()
+
+        def restore(index: int) -> None:
+            barrier.wait(timeout=3)
+            try:
+                result = self.repo.restore_final(
+                    self.created.access_token,
+                    restore_id=f"concurrent-restore-{index}",
+                    expected_store_version=1,
+                    expected_plan_revision=1,
+                    expected_save_id="save-original",
+                )
+                outcome = ("restored", result.record.store_version)
+            except PreviewConflict:
+                outcome = ("conflict", None)
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=restore, args=(index,)) for index in (1, 2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sorted(value[0] for value in outcomes), ["conflict", "restored"])
+        self.assertEqual(self.repo.get_preview(self.created.access_token).store_version, 2)
+
+    def test_restore_receipts_are_bounded_and_expired_ids_fail_cas(self):
+        repo = PreviewRepository(self.path, receipt_limit=2)
+        current_store, current_revision = 1, 1
+        first_request = {
+            "restore_id": "bounded-restore-1",
+            "expected_store_version": current_store,
+            "expected_plan_revision": current_revision,
+            "expected_save_id": "save-original",
+        }
+        for index in range(3):
+            result = repo.restore_final(self.created.access_token, **{
+                "restore_id": f"bounded-restore-{index + 1}",
+                "expected_store_version": current_store,
+                "expected_plan_revision": current_revision,
+                "expected_save_id": "save-original",
+            })
+            current_store = result.record.store_version
+            current_revision = result.record.plan_revision
+        with database(self.path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM preview_restore_receipts WHERE plan_id=?",
+                (self.snapshot.preview.draft.plan_id,),
+            ).fetchone()[0]
+        self.assertEqual(count, 2)
+        with self.assertRaises(PreviewConflict):
+            repo.restore_final(self.created.access_token, **first_request)
 
 
 if __name__ == "__main__":

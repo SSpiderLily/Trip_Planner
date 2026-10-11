@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, PositiveInt, model_validator
+from pydantic import Field, PositiveInt, StrictInt, model_validator
 
 from .planning_v4.base import ContractModel
 from .planning_v4.cost import ReferenceCostSummary
@@ -69,6 +69,70 @@ class PreviewTaskAccepted(ContractModel):
     plan_id: str
     access_token: str
     status: Literal["accepted"]
+
+
+class PreviewFinalMetadata(ContractModel):
+    """最近一次成功最终保存的元数据；不代表历史列表。"""
+
+    save_id: str
+    saved_at: str
+    source_store_version: PositiveInt
+    plan_revision: PositiveInt
+
+
+class PreviewFinalState(ContractModel):
+    task_id: str
+    plan_id: str
+    restorable: bool
+    final: PreviewFinalMetadata | None = None
+    unavailable_reason: Literal["snapshot_incomplete"] | None = None
+
+    @model_validator(mode="after")
+    def validate_final_state(self):
+        if self.restorable != (self.final is not None and self.unavailable_reason is None):
+            raise ValueError("restorable 必须与最终结果状态一致")
+        if self.unavailable_reason is not None and self.final is None:
+            raise ValueError("最终结果不可用原因必须对应已保存记录")
+        return self
+
+
+class PreviewFinalSaveRequest(ContractModel):
+    save_id: str = Field(min_length=1, max_length=256)
+    source_store_version: StrictInt = Field(gt=0)
+
+
+class PreviewFinalSaveResponse(ContractModel):
+    task_id: str
+    plan_id: str
+    status: Literal["saved", "already_saved", "stale"]
+    replayed: bool
+    current_store_version: PositiveInt
+    receipt_store_version: PositiveInt
+    restorable: bool
+    final: PreviewFinalMetadata | None = None
+    unavailable_reason: Literal["snapshot_incomplete"] | None = None
+
+    @model_validator(mode="after")
+    def validate_final_state(self):
+        if self.restorable != (self.final is not None and self.unavailable_reason is None):
+            raise ValueError("restorable 必须与最终结果状态一致")
+        if self.unavailable_reason is not None and self.final is None:
+            raise ValueError("最终结果不可用原因必须对应已保存记录")
+        return self
+
+
+class PreviewFinalRestoreRequest(ContractModel):
+    restore_id: str = Field(min_length=1, max_length=256)
+    expected_store_version: StrictInt = Field(gt=0)
+    expected_plan_revision: StrictInt = Field(gt=0)
+    expected_save_id: str = Field(min_length=1, max_length=256)
+
+
+class PreviewRestoreResponse(ContractModel):
+    envelope: PreviewEnvelope
+    restored_from: PreviewFinalMetadata
+    replayed: bool
+    receipt_store_version: PositiveInt
 
 
 class BackfillTaskProgress(ContractModel):

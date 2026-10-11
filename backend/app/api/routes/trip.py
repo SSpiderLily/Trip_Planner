@@ -4,7 +4,16 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request, Query, Header
 from ...services.task_service import TaskError
 from ...models.planning_v4 import TripRequest as PlanningV4TripRequest
-from ...models.planning_v4_preview import PreviewEnvelope, PreviewTaskAccepted, PreviewTaskStatus
+from ...models.planning_v4_preview import (
+    PreviewEnvelope,
+    PreviewFinalRestoreRequest,
+    PreviewFinalSaveRequest,
+    PreviewFinalSaveResponse,
+    PreviewFinalState,
+    PreviewRestoreResponse,
+    PreviewTaskAccepted,
+    PreviewTaskStatus,
+)
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest, RecalculateDayRequest
@@ -85,6 +94,55 @@ async def v4_preview(task_id: str, request: Request, authorization: str | None =
     if payload is None:
         raise HTTPException(status_code=503, detail={"code": "PREVIEW_UNAVAILABLE", "message": "预览暂不可用"})
     return payload
+
+
+@router.get("/v4/tasks/{task_id}/final", response_model=PreviewFinalState)
+async def v4_final_state(task_id: str, request: Request, authorization: str | None = Header(default=None)):
+    token = _v4_bearer(authorization)
+    try:
+        return await request.app.state.preview_task_service.final_state(task_id, token)
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.post("/v4/tasks/{task_id}/final/save", response_model=PreviewFinalSaveResponse)
+async def v4_save_final(
+    task_id: str,
+    body: PreviewFinalSaveRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    try:
+        return await request.app.state.preview_task_service.save_final(
+            task_id,
+            token,
+            save_id=body.save_id,
+            source_store_version=body.source_store_version,
+        )
+    except TaskError as exc:
+        raise task_http(exc)
+
+
+@router.post("/v4/tasks/{task_id}/final/restore", response_model=PreviewRestoreResponse)
+async def v4_restore_final(
+    task_id: str,
+    body: PreviewFinalRestoreRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = _v4_bearer(authorization)
+    try:
+        return await request.app.state.preview_task_service.restore_final(
+            task_id,
+            token,
+            restore_id=body.restore_id,
+            expected_store_version=body.expected_store_version,
+            expected_plan_revision=body.expected_plan_revision,
+            expected_save_id=body.expected_save_id,
+        )
+    except TaskError as exc:
+        raise task_http(exc)
 
 
 @router.get("/tasks")
