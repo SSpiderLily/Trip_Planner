@@ -5,10 +5,11 @@ import { mixedSyntheticEnvelope, shortDepartureSyntheticEnvelope } from './v4Pre
 
 const source = await readFile(new URL('../src/utils/v4PreviewMapper.ts', import.meta.url), 'utf8')
 const pageSource = await readFile(new URL('../src/views/TripPreview.vue', import.meta.url), 'utf8')
+const exportSource = await readFile(new URL('../src/views/TripPreviewExport.vue', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
-const { formatReferenceDuration, mapV4Preview } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { formatPreviewEvidenceTime, formatReferenceDuration, mapV4Preview } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 
 const mixed = mapV4Preview(mixedSyntheticEnvelope())
 const day = mixed.days[0]
@@ -37,6 +38,40 @@ assert.equal(day.recommendations.filter(candidate => candidate.kind === 'sightse
 assert.equal(day.recommendations.filter(candidate => candidate.kind === 'meal').length, 1)
 assert.ok(!day.recommendations.some(candidate => candidate.id === 'candidate-selected-sight'))
 assert.equal(formatReferenceDuration(1800), '0小时30分钟')
+
+const readableEnvelope = mixedSyntheticEnvelope()
+const rawRouteIssue = readableEnvelope.preview.validation.issues.find(issue => issue.issue_id === 'issue-leg-unknown')
+rawRouteIssue.message = '路段耗时尚未核实：missing_route_leg。'
+const dayId = readableEnvelope.preview.draft.days[0].day_id
+readableEnvelope.preview.validation.issues.push(
+  {
+    issue_id: 'issue-short-day', code: 'departure_day_below_minimum_with_activities',
+    category: 'known_conflict', severity: 'error', scope: 'day', day_id: dayId, target_id: null,
+    message: 'F07 已证实离开日可用时间不足3小时；现有活动仍保留，但需要调整。',
+  },
+  {
+    issue_id: 'issue-activity-overrun', code: 'activity_exceeds_available_end',
+    category: 'known_conflict', severity: 'error', scope: 'activity', day_id: dayId,
+    target_id: 'activity-sight-1', message: 'F07已证实活动结束时间超过该日已核实的可用终点。',
+  },
+)
+const rawRouteMessage = rawRouteIssue.message
+const readable = mapV4Preview(readableEnvelope)
+const readableDay = readable.days[0]
+assert.equal(readableDay.legs[0].issues.find(issue => issue.issue_id === 'issue-leg-unknown').message,
+  '尚未查到该路段耗时，安排时间待核实。')
+assert.ok(!readableDay.legs[0].issues.some(issue => /missing_route_leg|F07/.test(issue.message)))
+assert.match(readableDay.issues.find(issue => issue.issue_id === 'issue-short-day').message,
+  /不足 3 小时；现有活动仍保留，但需要调整/)
+assert.match(readableDay.activities[0].issues.find(issue => issue.issue_id === 'issue-activity-overrun').message,
+  /超过已核实的当日可用终点/)
+assert.ok(!readableDay.issues.some(issue => /\bF07\b|missing_route_leg/.test(issue.message)))
+assert.equal(rawRouteIssue.message, rawRouteMessage, 'mapping must not rewrite the original envelope')
+assert.match(formatPreviewEvidenceTime('2026-11-01T04:20:00Z'), /\d{1,2}(月|\/)\d{1,2}/)
+assert.doesNotMatch(formatPreviewEvidenceTime('2026-11-01T04:20:00Z'), /T|Z/)
+assert.equal(formatPreviewEvidenceTime('not-a-time'), null)
+assert.match(exportSource, /formatPreviewEvidenceTime\(source\.queried_at\)/)
+assert.doesNotMatch(exportSource, /\{\{\s*source\.queried_at\s*\}\}/, 'export must not render raw machine timestamps')
 
 const numberedEnvelope = mixedSyntheticEnvelope()
 const numberedDraftDay = numberedEnvelope.preview.draft.days[0]

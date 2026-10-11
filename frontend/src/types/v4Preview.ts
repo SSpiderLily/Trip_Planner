@@ -38,6 +38,52 @@ export interface V4PreviewEnvelope {
   cost: ReferenceCostSummary
 }
 
+export interface V4FinalMetadata {
+  save_id: string
+  saved_at: string
+  source_store_version: number
+  plan_revision: number
+}
+
+export interface V4FinalState {
+  task_id: string
+  plan_id: string
+  restorable: boolean
+  final: V4FinalMetadata | null
+  unavailable_reason: 'snapshot_incomplete' | null
+}
+
+export interface V4FinalSaveRequest {
+  save_id: string
+  source_store_version: number
+}
+
+export interface V4FinalSaveResponse {
+  task_id: string
+  plan_id: string
+  status: 'saved' | 'already_saved' | 'stale'
+  replayed: boolean
+  current_store_version: number
+  receipt_store_version: number
+  restorable: boolean
+  final: V4FinalMetadata | null
+  unavailable_reason: 'snapshot_incomplete' | null
+}
+
+export interface V4FinalRestoreRequest {
+  restore_id: string
+  expected_store_version: number
+  expected_plan_revision: number
+  expected_save_id: string
+}
+
+export interface V4RestoreResponse {
+  envelope: V4PreviewEnvelope
+  restored_from: V4FinalMetadata
+  replayed: boolean
+  receipt_store_version: number
+}
+
 export interface ItineraryPreview {
   schema_version: 4
   preview_id: string

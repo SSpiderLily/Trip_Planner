@@ -1,5 +1,14 @@
 import axios from 'axios'
-import type { V4PreviewAccess, V4PreviewEnvelope, V4TaskStatus } from '@/types/v4Preview'
+import type {
+  V4FinalSaveRequest,
+  V4FinalSaveResponse,
+  V4FinalState,
+  V4FinalRestoreRequest,
+  V4PreviewAccess,
+  V4PreviewEnvelope,
+  V4RestoreResponse,
+  V4TaskStatus,
+} from '@/types/v4Preview'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 const CURRENT_PREVIEW_KEY = 'trip_planner_v4_current_preview_v1'
@@ -54,6 +63,66 @@ export async function getV4Preview(access: V4PreviewAccess): Promise<V4PreviewEn
     { headers: authorizationHeader(access) },
   )
   return response.data as V4PreviewEnvelope
+}
+
+export async function getV4FinalState(access: V4PreviewAccess): Promise<V4FinalState> {
+  const response = await previewClient.get(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/final`,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4FinalState
+}
+
+export async function saveV4Final(
+  access: V4PreviewAccess,
+  request: V4FinalSaveRequest,
+): Promise<V4FinalSaveResponse> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/final/save`,
+    request,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4FinalSaveResponse
+}
+
+export async function restoreV4Final(
+  access: V4PreviewAccess,
+  request: V4FinalRestoreRequest,
+): Promise<V4RestoreResponse> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/final/restore`,
+    request,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4RestoreResponse
+}
+
+export function v4FinalErrorMessage(error: unknown, action: 'save' | 'restore'): string {
+  if (axios.isAxiosError(error)) {
+    const code = error.response?.data?.detail?.code
+    if (error.response?.status === 409) {
+      if (code === 'FINAL_NOT_AVAILABLE' || code === 'FINAL_SNAPSHOT_UNAVAILABLE') {
+        return '没有可还原的完整保存结果。当前行程内容保持不变。'
+      }
+      return action === 'restore'
+        ? '行程或保存结果已有变化，当前内容保持不变。请重新查看后再试。'
+        : '行程已更新，这次保存没有覆盖上次成功保存的内容。图片仍可使用。'
+    }
+    if (error.response?.status === 503 || (error.response?.status && error.response.status >= 500)) {
+      return action === 'restore'
+        ? '保存服务暂时不可用，当前行程内容保持不变。'
+        : '保存服务暂时不可用，图片已导出。'
+    }
+    if (error.response?.status === 404) return '无法访问这份行程，当前页面内容保持不变。'
+    if (error.code === 'ECONNABORTED' || !error.response) {
+      return action === 'restore'
+        ? '暂时无法还原，当前行程内容保持不变。'
+        : '保存服务暂时无法连接，图片已导出。'
+    }
+  }
+  return action === 'restore'
+    ? '还原失败，当前行程内容保持不变。'
+    : '保存未完成，图片已导出。'
 }
 
 export function v4PreviewErrorMessage(error: unknown): string {

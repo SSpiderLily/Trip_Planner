@@ -161,7 +161,7 @@ npm run dev
 
 ## 📝 使用指南
 
-以下描述当前实现。2026-10-09已确认收敛核心需求，并调整预览、导出保存、主要消费计算及用户页面与后台工作台的边界；这些调整尚未实现，目标规则见[CONTEXT](CONTEXT.md#本轮核心范围2026-10-09确认待实现)，当前讨论见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#核心范围与流程讨论2026-10-09)。
+以下描述当前实现。2026-10-09已确认收敛核心需求，并调整预览、导出保存、主要消费计算及用户页面与后台工作台的边界；这些调整正在v4分步接入，默认首页仍为v3；目标规则见[CONTEXT](CONTEXT.md#本轮核心范围2026-10-09确认待实现)，当前讨论见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#核心范围与流程讨论2026-10-09)。
 
 1. 填写目的地、到达与离开日期时间，可选人均参考预算、到离地点、住处和完整备注。首页保持默认公共交通结合步行，出行偏好通过备注表达。
 2. 提交后查看真实执行步骤；结果按天展示活动、用餐区域、交通参考和地图位置。到离地点未填的一端不生成接驳。
@@ -185,7 +185,7 @@ npm run dev
 
 默认入口继续使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色。模型负责理解完整备注、选择景点与提出安排，程序核实地点并计算路线、参考时间和查询费用。开放备注不使用关键词分类，模型价格不进入预算。
 
-2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；其他后端模块按小步计划独立实施，默认入口与正式前端预览尚待接线；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
+2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；其他后端模块按小步计划独立实施，默认入口尚待切换；正式v4预览可单独访问；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
 
 当前代码已恢复到性能方案1—3之前，保留各阶段完整 JSON 示例及 `qwen3.7-flash` 配置。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
 
@@ -294,7 +294,7 @@ F11b备用路线为`RouteBackfillService.run_async(planning_input, draft, facts,
 
 已知人均消费纯函数为`aggregate_reference_costs(planning_input, draft, facts)`：返回`ReferenceCostSummary`和按日明细，景点同日去重、每次用餐分别计、酒店单列。调用方按覆盖状态显示未知/部分已知，不能把全未知的小计0显示为“免费”或“总旅费0”；只使用cost已有值，不推算人数或全程预算是否足够。范围见[CHG-003消费汇总](docs/changes/CHG-003-planning-performance-observability.md#reference-cost)。
 
-独立预览存储模块为`PreviewRepository`：初始化专用SQLite路径后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。调用方须先做业务引用校验；仓库只验证模型结构和存储身份/版本。尚未接入默认任务API或浏览器，范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
+独立预览存储模块为`PreviewRepository`：初始化专用SQLite路径后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。调用方须先做业务引用校验；仓库只验证模型结构和存储身份/版本。v4任务API和浏览器已单独接入，默认首页仍沿用v3；范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
 
 F09a每日检查为纯服务：`validate_daily_plan(planning_input, draft, facts, candidates, timing)`返回每日完整性、可行性、需求落实和对应位置的提示；`build_day_summaries`生成时间摘要。缺价格、天气或部分交通不单独触发补查，补查轮次由F09b管理。尚未接入正式入口，范围见[CHG-003 F09a](docs/changes/CHG-003-planning-performance-observability.md#f09a-daily-validation)。
 
@@ -368,7 +368,7 @@ Production deployment test.
 
 ### v4用户预览页面
 
-前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。此步只读，首页尚未改为v4提交，浏览器未同步编辑与导出保存后续接入，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
+前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；首页尚未改为v4提交，浏览器编辑继续实施，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
 
 映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
 
@@ -383,3 +383,10 @@ Production deployment test.
 `GET /api/trip/v4/tasks/{task_id}/final`返回上次成功保存的元数据；`POST .../final/save`携带`save_id`与`source_store_version`，只复制同版本服务端草稿。`POST .../final/restore`携带`restore_id`、`expected_store_version`、`expected_plan_revision`及`expected_save_id`，原子还原成新草稿版本。均使用该任务Bearer标识，不接受客户端快照，不提供历史列表。
 
 保存过期返回`stale`；还原版本冲突或最后保存变化返回409，存储不可用返回503。完整旧快照可还原，缺少时间/消费的旧记录返回明确不可还原状态。图片下载与保存结果分开处理的前端接线见[当前进度](docs/changes/CHG-003-planning-performance-observability.md#v4-final-save)。
+
+
+### v4预览导出与还原操作
+
+`/preview`的“导出全部日期”固定当前所见快照，生成逐日PNG，长日自动分页。文件准备完成后发起下载，再尝试保存最终结果；保存失败会单独提示，仍可使用逐张下载链接。后台已更新服务端版本时，本次图片可下载，但不会把其他版本当作本次结果保存。
+
+“还原上次保存”仅在存在可还原快照时启用。成功后显示新预览版本，失败时保留当前内容。验证命令：`cd frontend && node tests/v4PreviewExportController.test.mjs`；浏览器及存储故障证据见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-export-ui)。

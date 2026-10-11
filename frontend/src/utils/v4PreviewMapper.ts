@@ -207,6 +207,16 @@ export function formatReferenceAmount(amount: string | number | null | undefined
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value)
 }
 
+/** 用户页面和导出共用的本地中文查询时间格式。 */
+export function formatPreviewEvidenceTime(value: string | null | undefined): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return null
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date)
+}
+
 export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
   const preview = envelope.preview
   const placesByFact = new Map(preview.facts.places.map((place) => [place.fact_id, place]))
@@ -234,7 +244,9 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
     for (const entry of costEntries) {
       for (const activityId of entry.activity_ids) activityCost.set(activityId, entry)
     }
-    const issues = preview.validation.issues.filter((issue) => issue.day_id === day.day_id)
+    const issues = preview.validation.issues
+      .filter((issue) => issue.day_id === day.day_id)
+      .map(mapValidationIssue)
     const timingByActivity = new Map((dayTiming?.activities ?? []).map((activity) => [activity.activity_id, activity]))
     const activityViews = day.activities.map((activity) => mapActivity(
       activity,
@@ -371,7 +383,9 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
     departureAt: preview.planning_input.request.departure_at,
     timezone: preview.planning_input.request.timezone,
     tripBudget: formatReferenceAmount(preview.planning_input.request.budget?.amount ?? null),
-    planIssues: preview.validation.issues.filter((issue) => issue.day_id === null || issue.scope === 'plan'),
+    planIssues: preview.validation.issues
+      .filter((issue) => issue.day_id === null || issue.scope === 'plan')
+      .map(mapValidationIssue),
     cost: {
       status: envelope.cost.status,
       knownSubtotal: subtotal,
@@ -770,15 +784,15 @@ function mapReturnTiming(returnTiming: ReturnTiming | undefined, timezone: strin
   const departureLabel = returnTiming.departure_at ? `离开时间 ${formatClock(returnTiming.departure_at, timezone)}` : null
   const deadlineLabel = returnTiming.deadline_at ? `最晚到达 ${formatClock(returnTiming.deadline_at, timezone)}` : null
   if (returnTiming.status === 'verified') {
-    return { status: 'verified', headline: '返程地点与路线已核实', detail: returnTiming.notes.join(' '), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
+    return { status: 'verified', headline: '返程地点与路线已核实', detail: cleanTechnicalTerms(returnTiming.notes.join(' ')), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
   }
   if (returnTiming.status === 'conflict') {
-    return { status: 'conflict', headline: '返程安排可能超出可用时间', detail: detail || returnTiming.notes.join(' '), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
+    return { status: 'conflict', headline: '返程安排可能超出可用时间', detail: detail || cleanTechnicalTerms(returnTiming.notes.join(' ')), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
   }
   return {
     status: 'unverified',
     headline: '返程仍有待核实',
-    detail: [detail, ...returnTiming.notes].filter(Boolean).join('；') || '返程终点或路线信息不足。',
+    detail: [detail, ...returnTiming.notes.map(cleanTechnicalTerms)].filter(Boolean).join('；') || '返程终点或路线信息不足。',
     bufferLabel,
     overrunLabel,
     departureLabel,
@@ -824,14 +838,41 @@ function formatClock(value: string, timezone?: string): string {
 
 function formatCostEvidence(sourceLabel: string | null, queriedAt: string | null): string | null {
   if (!sourceLabel && !queriedAt) return null
-  const time = queriedAt ? formatEvidenceTime(queriedAt) : null
+  const time = formatPreviewEvidenceTime(queriedAt)
   return [sourceLabel ? `来源：${sourceLabel}` : null, time ? `查询于 ${time}` : null].filter(Boolean).join(' · ')
 }
 
-function formatEvidenceTime(value: string): string | null {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return null
-  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+function mapValidationIssue(issue: ValidationIssue): ValidationIssue {
+  let message = issue.message
+  switch (issue.code) {
+    case 'route_unverified':
+      message = issue.message.includes('missing_route_leg')
+        ? '尚未查到该路段耗时，安排时间待核实。'
+        : '该路段耗时尚未核实，安排时间待核实。'
+      break
+    case 'departure_day_below_minimum_with_activities':
+      message = '离开日可用时间不足 3 小时；现有活动仍保留，但需要调整。'
+      break
+    case 'departure_day_not_required':
+      message = '离开日可用时间不足 3 小时，因此当天不要求覆盖全部餐次和游览时段。'
+      break
+    case 'timing_not_provided':
+      message = '当前行程的时间与返程计算尚未核实，日程可行性仍待确认。'
+      break
+    case 'activity_timing_unverified':
+      message = '活动安排时刻尚未核实。'
+      break
+    case 'activity_exceeds_available_end':
+      message = '活动结束时间超过已核实的当日可用终点。'
+      break
+  }
+  return { ...issue, message: cleanTechnicalTerms(message) }
+}
+
+function cleanTechnicalTerms(message: string): string {
+  return message
+    .replace(/\bF07\b/g, '离开日可用时间计算')
+    .replace(/\bmissing_route_leg\b/g, '该路段耗时尚未查到')
 }
 
 function routeModeStatus(status: string | undefined): string {
