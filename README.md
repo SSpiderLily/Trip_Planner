@@ -287,6 +287,8 @@ PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file
 
 输入文件须包含PlanningInput、PlanDraft与来源闭合的FactStore；命令不会代造POI或运行完整规划。
 
+已知人均消费纯函数为`aggregate_reference_costs(planning_input, draft, facts)`：返回`ReferenceCostSummary`和按日明细，景点同日去重、每次用餐分别计、酒店单列。调用方按覆盖状态显示未知/部分已知，不能把全未知的小计0显示为“免费”或“总旅费0”；只使用cost已有值，不推算人数或全程预算是否足够。范围见[CHG-003消费汇总](docs/changes/CHG-003-planning-performance-observability.md#reference-cost)。
+
 独立预览存储模块为`PreviewRepository`：初始化专用SQLite路径后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。调用方须先做业务引用校验；仓库只验证模型结构和存储身份/版本。尚未接入默认任务API或浏览器，范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
 
 F09a每日检查为纯服务：`validate_daily_plan(planning_input, draft, facts, candidates, timing)`返回每日完整性、可行性、需求落实和对应位置的提示；`build_day_summaries`生成时间摘要。缺价格、天气或部分交通不单独触发补查，补查轮次由F09b管理。尚未接入正式入口，范围见[CHG-003 F09a](docs/changes/CHG-003-planning-performance-observability.md#f09a-daily-validation)。
