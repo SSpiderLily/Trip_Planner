@@ -276,6 +276,15 @@ PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
 
 F07时间计算为纯服务：`calculate_plan_timing(planning_input, draft, facts, verified_departure_fact_id=...)` 按草稿顺序消费已有路线，不调用模型或地图。完整日默认08:00酒店出发；到达日使用已核实就绪时间，未知交通保留未知。返程事实须绑定F04d的已核实离开地点；默认1小时缓冲与交通分开。结果提供活动时刻、等待、已知耗时、不足3小时判断和冲突下界，不修改草稿。范围及验收见[CHG-003 F07](docs/changes/CHG-003-planning-performance-observability.md#f07-activity-timing)。
 
+F04b住宿子任务的独立手动核验（会调用配置的LLM和高德MCP）：
+
+```bash
+cd backend
+PYTHONPATH=. venv/bin/python scripts/run_lodging_subtask.py --live --anchor-file /path/to/dining-anchor.json
+```
+
+沿用上海三日空住宿请求，锚点文件包含已核实`fact_store`和`area_hints`。子任务推荐一家酒店及住宿区域；先查5公里，没有有效酒店时才扩大至10公里，缺cost不扩搜。服务也支持用户指定住处原文核实，允许住宅，拒绝同名区域冒充具体住处；歧义保留未知且不替换住处。候选以`area_hint_id`保留来源区域关联。完整范围及验收见[CHG-003 F04b](docs/changes/CHG-003-planning-performance-observability.md#f04b-lodging-subtask)。
+
 F04d到离地点核实的独立手动核验（只调用高德MCP，不调用模型）：
 
 ```bash
