@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from contextvars import copy_context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import re
@@ -17,9 +18,10 @@ from uuid import uuid4
 
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
+from app.agents.candidate_identity import version_candidate_ref
 from app.agents.execution import PlanningError
 from app.models.planning_v4.base import ContractModel
-from app.models.planning_v4.facts import FactStore, MissingField, PlaceFact, PlaceSearchData, ToolError, ToolResult
+from app.models.planning_v4.facts import FactSource, FactStore, MissingField, PlaceFact, PlaceSearchData, ToolError, ToolResult
 from app.models.planning_v4.input import HardRequirement, PlanningInput, validate_requirement_sources
 from app.models.planning_v4.plan import AreaHint
 from app.models.planning_v4.tasks import CandidateRef, Subtask, TaskCoverage, TaskResult
@@ -449,7 +451,9 @@ class AttractionSubtaskRunner:
             "weather": list(context.fact_store.weather),
             "routes": list(context.fact_store.routes),
         }
-        eligible_fields = self._eligible_field_index(subtask, context, store["places"])
+        eligible_fields = self._eligible_field_index(
+            subtask, context, store["places"], sources=store["sources"],
+        )
 
         pending_calls: list[_PendingToolCall] = []
         tool_calls: list[ToolCallSummary] = []
@@ -507,7 +511,9 @@ class AttractionSubtaskRunner:
         with span(self._agent_span_name(), "agent", safe_context) as agent_span:
             self._active_agent_span = agent_span
             while time.monotonic() < deadline and not (cancel_event and cancel_event.is_set()):
-                candidates = self._available_places(subtask, context, store["places"])
+                candidates = self._available_places(
+                    subtask, context, store["places"], sources=store["sources"],
+                )
                 action = self._get_action(
                     llm, subtask, context, candidates, deadline, search_history,
                     repair_budget=max(0, MAX_FORMAT_REPAIRS - self.format_repairs),
@@ -535,8 +541,9 @@ class AttractionSubtaskRunner:
                 if time.monotonic() >= deadline:
                     break
                 if isinstance(action, FinishAction):
+                    result_context = self._context_with_store(context, store)
                     task_result = self._make_result(
-                        subtask, context, store["places"], action, "complete", "target_met",
+                        subtask, result_context, store["places"], action, "complete", "target_met",
                     )
                     if task_result.stop_reason == "invalid_output":
                         return self._finish(
@@ -549,7 +556,7 @@ class AttractionSubtaskRunner:
                         return self._execution(context, store, task_result, tool_calls, started)
                     stop = self._completion_stop_reason(task_result)
                     task_result = self._make_result(
-                        subtask, context, store["places"], action,
+                        subtask, result_context, store["places"], action,
                         "partial", stop,
                     )
                     agent_span.output = self._safe_result_summary(task_result)
@@ -598,7 +605,9 @@ class AttractionSubtaskRunner:
                 if search_result.status == "empty" and self._empty_result_is_terminal(
                     action, subtask, context, store,
                 ):
-                    has_candidates = bool(self._available_places(subtask, context, store["places"]))
+                    has_candidates = bool(self._available_places(
+                        subtask, context, store["places"], sources=store["sources"],
+                    ))
                     return self._finish(
                         subtask, context, store, tool_calls, "partial",
                         "scope_exhausted" if has_candidates else "no_match", started,
@@ -632,7 +641,9 @@ class AttractionSubtaskRunner:
                                                                 pending_calls, tool_calls, store, cancel_event)
                         if detail_result is not None:
                             detail_failed = detail_failed or detail_result.status == "error"
-                    if detail_failed and not self._available_places(subtask, context, store["places"]):
+                    if detail_failed and not self._available_places(
+                        subtask, context, store["places"], sources=store["sources"],
+                    ):
                         return self._finish(
                             subtask, context, store, tool_calls,
                             "partial" if context.candidate_refs else "failed", "tool_error", started,
@@ -649,7 +660,9 @@ class AttractionSubtaskRunner:
                         subtask, context, store, tool_calls, "partial", "deadline", started,
                         tool_calls, progress_seen, "景点子任务超过截止时间",
                     )
-                eligible_fields = self._eligible_field_index(subtask, context, store["places"])
+                eligible_fields = self._eligible_field_index(
+                    subtask, context, store["places"], sources=store["sources"],
+                )
                 progress = _count_field_progress(before_eligible, eligible_fields)
                 progress_seen = progress_seen or progress > 0
                 search_history.append({
@@ -779,7 +792,9 @@ class AttractionSubtaskRunner:
             item for item in planning_input.requirements.hard_requirements
             if item.kind == "must_avoid"
         ]
-        current_candidate_pool = self._available_places(subtask, context, list(facts.places))
+        current_candidate_pool = self._available_places(
+            subtask, context, list(facts.places), sources=list(facts.sources),
+        )
         for candidate in context.candidate_refs:
             place = place_by_fact_id.get(candidate.place_fact_id)
             if (candidate.category != self._candidate_category() or place is None or place.poi_id != candidate.poi_id
@@ -831,6 +846,7 @@ class AttractionSubtaskRunner:
 
     def _available_places(
         self, subtask: Subtask, context: AttractionExecutionContext, places: list[PlaceFact],
+        *, sources: list[FactSource] | tuple[FactSource, ...] | None = None,
     ) -> list[PlaceFact]:
         blocked_requirements = [item for item in context.planning_input.requirements.hard_requirements
                                 if item.kind == "must_avoid"]
@@ -845,21 +861,29 @@ class AttractionSubtaskRunner:
             if any(_requirement_matches_name(item, place.name) for item in blocked_requirements):
                 continue
             by_poi.setdefault(place.poi_id, []).append(place)
+        source_by_id = {
+            source.tool_call_id: source
+            for source in (sources if sources is not None else context.fact_store.sources)
+        }
+
         def score(place: PlaceFact):
             return (
                 place.location is not None,
                 bool(place.typecode or place.type_name),
                 len(_place_fields(place)),
-                max((source.queried_at.timestamp() for source in context.fact_store.sources
-                     if source.tool_call_id in place.source_refs), default=0),
+                len(set(place.field_sources.values())),
+                len(set(place.source_refs)),
+                max((source_by_id[source_id].queried_at.timestamp()
+                     for source_id in place.source_refs if source_id in source_by_id), default=0),
             )
         return [max(rows, key=score) for _, rows in sorted(by_poi.items())]
 
     def _eligible_field_index(
         self, subtask: Subtask, context: AttractionExecutionContext, places: list[PlaceFact],
+        *, sources: list[FactSource] | tuple[FactSource, ...] | None = None,
     ) -> dict[str, frozenset[str]]:
         index: dict[str, frozenset[str]] = {}
-        for place in self._available_places(subtask, context, places):
+        for place in self._available_places(subtask, context, places, sources=sources):
             index[place.poi_id] = index.get(place.poi_id, frozenset()) | _place_fields(place)
         return index
 
@@ -1125,7 +1149,11 @@ class AttractionSubtaskRunner:
 
     @classmethod
     def _append_result(cls, result: ToolResult, store: dict[str, list]) -> None:
-        if all(item.tool_call_id != result.source.tool_call_id for item in store["sources"]):
+        source_by_id = {item.tool_call_id: item for item in store["sources"]}
+        previous_source = source_by_id.get(result.source.tool_call_id)
+        if previous_source is not None and previous_source != result.source:
+            raise PlanningError("FACT_SOURCE_ID_CONFLICT", "同一来源标识包含冲突内容", step="fact_merge")
+        if previous_source is None:
             store["sources"].append(result.source)
         data = result.data
         if isinstance(data, PlaceSearchData):
@@ -1134,8 +1162,14 @@ class AttractionSubtaskRunner:
             new_places = (data,)
         else:
             new_places = ()
-        existing = {item.fact_id for item in store["places"]}
-        store["places"].extend(item for item in new_places if item.fact_id not in existing)
+        existing = {item.fact_id: item for item in store["places"]}
+        for item in new_places:
+            previous = existing.get(item.fact_id)
+            if previous is not None and previous != item:
+                raise PlanningError("FACT_ID_CONFLICT", "同一地点事实标识包含冲突内容", step="fact_merge")
+            if previous is None:
+                store["places"].append(item)
+                existing[item.fact_id] = item
         # Search and detail responses can expose different fields for one POI.
         # Keep both provider facts and add one provenance-preserving composite
         # so a detail coordinate can complete the searched scenic identity.
@@ -1156,9 +1190,17 @@ class AttractionSubtaskRunner:
             cls._combine_place_facts(poi_id, rows)
             for poi_id, rows in grouped.items() if len(rows) > 1
         ]
-        recomputed_poi_ids = {item.poi_id for item in derived}
-        preserved_own_derived = [item for item in own_derived if item.poi_id not in recomputed_poi_ids]
-        store["places"] = [*provider_places, *other_derived, *preserved_own_derived, *derived]
+        all_versions = [*provider_places, *other_derived, *own_derived, *derived]
+        unique_by_id: dict[str, PlaceFact] = {}
+        unique_places: list[PlaceFact] = []
+        for item in all_versions:
+            previous = unique_by_id.get(item.fact_id)
+            if previous is not None and previous != item:
+                raise PlanningError("FACT_ID_CONFLICT", "同一派生事实标识包含冲突内容", step="fact_merge")
+            if previous is None:
+                unique_by_id[item.fact_id] = item
+                unique_places.append(item)
+        store["places"] = unique_places
 
     @classmethod
     def _combine_place_facts(cls, poi_id: str, rows: list[PlaceFact]) -> PlaceFact:
@@ -1198,8 +1240,8 @@ class AttractionSubtaskRunner:
         if opening_hours is None:
             missing.append(MissingField(field="opening_hours_raw", reason="not_returned"))
         photos = tuple(dict.fromkeys(photo for row in rows for photo in row.photos))
-        return PlaceFact(
-            fact_id=f"{cls.DERIVED_FACT_PREFIX}{poi_id}",
+        combined = PlaceFact(
+            fact_id="pending-derived-id",
             poi_id=poi_id,
             name=name,
             location=location,
@@ -1216,6 +1258,12 @@ class AttractionSubtaskRunner:
             field_sources=field_sources,
             missing_fields=tuple(missing),
         )
+        payload = json.dumps(
+            combined.model_dump(mode="json", exclude={"fact_id"}),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+        return combined.model_copy(update={"fact_id": f"{cls.DERIVED_FACT_PREFIX}{digest}"})
 
     def _make_result(
         self, subtask: Subtask, context: AttractionExecutionContext, places: list[PlaceFact],
@@ -1310,9 +1358,10 @@ class AttractionSubtaskRunner:
                     requirement_id for requirement_id, poi_id in covered_requirement_ids.items()
                     if poi_id == candidate.poi_id
                 )
-                updated_refs.append(candidate.model_copy(update={
-                    "requirement_ids": tuple(dict.fromkeys((*candidate.requirement_ids, *inferred))),
-                }))
+                updated_refs.append(version_candidate_ref(
+                    candidate,
+                    requirement_ids=tuple(dict.fromkeys((*candidate.requirement_ids, *inferred))),
+                ))
             candidate_refs = updated_refs
 
         all_covered = all(item.status == "covered" for item in coverage)
@@ -1361,10 +1410,13 @@ class AttractionSubtaskRunner:
         self, subtask, context, store, trace, status, stop_reason, started,
         tool_calls, progress, message,
     ) -> AttractionExecution:
+        result_context = self._context_with_store(context, store)
         # Preserve backend-screened candidates on partial/error exits, but keep
         # them unassigned to slots or hard requirements. They cannot make an
         # error result complete or claim that the model selected them.
-        screened = self._available_places(subtask, context, store["places"])
+        screened = self._available_places(
+            subtask, result_context, store["places"], sources=store["sources"],
+        )
         action = FinishAction(action="finish", selections=tuple(
             CandidateSelection(poi_id=place.poi_id) for place in screened
         )[:20])
@@ -1372,7 +1424,7 @@ class AttractionSubtaskRunner:
             status = "partial"
         result = self._make_result(
             subtask,
-            context,
+            result_context,
             store["places"],
             action,
             status,
@@ -1393,6 +1445,13 @@ class AttractionSubtaskRunner:
         with span(self._result_span_name(), "agent", safe_context) as result_span:
             result_span.output = self._safe_result_summary(result)
         return execution
+
+    @staticmethod
+    def _context_with_store(context: AttractionExecutionContext, store: dict[str, list]):
+        """让最终候选筛选使用本次子任务刚收集的来源和地点版本。"""
+        return replace(context, fact_store=FactStore(**{
+            key: tuple(value) for key, value in store.items()
+        }))
 
     def _execution(self, context, store, task_result, tool_calls, started) -> AttractionExecution:
         return AttractionExecution(

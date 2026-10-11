@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import Field, TypeAdapter
 
+from app.agents.candidate_identity import version_candidate_ref
 from app.agents.attraction_subtask import (
     AttractionExecutionContext,
     AttractionSubtaskRunner,
@@ -339,7 +340,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
                 result.add(hint_id)
         return result
 
-    def _available_places(self, subtask, context, places):
+    def _available_places(self, subtask, context, places, *, sources=None):
         if not isinstance(context, LodgingExecutionContext):
             return []
         grouped: dict[str, list[PlaceFact]] = {}
@@ -352,11 +353,21 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
             if not self._is_specified(context) and not self._eligible_area_ids(place, subtask, context):
                 continue
             grouped.setdefault(place.poi_id, []).append(place)
-        return [max(rows, key=lambda item: (len(_place_fields(item)), len(item.source_refs)))
-                for _, rows in sorted(grouped.items())]
+        source_by_id = {
+            source.tool_call_id: source
+            for source in (sources if sources is not None else context.fact_store.sources)
+        }
+        return [max(rows, key=lambda item: (
+            len(_place_fields(item)),
+            len(set(item.field_sources.values())),
+            len(set(item.source_refs)),
+            max((source_by_id[source_id].queried_at.timestamp()
+                 for source_id in item.source_refs if source_id in source_by_id), default=0),
+        )) for _, rows in sorted(grouped.items())]
 
-    def _eligible_field_index(self, subtask, context, places):
-        return {item.poi_id: _place_fields(item) for item in self._available_places(subtask, context, places)}
+    def _eligible_field_index(self, subtask, context, places, *, sources=None):
+        return {item.poi_id: _place_fields(item)
+                for item in self._available_places(subtask, context, places, sources=sources)}
 
     def _messages(self, subtask, context, candidates, search_history):
         assert isinstance(context, LodgingExecutionContext)
@@ -586,10 +597,11 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
             if place.poi_id in by_poi:
                 index = by_poi[place.poi_id]
                 old = candidate_refs[index]
-                candidate_refs[index] = old.model_copy(update={
-                    "area_hint_id": area_hint_id,
-                    "recommendation_reason": selection.recommendation_reason or old.recommendation_reason,
-                })
+                candidate_refs[index] = version_candidate_ref(
+                    old,
+                    area_hint_id=area_hint_id,
+                    recommendation_reason=selection.recommendation_reason or old.recommendation_reason,
+                )
             else:
                 by_poi[place.poi_id] = len(candidate_refs)
                 candidate_refs.append(CandidateRef(

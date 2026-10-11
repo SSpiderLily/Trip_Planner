@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import Future
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,9 +30,10 @@ from app.models.planning_v4 import (
     RuleSet,
     SlotConstraint,
     TripRequest,
+    WeatherFact,
 )
 from app.models.planning_v4.input import PlanningInput
-from app.models.planning_v4.tasks import Subtask, TaskResult, TaskScope
+from app.models.planning_v4.tasks import Subtask, TaskCoverage, TaskResult, TaskScope
 from app.services.observation_service import ObservationService
 from app.services.task_repository import TaskRepository
 
@@ -130,20 +132,25 @@ def make_context(*, planning_input=None, facts=None, candidates=(), areas=(), ta
         run_id=identity.get("run_id", "run-1"),
         context_revision=identity.get("context_revision", 4),
         base_revision=identity.get("base_revision"),
+        weather_attempted_dates=tuple(identity.get("weather_attempted_dates", ())),
+        endpoint_attempted=tuple(identity.get("endpoint_attempted", ())),
+        direct_query_summaries=tuple(identity.get("direct_query_summaries", ())),
     )
 
 
 def task_spec(local_ref, day_date, period, *, role="attractions", dependencies=(), requirements=(), target=2):
-    return {
+    payload = {
         "local_ref": local_ref,
         "role": role,
         "objective": "按用户要求核实代表性景点候选",
         "day_ids": [f"day-{day_date.isoformat()}"],
         "slot_ids": [f"slot-{day_date.isoformat()}-{period}"],
-        "candidate_target": target,
         "requirement_ids": list(requirements),
         "dependencies": list(dependencies),
     }
+    if target is not None:
+        payload["candidate_target"] = target
+    return payload
 
 
 def place_fact(*, fact_id="fact-bund", poi_id="poi-bund", name="外滩", lng=121.49, lat=31.24):
@@ -269,10 +276,9 @@ class MasterDeciderTests(unittest.TestCase):
         rules = payload["decision_rules"]
         self.assertEqual(rules["lodging"]["allowed_slots"], [])
         self.assertIn("必须为空", rules["lodging"]["slot_ids"])
-        self.assertEqual(rules["lodging"]["candidate_target"], 1)
         self.assertIn("role_time_scopes.attractions.allowed_day_ids", rules["attractions"]["day_ids"])
         self.assertIn("role_time_scopes.dining.allowed_day_ids", rules["dining"]["day_ids"])
-        self.assertIn("must_visit", rules["attractions"]["candidate_target"])
+        self.assertIn("后端", rules["candidate_target"])
         self.assertIn("breakfast、lunch、dinner", rules["dining"]["allowed_slots"])
         system_prompt = decider._messages(context, validated)[0]["content"]
         self.assertIn("role_time_scopes", system_prompt)
@@ -316,6 +322,7 @@ class MasterDeciderTests(unittest.TestCase):
             role="attractions",
             objective="景点检索",
             scope=TaskScope(city="上海", day_ids=(f"day-{DATES[1].isoformat()}",), slot_ids=(f"slot-{DATES[1].isoformat()}-morning",)),
+            known_fact_ids=(place.fact_id,),
             candidate_target=2,
         )
         previous_result = TaskResult(
@@ -503,10 +510,7 @@ class MasterDeciderTests(unittest.TestCase):
             schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"],
             ["attractions"],
         )
-        self.assertEqual(
-            schema["$defs"]["TaskSpec"]["properties"]["candidate_target"]["type"],
-            "integer",
-        )
+        self.assertNotIn("candidate_target", schema["$defs"]["TaskSpec"]["properties"])
         self.assertNotIn("output_contract", payload)
 
         examples = payload["valid_output_examples"]
@@ -517,8 +521,54 @@ class MasterDeciderTests(unittest.TestCase):
             result = decider_for_example.run(context)
             self.assertEqual(result.decision.action, example["action"])
         delegate_example = next(item for item in examples if item["action"] == "delegate")
-        self.assertEqual(delegate_example["tasks"][0]["candidate_target"], 1)
+        self.assertNotIn("candidate_target", delegate_example["tasks"][0])
         self.assertEqual(delegate_example["tasks"][0]["requirement_ids"], ["must-visit-bund"])
+
+    def test_candidate_target_is_backend_computed_when_missing_or_misreported(self):
+        for target in (None, 1, 99_999):
+            with self.subTest(model_candidate_target=target):
+                task = task_spec("scoped", DATES[0], "afternoon", target=target)
+                payload = {"action": "delegate", "reason": "查找下午景点", "tasks": [task]}
+                decider, _ = self.make_decider([json.dumps(payload, ensure_ascii=False)])
+
+                result = decider.run(make_context())
+
+                self.assertEqual(result.decision.tasks[0].subtask.candidate_target, 2)
+
+    def test_backend_candidate_target_remains_capped_at_twenty(self):
+        decider, _ = self.make_decider([])
+        task = SimpleNamespace(
+            role="attractions",
+            requirement_ids=(),
+            slot_ids=tuple(f"slot-{index}" for index in range(11)),
+            must_eat_restaurants=(),
+        )
+        with self.assertRaises(PlanningError) as raised:
+            decider._candidate_target_for(task, {})
+        self.assertEqual(raised.exception.code, "MASTER_CANDIDATE_TARGET_LIMIT")
+
+    def test_backend_candidate_target_formulas_cover_each_role(self):
+        decider, _ = self.make_decider([])
+        requirements = {
+            "must-a": SimpleNamespace(kind="must_visit"),
+            "must-b": SimpleNamespace(kind="must_visit"),
+        }
+        cases = (
+            ("attractions", ("must-a", "must-b"), ("slot-1",), (), 2),
+            ("attractions", (), ("slot-1", "slot-2"), (), 4),
+            ("dining", ("named-1",), ("meal-1", "meal-2"), ("restaurant-1",), 2),
+            ("dining", (), ("meal-1",), (), 1),
+            ("lodging", (), (), (), 1),
+        )
+        for role, requirement_ids, slot_ids, named, expected in cases:
+            with self.subTest(role=role, requirement_ids=requirement_ids, slot_ids=slot_ids):
+                task = SimpleNamespace(
+                    role=role,
+                    requirement_ids=requirement_ids,
+                    slot_ids=slot_ids,
+                    must_eat_restaurants=tuple(named),
+                )
+                self.assertEqual(decider._candidate_target_for(task, requirements), expected)
 
     def test_user_lodging_query_has_no_area_scope_and_preserves_exact_text(self):
         query = "  上海外滩华尔道夫酒店  "
@@ -610,6 +660,154 @@ class MasterDeciderTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "MASTER_CANDIDATE_INVALID")
         self.assertEqual(llm.calls, [])
+
+    def test_prompt_projects_83_places_and_compacts_task_results(self):
+        base_facts, template = place_fact()
+        base_source = base_facts.sources[0]
+        unused_source = base_source.model_copy(update={
+            "tool_call_id": "call-unused-search",
+            "effective_params": {"city": "上海", "keywords": "未选搜索结果"},
+        })
+        weather_source = base_source.model_copy(update={
+            "tool_call_id": "call-weather",
+            "tool_name": "amap_maps_weather",
+            "effective_params": {"city": "上海"},
+        })
+        route_source = base_source.model_copy(update={
+            "tool_call_id": "call-route",
+            "tool_name": "amap_maps_direction_walking",
+            "effective_params": {"origin": "poi-2", "destination": "poi-3"},
+        })
+        places = tuple(
+            template.model_copy(update={
+                "fact_id": f"fact-{index}",
+                "poi_id": f"poi-{index}",
+                "name": f"地点{index}",
+                "opening_hours_raw": "09:00-17:00",
+                "source_refs": (base_source.tool_call_id if index < 4 else unused_source.tool_call_id,),
+                "field_sources": {
+                    "poi_id": base_source.tool_call_id if index < 4 else unused_source.tool_call_id,
+                    "name": base_source.tool_call_id if index < 4 else unused_source.tool_call_id,
+                    "location": base_source.tool_call_id if index < 4 else unused_source.tool_call_id,
+                },
+            })
+            for index in range(83)
+        )
+        weather = WeatherFact(fact_id="weather-fact", city="上海", source=weather_source)
+        route = RouteFact(
+            fact_id="route-fact",
+            origin_poi_id="poi-2",
+            destination_poi_id="poi-3",
+            origin=places[2].location,
+            destination=places[3].location,
+            mode="walking",
+            status="error",
+            source=route_source,
+            error_category="provider_error",
+        )
+        facts = FactStore(
+            sources=(base_source, unused_source, weather_source, route_source),
+            places=places,
+            weather=(weather,),
+            routes=(route,),
+        )
+        candidate0 = CandidateRef(
+            candidate_id="candidate-0", category="sightseeing",
+            poi_id="poi-0", place_fact_id="fact-0",
+        )
+        candidate1 = CandidateRef(
+            candidate_id="candidate-1", category="sightseeing",
+            poi_id="poi-1", place_fact_id="fact-1",
+        )
+        area = AreaHint(
+            area_hint_id="area-known",
+            label="地点2附近",
+            anchor_poi_ids=("poi-2",),
+            center=places[2].location,
+            basis_fact_ids=("fact-2",),
+            basis="verified_place_facts",
+        )
+        old_task = Subtask(
+            task_id="task-old",
+            run_id="run-1",
+            context_revision=4,
+            role="attractions",
+            objective="补充景点搜索",
+            scope=TaskScope(city="上海", day_ids=(f"day-{DATES[0].isoformat()}",)),
+            known_fact_ids=("fact-3",),
+            candidate_target=2,
+        )
+        old_result = TaskResult(
+            task_id=old_task.task_id,
+            run_id=old_task.run_id,
+            request_id="req-shanghai-3d",
+            context_revision=old_task.context_revision,
+            status="partial",
+            stop_reason="scope_exhausted",
+            candidates=(candidate0,),
+            coverage=(TaskCoverage(target_id="candidate_target", status="covered"),),
+            missing=(TaskCoverage(
+                target_id="must-visit-bund", status="missing", reason="尚未核实必去目标",
+            ),),
+            next_action_hint="补充其他景点候选",
+        )
+        context = make_context(
+            facts=facts,
+            candidates=(candidate1,),
+            areas=(area,),
+            tasks=(old_task,),
+            results=(old_result,),
+        )
+        decider, llm = self.make_decider([json.dumps({"action": "plan", "reason": "已整理现有事实。"})])
+
+        decider.run(context)
+
+        prompt = json.loads(llm.calls[0][0][1]["content"])
+        model_facts = prompt["fact_store"]
+        self.assertEqual({item["fact_id"] for item in model_facts["places"]}, {
+            "fact-0", "fact-1", "fact-2", "fact-3",
+        })
+        self.assertEqual(model_facts["unselected_place_count"], 79)
+        self.assertIn("后端完整保存", model_facts["projection_note"])
+        selected = next(item for item in model_facts["places"] if item["fact_id"] == "fact-0")
+        self.assertEqual(selected["location"]["lng"], places[0].location.lng)
+        self.assertEqual(selected["cost"]["raw"], places[0].cost.raw)
+        self.assertEqual(selected["opening_hours_raw"], "09:00-17:00")
+        self.assertEqual(
+            {item["tool_call_id"] for item in model_facts["sources"]},
+            {base_source.tool_call_id, weather_source.tool_call_id, route_source.tool_call_id},
+        )
+        self.assertEqual(model_facts["weather"][0]["source_tool_call_id"], weather_source.tool_call_id)
+        self.assertNotIn("source", model_facts["weather"][0])
+        self.assertEqual(model_facts["routes"][0]["status"], "error")
+        self.assertNotIn("polyline", json.dumps(model_facts["routes"], ensure_ascii=False))
+
+        query_history = prompt["backend_query_history"]["executed_tool_queries"]
+        self.assertEqual(len(query_history), 4)
+        unused_query = next(item for item in query_history
+                            if item["tool_name"] == unused_source.tool_name
+                            and item["effective_params"].get("keywords") == "未选搜索结果")
+        self.assertEqual(unused_query["status"], "unknown")
+        route_query = next(item for item in query_history if item["tool_name"] == route_source.tool_name)
+        self.assertEqual(route_query["status"], "error")
+
+        result_data = prompt["task_results"][0]
+        self.assertEqual(result_data["candidate_ids"], [candidate0.candidate_id])
+        self.assertEqual(result_data["status"], "partial")
+        self.assertEqual(result_data["stop_reason"], "scope_exhausted")
+        self.assertEqual(result_data["next_action_hint"], "补充其他景点候选")
+        self.assertEqual(result_data["request_id"], context.request_id)
+        self.assertNotIn("candidates", result_data)
+        self.assertNotIn("name", json.dumps(result_data, ensure_ascii=False))
+
+        schema = prompt["decision_json_schema"]
+        known_fact_ids = schema["$defs"]["TaskSpec"]["properties"]["known_fact_ids"]["items"]["enum"]
+        self.assertIn("fact-3", known_fact_ids)
+        self.assertIn("weather-fact", known_fact_ids)
+        self.assertNotIn("fact-4", known_fact_ids)
+        basis_fact_ids = schema["$defs"]["AreaSpec"]["properties"]["basis_fact_ids"]["items"]["enum"]
+        self.assertEqual(set(basis_fact_ids), {"fact-0", "fact-1", "fact-2", "fact-3"})
+        self.assertEqual(len(context.fact_store.places), 83, "投影不得修改后端完整事实快照")
 
     def test_prompt_sends_route_summary_without_geometry(self):
         facts, place = place_fact()
@@ -784,10 +982,34 @@ class MasterDeciderTests(unittest.TestCase):
         payload = json.loads(decider._messages(context, decider._validate_context_data(context))[1]["content"])
         schema = payload["decision_json_schema"]
         self.assertEqual(schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"], ["attractions"])
+        self.assertIn("尚未尝试", payload["decision_rules"]["collection_priority"])
+        self.assertIn("餐饮和住宿", payload["decision_rules"]["collection_priority"])
+        known_fact_ids = schema["$defs"]["TaskSpec"]["properties"]["known_fact_ids"]
+        self.assertEqual(known_fact_ids["default"], [])
+        self.assertEqual(known_fact_ids["items"]["enum"], [])
+        self.assertNotIn("minItems", known_fact_ids, "空事实列表仍需是合法输出")
+        area_basis = schema["$defs"]["AreaSpec"]["properties"]["basis_fact_ids"]
+        self.assertEqual(area_basis["items"]["enum"], [])
+        self.assertEqual(area_basis["minItems"], 1, "区域不能在没有事实依据时生成")
         self.assertEqual(schema["$defs"]["DelegatePayload"]["properties"]["verify_arrival_place"]["const"], False)
         self.assertEqual(schema["$defs"]["DelegatePayload"]["properties"]["verify_departure_place"]["const"], False)
-        facts, _ = place_fact()
-        populated = make_context(facts=facts)
+
+        invented_fact_task = task_spec("invented-fact", DATES[0], "afternoon")
+        invented_fact_task["known_fact_ids"] = ["invented-fact-id"]
+        decider, llm = self.make_decider([json.dumps({
+            "action": "delegate", "reason": "引用未展示的事实", "tasks": [invented_fact_task],
+        }, ensure_ascii=False)])
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(context)
+        self.assertEqual(raised.exception.code, "MASTER_TASK_FACT_INVALID")
+        self.assertEqual(len(llm.calls), 1)
+
+        facts, place = place_fact()
+        selected_candidate = CandidateRef(
+            candidate_id="candidate-bund", category="sightseeing",
+            poi_id=place.poi_id, place_fact_id=place.fact_id,
+        )
+        populated = make_context(facts=facts, candidates=(selected_candidate,))
         schema = json.loads(decider._messages(populated, decider._validate_context_data(populated))[1]["content"])["decision_json_schema"]
         self.assertEqual(schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"], ["attractions", "dining", "lodging"])
         specified = context.model_copy(update={"planning_input": make_planning_input(lodging_query="上海某酒店")})
@@ -809,6 +1031,65 @@ class MasterDeciderTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "MASTER_LLM_FAILED")
         self.assertNotIn("secret", str(raised.exception))
         self.assertNotIn("raw model body", str(raised.exception))
+
+    def test_run_timeout_override_caps_each_model_call(self):
+        decider, llm = self.make_decider([json.dumps({"action": "plan", "reason": "done"})], timeout=10)
+
+        result = decider.run(make_context(), request_timeout_seconds=0.2)
+
+        self.assertEqual(result.decision.action, "plan")
+        self.assertLessEqual(llm.calls[0][1]["request_timeout"], 0.2)
+
+    def test_cancel_event_prevents_model_call_and_format_repair(self):
+        cancelled = threading.Event()
+        decider, llm = self.make_decider(["not json", json.dumps({"action": "plan", "reason": "retry"})])
+        cancelled.set()
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(make_context(), cancel_event=cancelled)
+        self.assertEqual(raised.exception.code, "MASTER_DECISION_CANCELLED")
+        self.assertEqual(llm.calls, [])
+
+        cancelled.clear()
+        decider, llm = self.make_decider([
+            lambda kwargs: (cancelled.set(), "not json")[1],
+            json.dumps({"action": "plan", "reason": "must not be called"}),
+        ])
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(make_context(), cancel_event=cancelled)
+        self.assertEqual(raised.exception.code, "MASTER_DECISION_CANCELLED")
+        self.assertEqual(len(llm.calls), 1, "收到取消后不得继续发起格式修复请求")
+
+    def test_attempted_direct_queries_are_removed_from_schema_and_rejected(self):
+        context = make_context(
+            weather_attempted_dates=(DATES[0],),
+            endpoint_attempted=("arrival",),
+        )
+        schema = MasterDecider._decision_schema(context)
+        fields = schema["$defs"]["DelegatePayload"]["properties"]
+        self.assertEqual(fields["weather_dates"]["items"]["enum"], [item.isoformat() for item in DATES[1:]])
+        self.assertEqual(fields["verify_arrival_place"]["const"], False)
+        capabilities = MasterDecider._backend_query_capabilities(context)
+        self.assertEqual(capabilities["allowed_weather_dates"], [item.isoformat() for item in DATES[1:]])
+        self.assertTrue(capabilities["verify_arrival_place"]["already_attempted"])
+
+        payload = {
+            "action": "delegate", "reason": "repeat", "weather_dates": [DATES[0].isoformat()],
+        }
+        decider, _ = self.make_decider([json.dumps(payload)])
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(context)
+        self.assertEqual(raised.exception.code, "MASTER_WEATHER_ALREADY_ATTEMPTED")
+
+        endpoint_context = make_context(
+            planning_input=make_planning_input(arrival_place_query="上海虹桥站"),
+            endpoint_attempted=("arrival",),
+        )
+        decider, _ = self.make_decider([json.dumps({
+            "action": "delegate", "reason": "repeat", "verify_arrival_place": True,
+        })])
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(endpoint_context)
+        self.assertEqual(raised.exception.code, "MASTER_ENDPOINT_ALREADY_ATTEMPTED")
 
     def test_queued_model_call_is_cancelled_before_start_after_timeout(self):
         class QueuedExecutor:

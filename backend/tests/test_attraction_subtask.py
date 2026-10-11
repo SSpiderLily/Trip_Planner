@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -13,14 +13,19 @@ from app.agents.execution import PlanningError
 from app.agents.attraction_subtask import (
     AttractionExecutionContext,
     AttractionSubtaskRunner,
+    FinishAction,
 )
 from app.models.planning_v4 import (
+    CandidateRef,
+    FactSource,
     FactStore,
     HardRequirement,
     PlaceFact,
+    PlaceSearchData,
     RequirementSummary,
     RuleSet,
     Subtask,
+    ToolResult,
     TripRequest,
 )
 from app.models.planning_v4.input import RequirementSource
@@ -401,6 +406,80 @@ class AttractionSubtaskTests(unittest.TestCase):
         self.assertIsNotNone(combined.location)
         self.assertEqual(len(combined.source_refs), 2)
         self.assertEqual(len(result.fact_store.sources), 2)
+
+    def test_new_provider_query_keeps_previous_composite_fact_version_mergeable(self):
+        llm = FakeLLM([(search_action(), usage()), (finish_action(), usage())])
+
+        def respond(tool_name, _arguments):
+            if tool_name == "maps_text_search":
+                return map_result([place("p1", location=None)])
+            return map_result([place("p1", cityname=None, type=None, typecode=None)])
+
+        _, first = self.run_subtask(llm, respond)
+        old_candidate = first.task_result.candidates[0]
+        old_fact = next(item for item in first.fact_store.places
+                        if item.fact_id == old_candidate.place_fact_id)
+        base_store = first.fact_store
+
+        provider = next(item for item in base_store.places if not item.fact_id.startswith("derived:"))
+        new_source = base_store.sources[-1].model_copy(update={
+            "tool_call_id": "later-provider-query",
+            "queried_at": base_store.sources[-1].queried_at + timedelta(seconds=1),
+        })
+        new_provider = provider.model_copy(update={
+            "fact_id": "later-provider-query:p1",
+            "opening_hours_raw": "09:00-17:00",
+            "source_refs": (new_source.tool_call_id,),
+            "field_sources": {key: new_source.tool_call_id for key in provider.field_sources},
+        })
+        store = {
+            "sources": list(base_store.sources),
+            "places": list(base_store.places),
+            "weather": [],
+            "routes": [],
+        }
+        AttractionSubtaskRunner._append_result(ToolResult[PlaceSearchData](
+            tool_call_id=new_source.tool_call_id,
+            status="ok",
+            data=PlaceSearchData(places=(new_provider,)),
+            source=new_source,
+        ), store)
+
+        versions = [item for item in store["places"]
+                    if item.poi_id == "p1" and item.fact_id.startswith("derived:attraction:")]
+        self.assertIn(old_fact, versions, "旧候选引用的事实版本必须保留")
+        self.assertEqual(len(versions), 2)
+        self.assertNotEqual(versions[0].fact_id, versions[1].fact_id)
+
+        from app.services.planning_dispatch_service import PlanningDispatchService
+
+        next_store = FactStore(sources=tuple(store["sources"]), places=tuple(store["places"]))
+        merged = PlanningDispatchService._merge_fact_stores(base_store, next_store)
+        self.assertIn(old_candidate.place_fact_id, {item.fact_id for item in merged.places})
+
+    def test_requirement_binding_versions_an_existing_candidate(self):
+        llm = FakeLLM([(search_action(), usage()), (finish_action(), usage())])
+        _, first = self.run_subtask(llm, lambda *_: map_result([place("p1")]))
+        old_candidate = first.task_result.candidates[0].model_copy(update={"requirement_ids": ()})
+        context = replace(
+            self.make_context(),
+            fact_store=first.fact_store,
+            candidate_refs=(old_candidate,),
+        )
+
+        result = AttractionSubtaskRunner()._make_result(
+            subtask(), context, list(first.fact_store.places),
+            FinishAction(action="finish", selections=()), "complete", "target_met",
+        )
+
+        updated = next(item for item in result.candidates if item.poi_id == old_candidate.poi_id)
+        self.assertEqual(updated.requirement_ids, ("M1",))
+        self.assertNotEqual(updated.candidate_id, old_candidate.candidate_id)
+        self.assertEqual(context.candidate_refs, (old_candidate,), "不能原地改写旧候选版本")
+        from app.services.planning_dispatch_service import PlanningDispatchService
+
+        merged = PlanningDispatchService._merge_candidates((old_candidate,), result.candidates)
+        self.assertEqual({item.candidate_id for item in merged}, {old_candidate.candidate_id, updated.candidate_id})
 
     def test_new_call_id_with_identical_poi_fields_is_no_progress(self):
         llm = FakeLLM([
