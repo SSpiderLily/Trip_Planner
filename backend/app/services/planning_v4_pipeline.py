@@ -11,6 +11,7 @@ from threading import Event
 from typing import Any, Callable
 from uuid import uuid4
 
+from app.agents.daily_plan_generator import DailyDayRevisionExecution
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
     AreaHint,
@@ -18,6 +19,7 @@ from app.models.planning_v4 import (
     DispatchAnchorSummary,
     DispatchScope,
     DispatchTarget,
+    DayRevision,
     FactStore,
     PlanDraft,
     PlanningInput,
@@ -315,7 +317,7 @@ class PlanningV4Pipeline:
                 timeout = min(MODEL_TIMEOUT_SECONDS, remaining)
                 revision_cancel_event = Event()
                 try:
-                    return await self._await_stage(
+                    execution = await self._await_stage(
                         daily_adapter.revise_day(
                             request_data.planning_input,
                             request_data.draft,
@@ -343,6 +345,7 @@ class PlanningV4Pipeline:
                         global_cancel_event=cancel_event,
                         timeout_code="DAY_REVISION_TIMEOUT",
                     )
+                    return self._normalize_day_revision_execution(execution)
                 except PlanningV4PipelineError as exc:
                     raise DayRepairError(
                         exc.code,
@@ -1256,6 +1259,16 @@ class PlanningV4Pipeline:
         if isinstance(code, str) and code and all(character.isalnum() or character in "_.-" for character in code):
             return code[:100]
         return fallback
+
+    @staticmethod
+    def _normalize_day_revision_execution(value: Any) -> DayRevision:
+        """把F06执行统计包装解开；状态机只接收已绑定的单日修订契约。"""
+        if isinstance(value, DailyDayRevisionExecution):
+            value = value.revision
+        # 注入式适配器和离线替身也允许直接返回契约对象。
+        if isinstance(value, DayRevision):
+            return value
+        raise DayRepairError("DAY_REVISION_RESULT_INVALID")
 
     def _revision_reader(self, plan_id: str, fallback: _RevisionHolder) -> Callable[[], int]:
         def current_revision() -> int:

@@ -1235,3 +1235,11 @@ PLANNER_ROLE_THINKING=true PLANNER_COMPACT_CONTRACTS=true PLANNER_PROJECT_CONTEX
 - 问题：主智能体一次无效派发不应让此前成功查询的事实一起失效。Pipeline之前将初始technical_error统一抛出，实际收集到63地点事实仍未生成预览。
 - 修改：`PlanningDispatchService.validate_result_snapshot`复用事实、候选、任务和区域校验；Pipeline仅接收安全快照，并把提前结束提示写入最终报告与观测。真正身份/来源错误继续拒绝；不放宽餐饮绑定规则。
 - 根562项回归通过；实际快照的离线回放到达三日预览。在线续验的状态统一见CHG-003，不把受控模型结果当作真实排程验收。INDEX导航入口保持有效；临时事实、数据库、模型配置不提交。
+
+
+<a id="v4-day-revision-adapter-2026-10-11"></a>
+## 真实适配器返回值必须进入组合回归（2026-10-11）
+
+- 问题：单元替身直接返回DayRevision，实际适配器却返回含统计信息的DailyDayRevisionExecution。模块单独通过未覆盖这个交接，在线调用完成后仍在状态机应用处发生AttributeError。
+- 修复与取舍：pipeline显式解开包装，统一验证DayRevision；不在状态机泛化吞掉属性错误，也不放松事实/身份约束。回归采用真实异步适配器和状态机，仅替换外部模型响应。
+- 根564项后端回归通过。首次续验的F06初版已保存，后续从该阶段继续，避免重复需求整理与采集。真实续验状态以CHG-003为准；INDEX入口有效，临时证据不提交。
