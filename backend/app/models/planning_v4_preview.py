@@ -140,6 +140,18 @@ class PreviewEditRequest(ContractModel):
     expected_store_version: StrictInt = Field(gt=0)
 
 
+class DestinationSelectionRequest(ContractModel):
+    """从服务端保存的搜索候选中选择一个地点，并原子加入当前预览。"""
+
+    candidate_token: str = Field(min_length=32, max_length=128)
+    day_id: str = Field(min_length=1, max_length=256)
+    slot_id: str = Field(min_length=1, max_length=256)
+    command_id: str = Field(min_length=1, max_length=256)
+    client_ref: str = Field(min_length=1, max_length=256)
+    expected_store_version: StrictInt = Field(gt=0)
+    expected_plan_revision: StrictInt = Field(gt=0)
+
+
 class PreviewRouteJobStatus(ContractModel):
     task_id: str
     plan_id: str

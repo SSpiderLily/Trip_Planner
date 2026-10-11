@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+import sqlite3
 import tempfile
 import threading
 import time
@@ -26,11 +27,14 @@ from app.models.planning_v4 import (
     LegEndpoint,
 )
 from app.models.planning_v4.plan import AddActivity, EditCommand
+from app.models.planning_v4_preview import DestinationSelectionRequest
 from app.services.current_route_service import (
     CurrentRouteExecution,
     CurrentRouteLegOutcome,
     CurrentRouteModeOutcome,
 )
+from app.services.destination_candidate_repository import DestinationCandidateRepository
+from app.services.destination_search_service import DestinationSearchService
 from app.services.planning_v4_preview_edit_service import PlanningV4PreviewEditService
 from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
@@ -42,6 +46,40 @@ from app.services.task_service import TaskService
 from app.services.observation_service import ObservationService
 from app.services.observation_service import span
 from test_preview_task_service import FakePipeline, request_body
+
+
+class FakeDestinationExecutor:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, tool_name, arguments, *, timeout_seconds, cancel_event, priority):
+        self.calls.append((tool_name, dict(arguments), priority))
+        return {
+            "result_status": "ok",
+            "result_source": {
+                "api_version": "v3",
+                "queried_at": "2026-10-11T12:00:00+08:00",
+                "effective_params": {
+                    "keywords": arguments["keywords"],
+                    "city": arguments["city"],
+                    "citylimit": "true",
+                    "page": arguments["page"],
+                    "offset": arguments["offset"],
+                    "extensions": arguments["extensions"],
+                },
+            },
+            "count": "1",
+            "pois": [{
+                "id": "destination-api-meal-1",
+                "name": "江南小馆",
+                "cityname": "上海市",
+                "location": "121.490,31.240",
+                "type": "餐饮服务;中餐厅",
+                "typecode": "050100",
+                "cost": "80元/人",
+                "address": "上海市黄浦区江边路1号",
+            }],
+        }
 
 
 class EditPipeline:
@@ -427,6 +465,12 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
         )
         self.previews = PreviewRepository(Path(self.temp.name) / "previews.sqlite3")
         self.previews.initialize()
+        self.destination_repository = DestinationCandidateRepository(
+            Path(self.temp.name) / "destination-candidates.sqlite3",
+            ttl_seconds=60,
+        )
+        self.destination_repository.initialize()
+        self.destination_executor = FakeDestinationExecutor()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -445,11 +489,19 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
         app.state.preview_task_service = PreviewTaskService(
             self.tasks, self.previews, pipeline or EditPipeline(),
         )
+        destination_search = DestinationSearchService(
+            self.destination_repository,
+            tool_executor=self.destination_executor,
+            observation_service=self.tasks.observation,
+            tool_timeout_seconds=3,
+        )
+        app.state.destination_search_service = destination_search
         app.state.preview_edit_service = PlanningV4PreviewEditService(
             app.state.preview_task_service,
             self.previews,
             route_service=route_service,
             route_deadline_seconds=10,
+            destination_search_service=destination_search,
         )
         app.state.preview_task_service.edit_coordinator = app.state.preview_edit_service
         return app, TestClient(app)
@@ -520,6 +572,144 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
                 self.fail(f"路线任务在等待运行时提前结束：{payload['job']}")
             time.sleep(0.01)
         self.fail("路线任务未进入 running")
+
+    def test_destination_search_then_atomic_select_and_expired_token_replay(self):
+        _, client = self.make_client(FakeRouteService())
+        with client:
+            accepted, headers, initial = self.submit_ready(client)
+            task_id = accepted["task_id"]
+            search_url = f"/api/trip/v4/tasks/{task_id}/destinations/search"
+            search = client.post(search_url, headers=headers, json={
+                "keywords": "本帮菜",
+                "category": "meal",
+                "page": 1,
+            })
+            self.assertEqual(search.status_code, 200, search.text)
+            payload = search.json()
+            self.assertEqual(payload["city"], "上海")
+            self.assertEqual(payload["category"], "meal")
+            self.assertEqual(payload["candidates"][0]["name"], "江南小馆")
+            self.assertTrue(payload["candidates"][0]["selectable"])
+            self.assertEqual(payload["candidates"][0]["source"]["tool_name"], "maps_text_search")
+            candidate_token = payload["candidates"][0]["candidate_token"]
+            self.assertEqual(self.destination_executor.calls[0][0], "maps_text_search")
+
+            preview_url = f"/api/trip/v4/tasks/{task_id}/preview"
+            unchanged = client.get(preview_url, headers=headers).json()
+            self.assertEqual(unchanged["store_version"], initial["store_version"])
+            self.assertEqual(unchanged["plan_revision"], initial["plan_revision"])
+
+            planning_days = initial["preview"]["planning_input"]["days"]
+            sight_day = next(day for day in planning_days if day["day_id"] == "synthetic-day-1")
+            sight_slot = next(slot for slot in sight_day["slots"] if slot["period"] == "afternoon")
+            meal_day = next(day for day in planning_days if day["day_id"] == "synthetic-day-3")
+            occupied = {
+                activity["slot_id"]
+                for day in initial["preview"]["draft"]["days"]
+                if day["day_id"] == meal_day["day_id"]
+                for activity in day["activities"]
+            }
+            meal_slot = next(
+                slot for slot in meal_day["slots"]
+                if slot["period"] == "dinner" and slot["eligibility"] != "skipped"
+                and slot["slot_id"] not in occupied
+            )
+            select_url = f"/api/trip/v4/tasks/{task_id}/destinations/select"
+            bad_selection = DestinationSelectionRequest(
+                candidate_token=candidate_token,
+                day_id=sight_day["day_id"],
+                slot_id=sight_slot["slot_id"],
+                command_id="destination-category-mismatch",
+                client_ref="bad-destination-client-ref",
+                expected_store_version=initial["store_version"],
+                expected_plan_revision=initial["plan_revision"],
+            )
+            rejected = client.post(select_url, headers=headers, json=bad_selection.model_dump(mode="json"))
+            self.assertEqual(rejected.status_code, 422)
+            self.assertEqual(rejected.json()["detail"]["code"], "CANDIDATE_CATEGORY_MISMATCH")
+            after_rejection = client.get(preview_url, headers=headers).json()
+            self.assertEqual(after_rejection["store_version"], initial["store_version"])
+            self.assertFalse(any(
+                place["poi_id"] == "destination-api-meal-1"
+                for place in after_rejection["preview"]["facts"]["places"]
+            ))
+
+            selection = DestinationSelectionRequest(
+                candidate_token=candidate_token,
+                day_id=meal_day["day_id"],
+                slot_id=meal_slot["slot_id"],
+                command_id="destination-select-once",
+                client_ref="destination-select-client-ref",
+                expected_store_version=initial["store_version"],
+                expected_plan_revision=initial["plan_revision"],
+            )
+            selected = client.post(select_url, headers=headers, json=selection.model_dump(mode="json"))
+            self.assertEqual(selected.status_code, 202, selected.text)
+            selected_payload = selected.json()
+            envelope = selected_payload["envelope"]
+            self.assertEqual(envelope["store_version"], initial["store_version"] + 1)
+            self.assertEqual(envelope["plan_revision"], initial["plan_revision"] + 1)
+            self.assertFalse(selected_payload["replayed"])
+            activity_id = selected_payload["changed_activity_ids"][0]
+            activity = next(
+                activity
+                for day in envelope["preview"]["draft"]["days"]
+                for activity in day["activities"]
+                if activity["activity_id"] == activity_id
+            )
+            self.assertEqual(activity["activity_source"], "user")
+            self.assertEqual(activity["poi_id"], "destination-api-meal-1")
+            candidate = next(
+                candidate for candidate in envelope["preview"]["candidates"]
+                if candidate["candidate_id"] == activity["candidate_ref"]
+            )
+            self.assertEqual(candidate["category"], "meal")
+            place = next(
+                place for place in envelope["preview"]["facts"]["places"]
+                if place["fact_id"] == candidate["place_fact_id"]
+            )
+            source_ids = {source["tool_call_id"] for source in envelope["preview"]["facts"]["sources"]}
+            self.assertTrue(set(place["source_refs"]).issubset(source_ids))
+
+            with sqlite3.connect(self.destination_repository.path) as connection:
+                connection.execute("UPDATE destination_search_candidates SET expires_at=0")
+            replay = client.post(select_url, headers=headers, json=selection.model_dump(mode="json"))
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(replay.json()["receipt_store_version"], initial["store_version"] + 1)
+            self.assertEqual(len(self.destination_executor.calls), 1)
+
+            if selected_payload["job"] is not None:
+                self.wait_job(
+                    client,
+                    task_id,
+                    headers,
+                    selected_payload["job"]["calculation_id"],
+                )
+            before_expired_selection = client.get(preview_url, headers=headers).json()
+            expired_token_request = selection.model_copy(update={
+                "command_id": "destination-select-expired-token",
+                "client_ref": "destination-select-expired-client-ref",
+                "expected_store_version": before_expired_selection["store_version"],
+                "expected_plan_revision": before_expired_selection["plan_revision"],
+            })
+            unavailable = client.post(
+                select_url,
+                headers=headers,
+                json=expired_token_request.model_dump(mode="json"),
+            )
+            self.assertEqual(unavailable.status_code, 422, unavailable.text)
+            self.assertEqual(
+                unavailable.json()["detail"]["code"],
+                "DESTINATION_CANDIDATE_UNAVAILABLE",
+            )
+            after_expired_selection = client.get(preview_url, headers=headers).json()
+            self.assertEqual(after_expired_selection["store_version"], before_expired_selection["store_version"])
+            self.assertEqual(after_expired_selection["plan_revision"], before_expired_selection["plan_revision"])
+            self.assertEqual(
+                after_expired_selection["preview"]["facts"],
+                before_expired_selection["preview"]["facts"],
+            )
 
     def test_edit_api_is_bearer_bound_idempotent_and_returns_synced_envelope(self):
         routes = FakeRouteService()

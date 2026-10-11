@@ -187,7 +187,7 @@ npm run dev
 
 2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块尚未接入默认 v3 规划入口；其他后端模块按小步计划独立实施，默认入口尚待切换；正式v4预览可单独访问；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
 
-当前代码已恢复到性能方案1—3之前，保留各阶段完整 JSON 示例及 `qwen3.7-flash` 配置。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
+当前代码已恢复到性能方案1—3之前，保留各阶段完整 JSON 示例；模型由本地 `LLM_MODEL_ID` 指定。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
 
 v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—19:00，到达后和离开前各预留系统缓冲；晚到、早离不强行填满。路线或开放信息缺失时明确提示；初次生成没有已核实景点不能交付，但用户编辑后可保留空白日期。
 
@@ -411,3 +411,12 @@ Production deployment test.
 `/preview`左侧拖动调整当天顺序，也可删除某一次活动、切换已查询到的交通方式；地图下方按地点批量删除关联活动，或把已有候选加入可用时段。一次请求未确认时先处理待同步编辑；路线计算期间仍可继续修改。网络响应不明时刷新会重放同一命令，版本冲突需用户明确重试。停止重试会重新读取服务器内容，已接受的编辑仍保留。
 
 验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。搜索新地点与需求入口继续单独接入。
+
+
+### v4目的地搜索
+
+`POST /api/trip/v4/tasks/{task_id}/destinations/search`接收`keywords`、`category`（sightseeing或meal）及`page`，城市来自当前预览。结果包含名称、地址、参考cost、来源及是否可选；搜索本身不改草稿。
+
+`POST .../destinations/select`接收服务端candidate_token、day_id、slot_id、两项期望版本、command_id和client_ref，成功返回同编辑API的202响应。请求结果不明时必须原样重放；过期新候选返回`DESTINATION_CANDIDATE_UNAVAILABLE`，重新搜索后再选择。两个接口均使用任务Bearer。
+
+`DESTINATION_CANDIDATE_DB_PATH`默认`backend/data/destination_candidates.sqlite3`，必须与预览/观测库分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。

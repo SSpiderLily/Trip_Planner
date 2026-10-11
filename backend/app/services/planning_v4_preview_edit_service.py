@@ -5,10 +5,12 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import asdict
 import logging
-from typing import Any
+from typing import Any, Callable
 
-from app.models.planning_v4.plan import EditCommand, ItineraryPreview, PlanDraft, RouteModeResult
+from app.models.planning_v4.facts import FactStore
+from app.models.planning_v4.plan import AddActivity, EditCommand, ItineraryPreview, PlanDraft, RouteModeResult
 from app.models.planning_v4_preview import (
+    DestinationSelectionRequest,
     PreviewEditJobResponse,
     PreviewEditResponse,
     PreviewRouteJobStatus,
@@ -22,6 +24,8 @@ from app.models.preview_storage import (
     StoredPreview,
 )
 from app.services.current_route_service import CurrentRouteError, CurrentRouteService
+from app.services.destination_candidate_repository import DestinationCandidateNotFound
+from app.services.destination_search_service import DestinationCandidateBundle, DestinationSearchService
 from app.services.planning_v4_edit_service import PlanningV4EditError, PlanningV4EditService
 from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
@@ -42,6 +46,61 @@ _FATAL_ROUTE_CODES = frozenset({
     "route_result_contract_invalid",
 })
 _LOGGER = logging.getLogger(__name__)
+
+
+def _append_destination_bundle(
+    snapshot: PreviewSnapshot,
+    bundle: DestinationCandidateBundle,
+) -> PreviewSnapshot:
+    """只按完全相同的不可变 ID 内容去重，不覆盖预览中的事实或候选。"""
+    def merge(existing, additions, identity: Callable[[Any], str], label: str):
+        values = list(existing)
+        by_id = {identity(value): value for value in existing}
+        for value in additions:
+            value_id = identity(value)
+            previous = by_id.get(value_id)
+            if previous is not None:
+                if previous != value:
+                    raise PreviewIdentityConflict(f"目的地候选{label} ID 内容冲突")
+                continue
+            values.append(value)
+            by_id[value_id] = value
+        return tuple(values)
+
+    old_preview = snapshot.preview
+    sources = merge(
+        old_preview.facts.sources,
+        bundle.sources,
+        lambda source: source.tool_call_id,
+        "来源",
+    )
+    places = merge(
+        old_preview.facts.places,
+        (bundle.place,),
+        lambda place: place.fact_id,
+        "事实",
+    )
+    candidates = merge(
+        old_preview.candidates,
+        (bundle.candidate,),
+        lambda candidate: candidate.candidate_id,
+        "候选",
+    )
+    facts = FactStore.model_validate({
+        "sources": [source.model_dump(mode="json") for source in sources],
+        "places": [place.model_dump(mode="json") for place in places],
+        "weather": [fact.model_dump(mode="json") for fact in old_preview.facts.weather],
+        "routes": [fact.model_dump(mode="json") for fact in old_preview.facts.routes],
+    })
+    preview_payload = old_preview.model_dump(mode="json")
+    preview_payload["facts"] = facts.model_dump(mode="json")
+    preview_payload["candidates"] = [candidate.model_dump(mode="json") for candidate in candidates]
+    preview = ItineraryPreview.model_validate(preview_payload)
+    return PreviewSnapshot.model_validate({
+        "preview": preview.model_dump(mode="json"),
+        "timing": snapshot.timing.model_dump(mode="json"),
+        "cost": snapshot.cost.model_dump(mode="json"),
+    })
 
 
 @contextmanager
@@ -88,6 +147,7 @@ class PlanningV4PreviewEditService:
         *,
         route_service: CurrentRouteService | None = None,
         edit_service: PlanningV4EditService | None = None,
+        destination_search_service: DestinationSearchService | None = None,
         route_deadline_seconds: float = 120,
     ):
         if route_deadline_seconds <= 0:
@@ -96,6 +156,7 @@ class PlanningV4PreviewEditService:
         self.repository = repository
         self.route_service = route_service or CurrentRouteService()
         self.edit_service = edit_service or PlanningV4EditService()
+        self.destination_search_service = destination_search_service
         self.route_deadline_seconds = float(route_deadline_seconds)
         self.accepting = True
         self.workers: dict[str, asyncio.Task] = {}
@@ -108,16 +169,20 @@ class PlanningV4PreviewEditService:
         command: EditCommand,
         *,
         expected_store_version: int,
+        _prepare_edit: Callable[[PreviewSnapshot, EditCommand], tuple[PreviewSnapshot, EditCommand]] | None = None,
     ) -> PreviewEditResponse:
         if not self.accepting:
             raise TaskError("SERVICE_STOPPING", "服务正在关闭，暂不能编辑", 503)
         await self.preview_task_service._require_ready_job(task_id, access_token)
 
         def transform(snapshot: PreviewSnapshot, inherited_days: tuple[str, ...]):
-            departure_fact_id = self._verified_departure_fact_id(snapshot.preview)
+            edit_snapshot, edit_command = (
+                _prepare_edit(snapshot, command) if _prepare_edit is not None else (snapshot, command)
+            )
+            departure_fact_id = self._verified_departure_fact_id(edit_snapshot.preview)
             execution = self.edit_service.apply(
-                snapshot.preview,
-                command,
+                edit_snapshot.preview,
+                edit_command,
                 verified_departure_fact_id=departure_fact_id,
                 inherited_pending_day_ids=inherited_days,
             )
@@ -152,6 +217,12 @@ class PlanningV4PreviewEditService:
         except PlanningV4EditError as exc:
             status = 409 if exc.code in {"stale_edit_revision", "plan_mismatch"} else 422
             raise TaskError(exc.code.upper(), "编辑命令无法应用到当前预览", status) from exc
+        except DestinationCandidateNotFound as exc:
+            raise TaskError(
+                "DESTINATION_CANDIDATE_UNAVAILABLE",
+                "候选已失效，请重新搜索后添加",
+                422,
+            ) from exc
         except (PreviewIdentityConflict, ValueError) as exc:
             raise TaskError("INVALID_PREVIEW_EDIT", "编辑结果未通过预览契约校验", 422) from exc
         except Exception as exc:
@@ -175,6 +246,62 @@ class PlanningV4PreviewEditService:
             changed_leg_ids=write.changed_leg_ids,
             replayed=write.replayed,
             receipt_store_version=write.receipt_store_version,
+        )
+
+    async def add_destination_candidate(
+        self,
+        task_id: str,
+        access_token: str,
+        request: DestinationSelectionRequest,
+    ) -> PreviewEditResponse:
+        """在编辑仓库同一事务内解析token、接入事实闭包并加入活动。"""
+        destination_search = self.destination_search_service
+        if destination_search is None:
+            raise TaskError("DESTINATION_SELECT_UNAVAILABLE", "目的地选择暂不可用", 503)
+        ready_job = await self.preview_task_service._require_ready_job(task_id, access_token)
+        operation = AddActivity(
+            type="add_activity",
+            client_ref=request.client_ref,
+            candidate_ref=request.candidate_token,
+            slot_id=request.slot_id,
+            day_id=request.day_id,
+        )
+        command = EditCommand(
+            plan_id=ready_job["plan_id"],
+            day_id=request.day_id,
+            base_revision=request.expected_plan_revision,
+            command_id=request.command_id,
+            operations=(operation,),
+        )
+
+        def prepare(snapshot: PreviewSnapshot, incoming: EditCommand):
+            bundle = destination_search.resolve_candidate(
+                request.candidate_token,
+                task_id=task_id,
+                plan_id=snapshot.preview.draft.plan_id,
+                access_token=access_token,
+            )
+            if bundle.task_id != task_id or bundle.plan_id != snapshot.preview.draft.plan_id:
+                raise PlanningV4EditError("destination_candidate_binding_mismatch")
+            prepared_snapshot = _append_destination_bundle(snapshot, bundle)
+            source_operation = incoming.operations[0]
+            if not isinstance(source_operation, AddActivity):
+                raise PlanningV4EditError("destination_selection_operation_invalid")
+            prepared_operation = source_operation.model_copy(update={
+                "candidate_ref": bundle.candidate.candidate_id,
+            })
+            prepared_command = EditCommand.model_validate({
+                **incoming.model_dump(mode="json"),
+                "operations": (prepared_operation.model_dump(mode="json"),),
+            })
+            return prepared_snapshot, prepared_command
+
+        return await self.edit(
+            task_id,
+            access_token,
+            command,
+            expected_store_version=request.expected_store_version,
+            _prepare_edit=prepare,
         )
 
     async def get_job(
