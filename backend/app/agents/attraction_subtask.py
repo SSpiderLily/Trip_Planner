@@ -204,15 +204,15 @@ def _all_fact_ids(facts: FactStore) -> set[str]:
     return {fact.fact_id for fact in (*facts.places, *facts.weather, *facts.routes)}
 
 
-def _validate_fact_sources(facts: FactStore) -> None:
+def _validate_fact_sources(facts: FactStore, step: str = "attraction_preflight") -> None:
     sources = {source.tool_call_id: source for source in facts.sources}
     for fact in facts.places:
         refs = set(fact.source_refs) | set(fact.field_sources.values())
         if not refs or not refs.issubset(sources):
-            raise PlanningError("FACT_SOURCE_UNCLOSED", "已有地点事实缺少有效来源", step="attraction_preflight")
+            raise PlanningError("FACT_SOURCE_UNCLOSED", "已有地点事实缺少有效来源", step=step)
     for fact in (*facts.weather, *facts.routes):
         if sources.get(fact.source.tool_call_id) != fact.source:
-            raise PlanningError("FACT_SOURCE_UNCLOSED", "已有事实缺少有效来源", step="attraction_preflight")
+            raise PlanningError("FACT_SOURCE_UNCLOSED", "已有事实缺少有效来源", step=step)
 
 
 def _requirement_matches_name(requirement: HardRequirement, name: str) -> bool:
@@ -272,6 +272,8 @@ def _count_field_progress(
 class AttractionSubtaskRunner:
     """在单个 Subtask 内循环执行结构化模型动作与类型化地点查询。"""
 
+    DERIVED_FACT_PREFIX = "derived:attraction:"
+
     def __init__(
         self,
         *,
@@ -307,6 +309,97 @@ class AttractionSubtaskRunner:
                 or not math.isfinite(value) or value <= 0):
             raise ValueError(f"{name} 必须是有限正数")
         return float(value)
+
+    # Role hooks keep the F03 lifecycle reusable without copying its runner.
+    def _expected_role(self) -> str:
+        return "attractions"
+
+    def _role_label(self) -> str:
+        return "景点"
+
+    def _action_adapter(self):
+        return _ACTION_ADAPTER
+
+    def _system_prompt(self) -> str:
+        return SYSTEM_PROMPT
+
+    def _agent_span_name(self) -> str:
+        return "agent.attraction_subtask"
+
+    def _llm_span_name(self) -> str:
+        return "llm.attraction_decision"
+
+    def _allowed_periods(self) -> frozenset[str]:
+        return SIGHTSEEING_PERIODS
+
+    def _requirement_kinds(self) -> frozenset[str]:
+        return frozenset({"must_visit"})
+
+    def _candidate_category(self) -> str:
+        return "sightseeing"
+
+    def _place_is_eligible(self, place: PlaceFact) -> bool:
+        return self._place_category_status(place) == "sightseeing"
+
+    def _place_category_status(self, place: PlaceFact) -> str:
+        return _category_status(place)
+
+    def _is_search_action(self, action: Any) -> bool:
+        return isinstance(action, SearchAction)
+
+    def _is_verification_action(self, action: Any) -> bool:
+        return False
+
+    def _action_allowed(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> bool:
+        return True
+
+    def _empty_result_is_terminal(self, action, subtask, context, store) -> bool:
+        return True
+
+    def _continue_after_no_progress(self, action, subtask, context, store) -> bool:
+        return False
+
+    def _search_history_context(self, action, subtask, context, result) -> dict[str, Any]:
+        return {
+            "keywords": self._action_keywords(action) if self._is_search_action(action) else None,
+            "city": context.planning_input.request.city,
+            "citylimit": True,
+            "page": 1,
+            "offset": MAX_SEARCH_PAGE_SIZE,
+        }
+
+    def _action_keywords(self, action: Any) -> str:
+        return action.keywords
+
+    def _action_signature(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> str:
+        return _query_signature(self._action_keywords(action))
+
+    def _execute_search_action(
+        self, adapter, action, subtask, context, deadline, pending, trace, store, cancel_event,
+    ):
+        return self._search_with_retry(
+            adapter, self._action_keywords(action), context.planning_input.request.city,
+            deadline, pending, trace, store, cancel_event,
+        )
+
+    def _format_repair_instruction(self) -> str:
+        return "上次输出无法解析或不符合 JSON Schema。请重新按原始任务和 schema 返回一个有效 JSON 对象；不要增加身份、事实或工具参数字段。"
+
+    def _preflight_step(self) -> str:
+        return "attraction_preflight"
+
+    def _result_span_name(self) -> str:
+        return "agent.attraction_result"
+
+    def _completion_stop_reason(self, task_result: TaskResult) -> str:
+        # Keep the established F03 completion behavior; other roles may have
+        # role-specific partial reasons in their TaskResult contract.
+        return (
+            "ambiguous"
+            if any(item.reason == "同名地点对应多个 POI，无法唯一核实必去对象"
+                   for item in task_result.coverage)
+            else "scope_exhausted"
+        )
 
     async def run_async(self, subtask: Subtask, context: AttractionExecutionContext) -> AttractionExecution:
         """取消立即返回调用方；被取消线程不写回共享结果，实际 MCP 名额由工具线程持有。"""
@@ -411,7 +504,7 @@ class AttractionSubtaskRunner:
             "role": subtask.role,
         }
 
-        with span("agent.attraction_subtask", "agent", safe_context) as agent_span:
+        with span(self._agent_span_name(), "agent", safe_context) as agent_span:
             self._active_agent_span = agent_span
             while time.monotonic() < deadline and not (cancel_event and cancel_event.is_set()):
                 candidates = self._available_places(subtask, context, store["places"])
@@ -454,12 +547,7 @@ class AttractionSubtaskRunner:
                     if task_result.status == "complete":
                         agent_span.output = self._safe_result_summary(task_result)
                         return self._execution(context, store, task_result, tool_calls, started)
-                    stop = (
-                        "ambiguous"
-                        if any(item.reason == "同名地点对应多个 POI，无法唯一核实必去对象"
-                               for item in task_result.coverage)
-                        else "scope_exhausted"
-                    )
+                    stop = self._completion_stop_reason(task_result)
                     task_result = self._make_result(
                         subtask, context, store["places"], action,
                         "partial", stop,
@@ -467,13 +555,20 @@ class AttractionSubtaskRunner:
                     agent_span.output = self._safe_result_summary(task_result)
                     return self._execution(context, store, task_result, tool_calls, started)
 
-                keywords = action.keywords.strip()
+                if (not self._is_search_action(action) and not self._is_verification_action(action)) or not self._action_allowed(action, subtask, context):
+                    return self._finish(
+                        subtask, context, store, tool_calls,
+                        "partial" if context.candidate_refs else "failed",
+                        "invalid_output", started, tool_calls, progress_seen,
+                        "模型返回了范围外或不支持的查询动作",
+                    )
+                keywords = self._action_keywords(action).strip() if self._is_search_action(action) else ""
                 if _FORBIDDEN_QUERY.search(keywords):
                     return self._finish(
                         subtask, context, store, tool_calls, "failed", "invalid_output", started,
                         tool_calls, progress_seen, "模型搜索关键词不符合安全格式",
                     )
-                signature = _query_signature(keywords)
+                signature = self._action_signature(action, subtask, context)
                 if not signature or signature in query_signatures:
                     return self._finish(
                         subtask, context, store, tool_calls,
@@ -483,8 +578,10 @@ class AttractionSubtaskRunner:
                     )
                 query_signatures.add(signature)
                 before_eligible = dict(eligible_fields)
-                search_result = self._search_with_retry(adapter, keywords, context.planning_input.request.city,
-                                                        deadline, pending_calls, tool_calls, store, cancel_event)
+                search_result = self._execute_search_action(
+                    adapter, action, subtask, context, deadline, pending_calls,
+                    tool_calls, store, cancel_event,
+                )
                 if search_result is None:
                     return self._finish(
                         subtask, context, store, tool_calls,
@@ -498,7 +595,9 @@ class AttractionSubtaskRunner:
                     )
                 new_places = search_result.data.places if isinstance(search_result.data, PlaceSearchData) else ()
 
-                if search_result.status == "empty":
+                if search_result.status == "empty" and self._empty_result_is_terminal(
+                    action, subtask, context, store,
+                ):
                     has_candidates = bool(self._available_places(subtask, context, store["places"]))
                     return self._finish(
                         subtask, context, store, tool_calls, "partial",
@@ -526,7 +625,7 @@ class AttractionSubtaskRunner:
                             break
                         if place.poi_id in detail_attempted or place.poi_id in subtask.excluded_poi_ids:
                             continue
-                        if _category_status(place) != "sightseeing" or place.location is not None:
+                        if not self._place_is_eligible(place) or place.location is not None:
                             continue
                         detail_attempted.add(place.poi_id)
                         detail_result = self._detail_with_retry(adapter, place.poi_id, deadline,
@@ -554,16 +653,12 @@ class AttractionSubtaskRunner:
                 progress = _count_field_progress(before_eligible, eligible_fields)
                 progress_seen = progress_seen or progress > 0
                 search_history.append({
-                    "keywords": keywords,
-                    "city": context.planning_input.request.city,
-                    "citylimit": True,
-                    "page": 1,
-                    "offset": MAX_SEARCH_PAGE_SIZE,
+                    **self._search_history_context(action, subtask, context, search_result),
                     "result_status": search_result.status,
                     "returned_poi_count": len(new_places),
                     "returned_hits": [
                         {"poi_id": item.poi_id, "name": item.name,
-                         "category": _category_status(item),
+                         "category": self._place_category_status(item),
                          "location_present": item.location is not None,
                          "city_matches_scope": _city_matches(subtask.scope.city, item.city)}
                         for item in new_places
@@ -571,7 +666,7 @@ class AttractionSubtaskRunner:
                     "new_eligible_poi_ids": sorted(set(eligible_fields) - set(before_eligible)),
                     "progress_fields": progress,
                 })
-                if progress == 0:
+                if progress == 0 and not self._continue_after_no_progress(action, subtask, context, store):
                     return self._finish(
                         subtask, context, store, tool_calls, "partial", "no_progress", started,
                         tool_calls, progress_seen, "查询没有增加有效景点或有用字段",
@@ -588,10 +683,10 @@ class AttractionSubtaskRunner:
 
     def _validate_preflight(self, subtask: Subtask, context: AttractionExecutionContext) -> None:
         def reject(code: str, message: str):
-            raise PlanningError(code, message, step="attraction_preflight")
+            raise PlanningError(code, message, step=self._preflight_step())
 
-        if subtask.role != "attractions":
-            reject("ROLE_NOT_SUPPORTED", "F03 只接受 attractions 子任务")
+        if subtask.role != self._expected_role():
+            reject("ROLE_NOT_SUPPORTED", f"当前子任务只接受 {self._expected_role()} 角色")
         planning_input = context.planning_input
         try:
             validate_requirement_sources(
@@ -613,7 +708,7 @@ class AttractionSubtaskRunner:
 
         facts = context.fact_store
         try:
-            _validate_fact_sources(facts)
+            _validate_fact_sources(facts, step=self._preflight_step())
         except PlanningError as exc:
             raise exc
         known_fact_ids = _all_fact_ids(facts)
@@ -659,17 +754,17 @@ class AttractionSubtaskRunner:
         for slot_id in subtask.scope.slot_ids:
             slot = all_slots[slot_id]
             if slot.eligibility == "skipped":
-                reject("SCOPE_SLOT_SKIPPED", "景点任务不能使用 skipped 时段")
-            if slot.period not in SIGHTSEEING_PERIODS:
-                reject("SCOPE_SLOT_INVALID", "景点任务只能使用早间、下午或晚间游览时段")
+                reject("SCOPE_SLOT_SKIPPED", f"{self._role_label()}任务不能使用 skipped 时段")
+            if slot.period not in self._allowed_periods():
+                reject("SCOPE_SLOT_INVALID", f"{self._role_label()}任务不能使用该时段")
             if subtask.scope.day_ids and slot.day_id not in subtask.scope.day_ids:
                 reject("SCOPE_SLOT_DAY_MISMATCH", "时段不属于任务范围内的日期")
         requirement_by_id = {item.requirement_id: item for item in planning_input.requirements.hard_requirements}
         if not set(subtask.requirement_ids).issubset(requirement_by_id):
             reject("SCOPE_REQUIREMENT_INVALID", "任务引用了不存在的硬性需求")
         for requirement in subtask.requirement_ids:
-            if requirement_by_id[requirement].kind != "must_visit":
-                reject("SCOPE_REQUIREMENT_INVALID", "景点子任务只能绑定 must_visit 硬性需求")
+            if requirement_by_id[requirement].kind not in self._requirement_kinds():
+                reject("SCOPE_REQUIREMENT_INVALID", f"{self._role_label()}子任务不能绑定该类硬性需求")
 
         place_by_fact_id = {item.fact_id: item for item in facts.places}
         allowed_slots = self._allowed_slot_ids(subtask, context)
@@ -687,8 +782,8 @@ class AttractionSubtaskRunner:
         current_candidate_pool = self._available_places(subtask, context, list(facts.places))
         for candidate in context.candidate_refs:
             place = place_by_fact_id.get(candidate.place_fact_id)
-            if (candidate.category != "sightseeing" or place is None or place.poi_id != candidate.poi_id
-                    or place.location is None or _category_status(place) != "sightseeing"
+            if (candidate.category != self._candidate_category() or place is None or place.poi_id != candidate.poi_id
+                    or place.location is None or not self._place_is_eligible(place)
                     or not _city_matches(subtask.scope.city, place.city)):
                 reject("CANDIDATE_REF_INVALID", "已有景点候选没有匹配的同城已核实事实")
             if candidate.poi_id in subtask.excluded_poi_ids:
@@ -719,7 +814,7 @@ class AttractionSubtaskRunner:
             return {
                 slot.slot_id for slot in slots
                 if slot.day_id in subtask.scope.day_ids and slot.eligibility != "skipped"
-                and slot.period in SIGHTSEEING_PERIODS
+                and slot.period in self._allowed_periods()
             }
         return set()
 
@@ -745,7 +840,7 @@ class AttractionSubtaskRunner:
                 continue
             if not _city_matches(subtask.scope.city, place.city):
                 continue
-            if _category_status(place) != "sightseeing":
+            if not self._place_is_eligible(place):
                 continue
             if any(_requirement_matches_name(item, place.name) for item in blocked_requirements):
                 continue
@@ -782,7 +877,7 @@ class AttractionSubtaskRunner:
         ]
         known_fields = _qualified_field_index(subtask.scope.city, context.fact_store.places)
         prompt_data = {
-            "schema": _ACTION_ADAPTER.json_schema(),
+            "schema": self._action_adapter().json_schema(),
             "subtask": {
                 "objective": subtask.objective,
                 "city": subtask.scope.city,
@@ -837,7 +932,7 @@ class AttractionSubtaskRunner:
             ],
         }
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt()},
             {"role": "user", "content": json.dumps(prompt_data, ensure_ascii=False)},
         ]
 
@@ -890,7 +985,7 @@ class AttractionSubtaskRunner:
             self._record_usage(token_usage(raw_usage))
             try:
                 payload = self._parse_json(text)
-                action = _ACTION_ADAPTER.validate_python(payload)
+                action = self._action_adapter().validate_python(payload)
             except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
                 if repairs >= repair_budget:
                     return PlanningError("INVALID_OUTPUT", "模型输出不符合景点动作格式", step="invalid_output")
@@ -898,7 +993,7 @@ class AttractionSubtaskRunner:
                 self.format_repairs += 1
                 messages = [*messages, {
                     "role": "user",
-                    "content": "上次输出无法解析或不符合 JSON Schema。请重新按原始任务和 schema 返回一个有效 JSON 对象；不要增加身份、事实或工具参数字段。",
+                    "content": self._format_repair_instruction(),
                 }]
                 continue
             return action
@@ -908,7 +1003,7 @@ class AttractionSubtaskRunner:
         if not call_state.try_start(deadline):
             raise TimeoutError("模型调用超时或取消，未启动")
         runner.model_calls += 1
-        with span("llm.attraction_decision", "llm", safe_input) as record:
+        with span(runner._llm_span_name(), "llm", safe_input) as record:
             invoke_with_usage = getattr(llm, "invoke_with_usage", None)
             if callable(invoke_with_usage):
                 text, usage = invoke_with_usage(
@@ -955,12 +1050,20 @@ class AttractionSubtaskRunner:
         }
 
     def _search_with_retry(self, adapter, keywords, city, deadline, pending, trace, store, cancel_event):
+        return self._query_with_retry(
+            lambda: adapter.search_text(keywords, city, citylimit=True, page=1,
+                                        offset=MAX_SEARCH_PAGE_SIZE, extensions="base"),
+            deadline, pending, trace, store, cancel_event,
+        )
+
+    def _query_with_retry(self, invoke, deadline, pending, trace, store, cancel_event, *, validate=None):
         attempts = 0
         while True:
             if time.monotonic() >= deadline or (cancel_event and cancel_event.is_set()):
                 return None
-            result = adapter.search_text(keywords, city, citylimit=True, page=1,
-                                         offset=MAX_SEARCH_PAGE_SIZE, extensions="base")
+            result = invoke()
+            if validate is not None:
+                result = validate(result)
             self._record_tool(result, pending, trace)
             self._append_result(result, store)
             if result.status != "error" or result.error is None or not result.error.retryable:
@@ -1020,8 +1123,8 @@ class AttractionSubtaskRunner:
             elapsed_seconds=round(pending_item.elapsed_seconds, 3),
         ))
 
-    @staticmethod
-    def _append_result(result: ToolResult, store: dict[str, list]) -> None:
+    @classmethod
+    def _append_result(cls, result: ToolResult, store: dict[str, list]) -> None:
         if all(item.tool_call_id != result.source.tool_call_id for item in store["sources"]):
             store["sources"].append(result.source)
         data = result.data
@@ -1036,21 +1139,29 @@ class AttractionSubtaskRunner:
         # Search and detail responses can expose different fields for one POI.
         # Keep both provider facts and add one provenance-preserving composite
         # so a detail coordinate can complete the searched scenic identity.
-        provider_places = [
+        derived_prefix = cls.DERIVED_FACT_PREFIX
+        provider_places = [item for item in store["places"] if not item.fact_id.startswith("derived:")]
+        own_derived = [
             item for item in store["places"]
-            if not item.fact_id.startswith("derived:attraction:")
+            if item.fact_id.startswith(derived_prefix)
+        ]
+        other_derived = [
+            item for item in store["places"]
+            if item.fact_id.startswith("derived:") and not item.fact_id.startswith(derived_prefix)
         ]
         grouped: dict[str, list[PlaceFact]] = {}
         for item in provider_places:
             grouped.setdefault(item.poi_id, []).append(item)
         derived = [
-            AttractionSubtaskRunner._combine_place_facts(poi_id, rows)
+            cls._combine_place_facts(poi_id, rows)
             for poi_id, rows in grouped.items() if len(rows) > 1
         ]
-        store["places"] = [*provider_places, *derived]
+        recomputed_poi_ids = {item.poi_id for item in derived}
+        preserved_own_derived = [item for item in own_derived if item.poi_id not in recomputed_poi_ids]
+        store["places"] = [*provider_places, *other_derived, *preserved_own_derived, *derived]
 
-    @staticmethod
-    def _combine_place_facts(poi_id: str, rows: list[PlaceFact]) -> PlaceFact:
+    @classmethod
+    def _combine_place_facts(cls, poi_id: str, rows: list[PlaceFact]) -> PlaceFact:
         def latest(field: str):
             return next((getattr(row, field) for row in reversed(rows)
                          if getattr(row, field) not in (None, "")), None)
@@ -1088,7 +1199,7 @@ class AttractionSubtaskRunner:
             missing.append(MissingField(field="opening_hours_raw", reason="not_returned"))
         photos = tuple(dict.fromkeys(photo for row in rows for photo in row.photos))
         return PlaceFact(
-            fact_id=f"derived:attraction:{poi_id}",
+            fact_id=f"{cls.DERIVED_FACT_PREFIX}{poi_id}",
             poi_id=poi_id,
             name=name,
             location=location,
@@ -1279,7 +1390,7 @@ class AttractionSubtaskRunner:
             "context_revision": context.context_revision,
             "task_id": subtask.task_id,
         }
-        with span("agent.attraction_result", "agent", safe_context) as result_span:
+        with span(self._result_span_name(), "agent", safe_context) as result_span:
             result_span.output = self._safe_result_summary(result)
         return execution
 
