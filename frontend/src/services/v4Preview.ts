@@ -4,6 +4,9 @@ import type {
   V4FinalSaveResponse,
   V4FinalState,
   V4FinalRestoreRequest,
+  V4EditRequest,
+  V4EditResponse,
+  V4EditJobResponse,
   V4PreviewAccess,
   V4PreviewEnvelope,
   V4RestoreResponse,
@@ -13,6 +16,7 @@ import type {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 const CURRENT_PREVIEW_KEY = 'trip_planner_v4_current_preview_v1'
 const ACCESS_KEY_PREFIX = 'trip_planner_v4_preview_access_v1:'
+let pendingPreviewAccess: V4PreviewAccess | null = null
 
 // Separate from the legacy client so task credentials are never included in request logging.
 const previewClient = axios.create({
@@ -25,16 +29,39 @@ export function savePreviewAccess(taskId: string, accessToken: string, planId: s
   if (!taskId.trim() || !accessToken.trim() || !planId.trim()) {
     throw new Error('预览访问信息不完整，无法恢复行程。')
   }
-  const previousTaskId = safeStorageGet(CURRENT_PREVIEW_KEY)
   const access: V4PreviewAccess = { taskId, planId, accessToken }
-  safeStorageSet(accessKey(taskId), JSON.stringify(access))
-  safeStorageSet(CURRENT_PREVIEW_KEY, taskId)
-  if (previousTaskId && previousTaskId !== taskId) safeStorageRemove(accessKey(previousTaskId))
+  // Keep the access in memory first so this page can continue if browser storage is blocked.
+  pendingPreviewAccess = access
+  try {
+    persistPreviewAccess(access)
+    pendingPreviewAccess = null
+  } catch {
+    throw new Error('本机无法保存预览恢复信息。当前页面仍可继续查看，但刷新或关闭后无法恢复。')
+  }
 }
 
 export function getLatestPreviewAccess(): V4PreviewAccess | null {
+  if (pendingPreviewAccess) return { ...pendingPreviewAccess }
   const taskId = safeStorageGet(CURRENT_PREVIEW_KEY)
   return taskId ? readPreviewAccess(taskId) : null
+}
+
+/** 本页因存储不可用而暂存的访问信息；不写入日志或 URL。 */
+export function getPendingPreviewAccess(): V4PreviewAccess | null {
+  return pendingPreviewAccess ? { ...pendingPreviewAccess } : null
+}
+
+/** 只重试持久化最近一次访问信息，不会重新提交旅行规划。 */
+export function retrySavePreviewAccess(): boolean {
+  const access = pendingPreviewAccess
+  if (!access) return true
+  try {
+    persistPreviewAccess(access)
+    pendingPreviewAccess = null
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function readPreviewAccess(taskId: string): V4PreviewAccess | null {
@@ -97,6 +124,44 @@ export async function restoreV4Final(
   return response.data as V4RestoreResponse
 }
 
+export async function submitV4Edit(
+  access: V4PreviewAccess,
+  request: V4EditRequest,
+): Promise<V4EditResponse> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/edits`,
+    request,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4EditResponse
+}
+
+export async function getV4EditJob(
+  access: V4PreviewAccess,
+  calculationId: string,
+): Promise<V4EditJobResponse> {
+  const response = await previewClient.get(
+    `/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/edit-jobs/${encodeURIComponent(calculationId)}`,
+    { headers: authorizationHeader(access) },
+  )
+  return response.data as V4EditJobResponse
+}
+
+export function isV4EditConflict(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 409
+}
+
+export function v4EditErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    if (error.response?.status === 409) return '行程已发生变化。已读取最新内容，这项编辑仍保留，请确认后重试或放弃。'
+    if (error.response?.status === 422) return '这项编辑已保留，但当前安排无法应用。请调整内容后重试或放弃。'
+    if (error.response?.status === 404) return '无法访问这份行程。这项编辑仍保留在本机。'
+    if (error.response?.status && error.response.status >= 500) return '编辑暂未同步，具体操作已保留在本机。请重试或放弃。'
+    if (error.code === 'ECONNABORTED' || !error.response) return '连接暂不可用，具体操作已保留在本机。请恢复连接后重试。'
+  }
+  return '编辑暂未同步，具体操作已保留在本机。请重试或放弃。'
+}
+
 export function v4FinalErrorMessage(error: unknown, action: 'save' | 'restore'): string {
   if (axios.isAxiosError(error)) {
     const code = error.response?.data?.detail?.code
@@ -145,6 +210,13 @@ function authorizationHeader(access: V4PreviewAccess): { Authorization: string }
 
 function accessKey(taskId: string): string {
   return `${ACCESS_KEY_PREFIX}${encodeURIComponent(taskId)}`
+}
+
+function persistPreviewAccess(access: V4PreviewAccess): void {
+  const previousTaskId = safeStorageGet(CURRENT_PREVIEW_KEY)
+  safeStorageSet(accessKey(access.taskId), JSON.stringify(access))
+  safeStorageSet(CURRENT_PREVIEW_KEY, access.taskId)
+  if (previousTaskId && previousTaskId !== access.taskId) safeStorageRemove(accessKey(previousTaskId))
 }
 
 function safeStorageGet(key: string): string | null {

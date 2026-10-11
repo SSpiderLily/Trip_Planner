@@ -368,14 +368,14 @@ Production deployment test.
 
 ### v4用户预览页面
 
-前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；首页尚未改为v4提交，浏览器编辑继续实施，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
+前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项/冲突；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；首页尚未改为v4提交，预览已支持按日编辑，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
 
 映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
 
 
 ### v4按日编辑核心
 
-`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。v4编辑API负责原子存储和路线重算；正式编辑页面继续接线，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
+`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。v4编辑API负责原子存储和路线重算；正式预览页面已接入按日编辑，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
 
 
 ### v4最终结果保存与还原
@@ -404,3 +404,10 @@ Production deployment test.
 `POST /api/trip/v4/tasks/{task_id}/edits`携带`expected_store_version`和`EditCommand`，接受后返回202及同版本envelope、变化活动/路段和可选job。`GET .../edit-jobs/{calculation_id}`读取重算状态及当前预览，均使用该任务Bearer。一个命令只编辑一天，可在operations中原子删除多个活动；新增当前仅引用服务端已核实候选。
 
 网络结果不明时原样重放同一command_id；改参数必须新ID。409表示版本或幂等冲突，客户端先重新读取当前预览，不自动覆盖。后台路线失败保留已接受编辑；`PLANNER_EDIT_ROUTE_DEADLINE_SECONDS`默认120秒。重启恢复待查任务与具体故障验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-api)。
+
+
+### v4预览编辑
+
+`/preview`左侧拖动调整当天顺序，也可删除某一次活动、切换已查询到的交通方式；地图下方按地点批量删除关联活动，或把已有候选加入可用时段。一次请求未确认时先处理待同步编辑；路线计算期间仍可继续修改。网络响应不明时刷新会重放同一命令，版本冲突需用户明确重试。停止重试会重新读取服务器内容，已接受的编辑仍保留。
+
+验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。搜索新地点与需求入口继续单独接入。

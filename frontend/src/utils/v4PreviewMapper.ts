@@ -60,6 +60,7 @@ export interface PreviewModeView {
   mode: V4TravelMode
   label: string
   status: string
+  optionId: string | null
   durationSeconds: number | null
   durationLabel: string
 }
@@ -480,6 +481,7 @@ function mapLeg(
       mode,
       label: MODE_LABEL[mode],
       status: routeModeStatus(result?.status),
+      optionId: result?.status === 'available' ? option?.option_id ?? null : null,
       durationSeconds: seconds,
       durationLabel: result?.status === 'available'
         ? formatReferenceDuration(seconds)
