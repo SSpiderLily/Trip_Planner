@@ -10,6 +10,7 @@
 - [当前变更与待办导航](docs/changes/CHG-003-planning-performance-observability.md)：性能、日志与结果提示的剩余需求，以及产品、工程与人工验收的逐项入口。
 - [学习目标与阶段计划](docs/learning-plan.md)：全栈技术学习范围、掌握程度、阶段路线与第一轮项目完成标准。
 - [学习日志](docs/learning-log.md)：记录实践中的问题、原因、修改和验证结果。
+- [问题解决记录](docs/problems/README.md)：一问题一份Markdown，记录描述、排查、尝试结果、解决边界和经验。
 - [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言与规划规则。
 - [旅行规划体验优化需求](docs/trip-planning-requirements.md)：本轮输入简化与每日路线展示的已确认需求、后续待办及验收方向（最小闭环已接入，完整目标分步落实）。
 
