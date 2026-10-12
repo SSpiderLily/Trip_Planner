@@ -115,7 +115,7 @@ def make_facts():
     places = (
         PlaceFact(fact_id="fact-bund", poi_id="poi-bund", name="外滩", location=MapCoordinate(lng=121.49, lat=31.24),
                   cost=ReferenceCost(raw="免费"), source_refs=("call-bund",)),
-        PlaceFact(fact_id="fact-hotel", poi_id="poi-hotel", name="滨江酒店", location=MapCoordinate(lng=121.50, lat=31.23),
+        PlaceFact(fact_id="fact-hotel", poi_id="poi-hotel", name="滨江酒店", city="上海市", typecode="100000", location=MapCoordinate(lng=121.50, lat=31.23),
                   source_refs=("call-hotel",)),
     )
     weather = WeatherFact(
@@ -158,7 +158,7 @@ def make_preview():
             activities=(DraftActivity(
                 activity_id=activity_id, candidate_ref="candidate-bund", slot_id=slot_id,
                 kind="sightseeing", poi_id="poi-bund", place_fact_id="fact-bund",
-                duration_s=10800, duration_source="default", requirement_ids=requirements,
+                  requirement_ids=requirements,
             ),),
             weather_fact_id="fact-weather",
             lodging=LodgingRef(candidate_ref="candidate-hotel", poi_id="poi-hotel", place_fact_id="fact-hotel",
@@ -189,8 +189,8 @@ def make_preview():
     preview = ItineraryPreview(
         preview_id="preview-1", planning_input=planning_input, draft=draft, facts=facts,
         candidates=candidates, validation=report,
-        day_summaries=tuple(DaySummary(day_id=f"day-{index + 1}", known_stay_s=10800,
-                                      known_travel_s=0, feasibility="verified") for index in range(3)),
+        day_summaries=tuple(DaySummary(day_id=f"day-{index + 1}",
+                                      known_travel_s=0) for index in range(3)),
         calculation=PreviewCalculation(based_on_revision=1, calculation_id="calc-1",
                                        current_routes="completed", alternative_backfill="pending"),
     )
@@ -263,7 +263,7 @@ def make_full_baseline_preview():
             PlaceFact(fact_id="synthetic-fact-food", poi_id="synthetic-poi-food", name="本帮菜馆",
                       location=MapCoordinate(lng=121.4880, lat=31.2320), source_refs=("synthetic-pois",),
                       cost=ReferenceCost(raw="约80元", value=None)),
-            PlaceFact(fact_id="synthetic-fact-hotel", poi_id="synthetic-poi-hotel", name="黄浦区酒店",
+            PlaceFact(fact_id="synthetic-fact-hotel", poi_id="synthetic-poi-hotel", name="黄浦区酒店", city="上海市", typecode="100000",
                       location=MapCoordinate(lng=121.4860, lat=31.2350), source_refs=("synthetic-pois",)),
         ),
         weather=(WeatherFact(
@@ -276,13 +276,13 @@ def make_full_baseline_preview():
         CandidateRef(candidate_id="synthetic-cand-yuyuan", category="sightseeing", poi_id="synthetic-poi-yuyuan", place_fact_id="synthetic-fact-yuyuan"),
         CandidateRef(candidate_id="synthetic-cand-nanjing", category="sightseeing", poi_id="synthetic-poi-nanjing", place_fact_id="synthetic-fact-nanjing"),
         CandidateRef(candidate_id="synthetic-cand-food", category="meal", poi_id="synthetic-poi-food", place_fact_id="synthetic-fact-food"),
-        CandidateRef(candidate_id="synthetic-cand-hotel", category="lodging", poi_id="synthetic-poi-hotel", place_fact_id="synthetic-fact-hotel"),
+        CandidateRef(candidate_id="synthetic-cand-hotel", category="lodging", poi_id="synthetic-poi-hotel", place_fact_id="synthetic-fact-hotel", area_hint_id="synthetic-area-1"),
     )
     areas = tuple(AreaHint(
-        area_hint_id=f"synthetic-area-{day_index + 1}", label="黄浦区住宿区域",
+        area_hint_id="synthetic-area-1", label="黄浦区住宿区域",
         anchor_poi_ids=("synthetic-poi-bund", "synthetic-poi-hotel"),
         center=MapCoordinate(lng=121.4880, lat=31.2360), basis_fact_ids=("synthetic-fact-bund", "synthetic-fact-hotel"),
-    ) for day_index in range(3))
+    ) for day_index in range(1))
     activity_specs = (
         (("lunch", "meal", "synthetic-cand-food", "synthetic-poi-food", "synthetic-fact-food"),
          ("afternoon", "sightseeing", "synthetic-cand-bund", "synthetic-poi-bund", "synthetic-fact-bund"),
@@ -308,20 +308,19 @@ def make_full_baseline_preview():
             slot_id = f"synthetic-{day_index + 1}-{period}"
             activity_by_day_and_period[(day_index, period)] = activity_id
             common_requirements = ("must-visit-bund",) if kind == "sightseeing" and poi_id == "synthetic-poi-bund" else ()
-            duration = 3600 if kind == "meal" else 10800 if kind == "sightseeing" else 0
             draft_activities.append(DraftActivity(
                 activity_id=activity_id, candidate_ref=candidate_ref, slot_id=slot_id, kind=kind,
-                poi_id=poi_id, place_fact_id=fact_id, duration_s=duration, duration_source="default",
+                poi_id=poi_id, place_fact_id=fact_id,
                 requirement_ids=common_requirements,
             ))
             proposal_activities.append(ProposalActivity(
                 proposal_ref=f"proposal-{activity_id}", candidate_ref=candidate_ref,
-                slot_id=slot_id, kind=kind, duration_s=duration, requirement_ids=common_requirements,
+                slot_id=slot_id, kind=kind, requirement_ids=common_requirements,
             ))
         unfilled = ("synthetic-2-lunch",) if day_index == 1 else ("synthetic-3-dinner",) if day_index == 2 else ()
         lodging = LodgingRef(
             candidate_ref="synthetic-cand-hotel", poi_id="synthetic-poi-hotel", place_fact_id="synthetic-fact-hotel",
-            area_hint_id=f"synthetic-area-{day_index + 1}", selection_source="recommended",
+            area_hint_id="synthetic-area-1", selection_source="recommended",
         )
         draft_days.append(DraftDay(
             day_id=day_id, day_date=DAYS[day_index], activities=tuple(draft_activities), unfilled_slot_ids=unfilled,
@@ -330,7 +329,7 @@ def make_full_baseline_preview():
         proposal_days.append(ProposalDay(
             day_id=day_id, day_date=DAYS[day_index], activities=tuple(proposal_activities),
             unfilled_slot_ids=unfilled,
-            lodging=LodgingProposal(candidate_ref="synthetic-cand-hotel", area_hint_id=f"synthetic-area-{day_index + 1}"),
+            lodging=LodgingProposal(candidate_ref="synthetic-cand-hotel", area_hint_id="synthetic-area-1"),
         ))
 
     route_option = RouteOption(
@@ -391,10 +390,9 @@ def make_full_baseline_preview():
         preview_id="synthetic-preview", planning_input=planning_input, draft=draft, facts=facts,
         candidates=candidates, validation=report,
         day_summaries=(
-            DaySummary(day_id="synthetic-day-1", known_stay_s=8 * 3600, known_travel_s=0, feasibility="unverified"),
-            DaySummary(day_id="synthetic-day-2", known_stay_s=11 * 3600, known_travel_s=780,
-                       feasibility="unverified"),
-            DaySummary(day_id="synthetic-day-3", known_stay_s=8 * 3600, known_travel_s=0, feasibility="unverified"),
+            DaySummary(day_id="synthetic-day-1", known_travel_s=0),
+            DaySummary(day_id="synthetic-day-2", known_travel_s=780),
+            DaySummary(day_id="synthetic-day-3", known_travel_s=0),
         ),
         calculation=PreviewCalculation(based_on_revision=1, calculation_id="synthetic-calculation",
                                        current_routes="completed", alternative_backfill="pending"),
@@ -619,10 +617,51 @@ class PlanningV4ContractTest(unittest.TestCase):
         self.assertEqual(len(day2_bund), 2)
         self.assertNotEqual(day2_bund[0].activity_id, day2_bund[1].activity_id)
         self.assertEqual(roundtrip.draft.days[0].lodging.area_hint_id, "synthetic-area-1")
-        self.assertEqual(roundtrip.draft.days[1].lodging.area_hint_id, "synthetic-area-2")
-        self.assertEqual(roundtrip.draft.days[2].lodging.area_hint_id, "synthetic-area-3")
+        self.assertEqual(roundtrip.draft.days[1].lodging.area_hint_id, "synthetic-area-1")
+        self.assertEqual(roundtrip.draft.days[2].lodging.area_hint_id, "synthetic-area-1")
         self.assertEqual(roundtrip.draft.legs[0].selected_option_id, "synthetic-route-option")
         self.assertIn("synthetic-issue-day2-lunch", roundtrip.validation.days[1].issue_ids)
+
+    def test_transit_binding_uses_query_minute_and_keeps_date_and_source_checks(self):
+        _, facts, _, _, preview = make_full_baseline_preview()
+        fact = facts.routes[0]
+        requested = datetime.fromisoformat("2026-10-11T09:05:00+08:00")
+        source = fact.source.model_copy(update={"effective_params": {"date": "2026-10-11", "time": "09:05"}})
+        fact = fact.model_copy(update={"source": source, "requested_departure_at": requested,
+                                       "time_verification": "sent_not_echoed"})
+        facts = facts.model_copy(update={"routes": (fact,), "sources": tuple(
+            source if item.tool_call_id == source.tool_call_id else item for item in facts.sources
+        )})
+        cases = (
+            ("2026-10-11T09:05:01+08:00", True),
+            ("2026-10-11T09:05:59.999999+08:00", True),
+            ("2026-10-11T01:05:01+00:00", True),
+            ("2026-10-11T09:06:00+08:00", False),
+            ("2026-10-11T09:04:59+08:00", False),
+            ("2026-10-12T09:05:00+08:00", False),
+            (None, False),
+        )
+        for raw, accepted in cases:
+            with self.subTest(departure=raw):
+                leg = preview.draft.legs[0].model_copy(update={
+                    "requested_departure_at": datetime.fromisoformat(raw) if raw else None,
+                })
+                updated = preview.model_copy(update={"facts": facts, "draft": preview.draft.model_copy(update={"legs": (leg,)})})
+                if accepted:
+                    validate_preview(updated)
+                else:
+                    with self.assertRaises(ContractValidationError) as caught:
+                        validate_preview(updated)
+                    self.assertIn("transit_time_mismatch", {i.code for i in caught.exception.issues})
+        # 时间绑定正确仍必须核对实际发送的 date/time，不能仅靠相近时刻通过。
+        bad_source = source.model_copy(update={"effective_params": {"date": "2026-10-11", "time": "09:06"}})
+        bad_facts = facts.model_copy(update={"routes": (fact.model_copy(update={"source": bad_source}),),
+            "sources": tuple(bad_source if s.tool_call_id == source.tool_call_id else s for s in facts.sources)})
+        leg = preview.draft.legs[0].model_copy(update={"requested_departure_at": requested})
+        with self.assertRaises(ContractValidationError) as caught:
+            validate_preview(preview.model_copy(update={"facts": bad_facts,
+                "draft": preview.draft.model_copy(update={"legs": (leg,)})}))
+        self.assertIn("transit_time_not_sent", {i.code for i in caught.exception.issues})
 
     def test_transit_timeout_without_http_metadata_can_remain_in_preview(self):
         _, facts, _, _, preview = make_full_baseline_preview()

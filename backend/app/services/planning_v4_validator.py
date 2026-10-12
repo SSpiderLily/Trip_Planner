@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+from .planning_candidate_policy import candidate_allows_slot
+
 from app.models.planning_v4.facts import FactStore, PlaceFact, RouteFact
 from app.models.planning_v4.input import PlanningInput
 from app.models.planning_v4.plan import (
@@ -38,6 +40,15 @@ class ContractValidationError(ValueError):
 def _raise_if_any(issues: list[ReferenceIssue]) -> None:
     if issues:
         raise ContractValidationError(tuple(issues))
+
+
+def _same_transit_query_minute(left, right, timezone_name: str) -> bool:
+    """高德 date/time 和路线缓存均精确到分钟；活动时间仍保留秒数。"""
+    if left is None or right is None:
+        return left is right
+    zone = ZoneInfo(timezone_name)
+    return (left.astimezone(zone).replace(second=0, microsecond=0)
+            == right.astimezone(zone).replace(second=0, microsecond=0))
 
 
 def _index_candidates(candidates: tuple[CandidateRef, ...], issues: list[ReferenceIssue]) -> dict[str, CandidateRef]:
@@ -150,8 +161,7 @@ def validate_plan_proposal(
                     if candidate.category != expected_category:
                         issues.append(ReferenceIssue("candidate_category_mismatch", f"{activity_path}.candidate_ref", "候选类别与活动类型不一致"))
                     if (
-                        candidate.slot_ids
-                        and activity.slot_id not in candidate.slot_ids
+                        not candidate_allows_slot(candidate, activity.slot_id)
                         and activity.proposal_ref not in user_activity_refs
                     ):
                         issues.append(ReferenceIssue("candidate_slot_mismatch", f"{activity_path}.slot_id", "候选不适用于该时段"))
@@ -256,8 +266,7 @@ def validate_preview(
                     if candidate.poi_id != activity.poi_id or candidate.place_fact_id != activity.place_fact_id:
                         issues.append(ReferenceIssue("candidate_activity_mismatch", activity_path, "活动身份与候选不一致"))
                     if (
-                        candidate.slot_ids
-                        and activity.slot_id not in candidate.slot_ids
+                        not candidate_allows_slot(candidate, activity.slot_id)
                         and activity.activity_source != "user"
                     ):
                         issues.append(ReferenceIssue("candidate_slot_mismatch", f"{activity_path}.slot_id", "候选不适用于该时段"))
@@ -271,15 +280,6 @@ def validate_preview(
             unknown_requirements = set(activity.requirement_ids) - known_requirement_ids
             if unknown_requirements:
                 issues.append(ReferenceIssue("dangling_requirement", f"{activity_path}.requirement_ids", "活动引用了未知硬性需求"))
-            if activity.duration_source == "default":
-                expected_duration = (
-                    planning_input.rules.sightseeing_default_s
-                    if activity.kind == "sightseeing" else (
-                        planning_input.rules.meal_default_s if activity.kind == "meal" else 0
-                    )
-                )
-                if activity.duration_s != expected_duration:
-                    issues.append(ReferenceIssue("default_duration_mismatch", f"{activity_path}.duration_s", "默认时长与规则版本不一致"))
             slot_activity_ids.setdefault(activity.slot_id, set()).add(activity.activity_id)
         for slot_id in day.unfilled_slot_ids:
             unfilled_ids.add((day.day_id, slot_id))
@@ -312,9 +312,29 @@ def validate_preview(
                     issues.append(ReferenceIssue("lodging_candidate_mismatch", f"{day_path}.lodging", "住宿信息与候选不一致"))
                 elif candidate.area_hint_id and lodging.area_hint_id != candidate.area_hint_id:
                     issues.append(ReferenceIssue("lodging_area_mismatch", f"{day_path}.lodging.area_hint_id", "住宿区域必须与候选关联的来源区域一致"))
+            if day.day_id in day_constraints:
+                from app.services.planning_lodging_policy import stay_for_days, choose_lodging_for_stay
+                stay = stay_for_days(planning_input, (day.day_id,))
+                if lodging.candidate_ref and (candidate := candidate_by_id.get(lodging.candidate_ref)):
+                    if candidate.lodging_day_ids and not set(stay.day_ids).issubset(candidate.lodging_day_ids):
+                        issues.append(ReferenceIssue("lodging_scope_mismatch", f"{day_path}.lodging", "住宿候选不适用于该连续日期范围"))
+                    if stay.specified and lodging.selection_source != "user":
+                        issues.append(ReferenceIssue("specified_lodging_replacement", f"{day_path}.lodging", "指定住处不能替换成推荐酒店"))
+                if lodging.poi_id:
+                    selected = choose_lodging_for_stay(planning_input, stay, preview.candidates, facts, draft.area_hints)
+                    if selected is None or lodging.poi_id != selected.poi_id:
+                        issues.append(ReferenceIssue("lodging_binding_invalid", f"{day_path}.lodging", "住宿必须符合该日期的指定住处或固定推荐酒店"))
+                if stay.specified and lodging.area_hint_id is not None:
+                    issues.append(ReferenceIssue("specified_lodging_area_forbidden", f"{day_path}.lodging", "指定住处不关联推荐住宿区域"))
             if lodging.area_hint_id and lodging.area_hint_id not in proposal_area_ids:
                 issues.append(ReferenceIssue("dangling_lodging_area", f"{day_path}.lodging.area_hint_id", "住宿区域不存在"))
 
+    from app.services.planning_lodging_policy import lodging_stays
+    for stay in lodging_stays(planning_input):
+        pois = {day.lodging.poi_id for day in draft.days
+                if day.day_id in stay.day_ids and day.lodging and day.lodging.poi_id}
+        if len(pois) > 1:
+            issues.append(ReferenceIssue("lodging_reuse_mismatch", "draft.days", "同一连续住宿范围必须复用一家住处"))
     issue_by_id = {issue.issue_id: issue for issue in preview.validation.issues}
     if len(issue_by_id) != len(preview.validation.issues):
         issues.append(ReferenceIssue("duplicate_issue_id", "validation.issues", "issue_id 必须唯一"))
@@ -490,7 +510,10 @@ def validate_preview(
             if set(mode_result.option_ids) - options:
                 issues.append(ReferenceIssue("dangling_route_option", f"{mode_path}.option_ids", "路线方案不属于该 RouteFact"))
             if mode_result.mode == "transit":
-                if route_fact.requested_departure_at != leg.requested_departure_at:
+                if not _same_transit_query_minute(
+                    route_fact.requested_departure_at, leg.requested_departure_at,
+                    planning_input.request.timezone,
+                ):
                     issues.append(ReferenceIssue("transit_time_mismatch", mode_path, "公交事实出发时间与该路段不一致"))
                 params = source_by_id.get(route_fact.source.tool_call_id)
                 if route_fact.requested_departure_at is None:
@@ -694,8 +717,7 @@ def validate_day_revision(
                     and activity.slot_id == old_activity.slot_id
                 )
                 if (
-                    candidate.slot_ids
-                    and activity.slot_id not in candidate.slot_ids
+                    not candidate_allows_slot(candidate, activity.slot_id)
                     and not is_exact_preserved_user_activity
                 ):
                     issues.append(ReferenceIssue("invalid_revision_candidate_slot", f"{path}.slot_id", "修订候选不适用于指定时段"))

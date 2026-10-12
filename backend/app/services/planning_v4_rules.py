@@ -4,7 +4,7 @@ from __future__ import annotations
 from app.models.planning_v4.input import ReferenceWindow, RuleSet
 
 
-PLANNING_V4_RULE_VERSION = "planning-v4-2026-10-11"
+PLANNING_V4_RULE_VERSION = "planning-v4-2026-10-12"
 
 _WINDOWS = (
     ("breakfast", 8 * 60, 9 * 60),
@@ -17,16 +17,15 @@ _WINDOWS = (
 
 
 def default_planning_v4_rules() -> RuleSet:
-    """返回当前已确认的六个时段及 v4 既有默认值。"""
+    """返回六个窗口；时段转换把1/3小时作为资格阈值。"""
     return RuleSet(
         rule_version=PLANNING_V4_RULE_VERSION,
         windows=tuple(
             ReferenceWindow(period=period, start_minute=start, end_minute=end)
             for period, start, end in _WINDOWS
         ),
-        meal_default_s=3600,
-        sightseeing_default_s=10800,
-        sightseeing_duration_adjustable=True,
+        meal_minimum_available_s=3600,
+        sightseeing_minimum_available_s=10800,
         max_repair_rounds_per_day=3,
         full_day_start_minute=8 * 60,
         return_buffer_default_s=3600,

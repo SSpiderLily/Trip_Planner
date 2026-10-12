@@ -279,12 +279,13 @@ export async function refreshBeforeDiscardV4PendingEdit(args: {
   return args.clear() ? 'discarded' : 'cache_failed'
 }
 
-/** Route jobs can be followed only for calculations created by edit/restore commands. */
+/** Follow durable adjacent-route jobs from generation, edit, or restore. */
 export function pendingV4RouteJobId(envelope: V4PreviewEnvelope): string | null {
   const calculation = envelope.preview.calculation
   if (calculation.current_routes !== 'pending') return null
   if (!calculation.calculation_id.startsWith('edit:')
-    && !calculation.calculation_id.startsWith('restore:')) return null
+    && !calculation.calculation_id.startsWith('restore:')
+    && !calculation.calculation_id.startsWith('generation:')) return null
   return calculation.calculation_id
 }
 

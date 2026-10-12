@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import Field, TypeAdapter
 
+from app.services.planning_lodging_policy import stay_for_days
 from app.agents.candidate_identity import version_candidate_ref
 from app.agents.attraction_subtask import (
     AttractionExecutionContext,
@@ -77,7 +78,7 @@ class LodgingExecutionContext(AttractionExecutionContext):
 
 LODGING_SYSTEM_PROMPT = """你是旅行规划中的住宿信息子智能体。你只核实用户指定住处，或在指定来源化住宿区域内推荐酒店。
 每次只返回一个符合 JSON Schema 的 JSON 对象。
-- 是否为用户指定住处只由原始 lodging_query 决定。该字段有非空原文时，只能调用 verify_specified；不得改写、缩短、替换或扩展查询词。
+- 是否为用户指定住处只由当前住宿范围的 original_lodging_query 决定。该字段有非空原文时，只能调用 verify_specified；不得改写、缩短、替换或扩展查询词。
 - 用户指定住处不一定是酒店。指定模式按原文和城市核实，不使用酒店类型过滤；必须有唯一、同城、带坐标的地点事实。区域词、周边范围或无法唯一定位的文本不能冒充具体住处。
 - 指定模式也必须检查供应商地点类别；行政区、普通地名和商圈名是区域，不是具体住处。住宅小区和具体楼栋可以继续核实。
 - 同名地点对应多个不同 POI 时，不能替用户任选一个；返回空选择并说明歧义。
@@ -154,6 +155,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
         self._last_search = {}
         self._specified_query_attempted = False
         self._specified_no_progress_continued = False
+        self._stay_query = stay_for_days(context.planning_input, subtask.scope.day_ids).lodging_query
         return super()._run_locked(subtask, context, cancel_event)
 
     def _expected_role(self) -> str:
@@ -183,9 +185,8 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
     def _completion_stop_reason(self, task_result: TaskResult) -> str:
         return task_result.stop_reason
 
-    @staticmethod
-    def _is_specified(context: AttractionExecutionContext) -> bool:
-        query = context.planning_input.request.lodging_query
+    def _is_specified(self, context: AttractionExecutionContext) -> bool:
+        query = getattr(self, "_stay_query", context.planning_input.request.lodging_query)
         return isinstance(query, str) and bool(query.strip())
 
     def _candidate_category(self) -> str:
@@ -226,7 +227,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
 
     def _action_signature(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> str:
         if isinstance(action, VerifySpecifiedLodgingAction):
-            return f"specified:{_normalize(context.planning_input.request.lodging_query or '')}"
+            return f"specified:{_normalize(getattr(self, '_stay_query', context.planning_input.request.lodging_query) or '')}"
         return f"area:{action.area_hint_id}:{action.anchor_poi_id}"
 
     def _action_allowed(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> bool:
@@ -293,7 +294,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
         if subtask.candidate_target != 1:
             reject("LODGING_TARGET_INVALID", "住宿子任务每次只核实或推荐一家住处")
         self._specified_query = (
-            context.planning_input.request.lodging_query.strip()
+            getattr(self, "_stay_query", context.planning_input.request.lodging_query).strip()
             if self._is_specified(context) else ""
         )
         if self._is_specified(context):
@@ -371,7 +372,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
 
     def _messages(self, subtask, context, candidates, search_history):
         assert isinstance(context, LodgingExecutionContext)
-        specified_query = context.planning_input.request.lodging_query
+        specified_query = getattr(self, "_stay_query", context.planning_input.request.lodging_query)
         area_options = []
         for hint in context.area_hints:
             if hint.area_hint_id not in subtask.scope.area_hint_ids:
@@ -460,7 +461,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
     def _execute_search_action(self, adapter, action, subtask, context, deadline, pending, trace, store, cancel_event):
         if isinstance(action, VerifySpecifiedLodgingAction):
             assert isinstance(context, LodgingExecutionContext)
-            query = context.planning_input.request.lodging_query
+            query = getattr(self, "_stay_query", context.planning_input.request.lodging_query)
             if not isinstance(query, str) or not query.strip():
                 return None
             self._specified_query_attempted = True
@@ -534,7 +535,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
 
     def _search_history_context(self, action, subtask, context, result):
         if isinstance(action, VerifySpecifiedLodgingAction):
-            return {"action": "verify_specified", "query": context.planning_input.request.lodging_query,
+            return {"action": "verify_specified", "query": getattr(self, "_stay_query", context.planning_input.request.lodging_query),
                     "provider_tool": result.source.tool_name, "api_version": result.source.api_version}
         return dict(self._last_search)
 
@@ -548,7 +549,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
         pool_by_poi = {place.poi_id: place for place in pool}
 
         if specified:
-            query = context.planning_input.request.lodging_query or ""
+            query = getattr(self, "_stay_query", context.planning_input.request.lodging_query) or ""
             exact_places = [place for place in places
                             if _city_matches(subtask.scope.city, place.city)
                             and _matches_original_query(place, query)]
@@ -599,7 +600,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
                 old = candidate_refs[index]
                 candidate_refs[index] = version_candidate_ref(
                     old,
-                    area_hint_id=area_hint_id,
+                    area_hint_id=area_hint_id, lodging_day_ids=subtask.scope.day_ids,
                     recommendation_reason=selection.recommendation_reason or old.recommendation_reason,
                 )
             else:
@@ -607,7 +608,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
                 candidate_refs.append(CandidateRef(
                     candidate_id=f"candidate_{uuid4().hex}", category="lodging",
                     poi_id=place.poi_id, place_fact_id=place.fact_id,
-                    area_hint_id=area_hint_id,
+                    area_hint_id=area_hint_id, lodging_day_ids=subtask.scope.day_ids,
                     recommendation_reason=selection.recommendation_reason,
                 ))
 
@@ -619,7 +620,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
                 if candidate.poi_id in {place.poi_id for place in pool}
             )
             if specified:
-                query = context.planning_input.request.lodging_query or ""
+                query = getattr(self, "_stay_query", context.planning_input.request.lodging_query) or ""
                 exact = {place.poi_id: place for place in places
                          if _city_matches(subtask.scope.city, place.city)
                          and _matches_original_query(place, query)}
@@ -646,7 +647,7 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
         selected = {candidate.poi_id for candidate in candidate_refs
                     if candidate.poi_id in pool_by_poi}
         if specified:
-            query = context.planning_input.request.lodging_query or ""
+            query = getattr(self, "_stay_query", context.planning_input.request.lodging_query) or ""
             exact_matches = {place.poi_id: place for place in places
                              if _city_matches(subtask.scope.city, place.city)
                              and _matches_original_query(place, query)}

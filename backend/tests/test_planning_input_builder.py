@@ -8,6 +8,7 @@ from app.services.planning_input_builder import (
     PlanningInputBuildRequest,
     build_planning_input,
 )
+from app.services.planning_v4_rules import default_planning_v4_rules
 
 
 TZ = "Asia/Shanghai"
@@ -26,8 +27,8 @@ def make_rules(**overrides):
     values = {
         "rule_version": "f02-test-v1",
         "windows": WINDOWS,
-        "meal_default_s": 3600,
-        "sightseeing_default_s": 10800,
+        "meal_minimum_available_s": 3600,
+        "sightseeing_minimum_available_s": 10800,
         "full_day_start_minute": 8 * 60,
         "return_buffer_default_s": 3600,
         "departure_day_minimum_usable_s": 10800,
@@ -63,7 +64,6 @@ def make_input(
     *,
     rules=None,
     explicit_return_buffer_s=None,
-    day_ready_at=None,
 ):
     request = make_request(arrival, departure)
     return build_planning_input(PlanningInputBuildRequest(
@@ -71,7 +71,6 @@ def make_input(
         requirements=make_summary(request),
         rules=rules or make_rules(),
         explicit_return_buffer_s=explicit_return_buffer_s,
-        day_ready_at=datetime.fromisoformat(day_ready_at) if day_ready_at else None,
     ))
 
 
@@ -111,9 +110,9 @@ class PlanningInputBuilderTests(unittest.TestCase):
         ])
         self.assertEqual([len(day.slots) for day in result.days], [6, 6, 6])
         self.assertEqual([slot.period for slot in result.days[0].slots], list(PERIODS))
-        self.assertIsNone(result.days[0].available_start)
+        self.assertEqual(result.days[0].available_start.isoformat(), "2026-10-10T09:00:00+08:00")
         self.assertEqual(result.days[1].available_start.isoformat(), "2026-10-11T08:00:00+08:00")
-        self.assertEqual(result.days[2].available_end, None)
+        self.assertEqual(result.days[2].available_end.isoformat(), "2026-10-12T18:00:00+08:00")
         self.assertEqual(result.boundary_facts.effective_return_buffer_s, 3600)
         self.assertEqual(result.boundary_facts.return_buffer_source, "default")
         self.assertEqual(
@@ -131,7 +130,7 @@ class PlanningInputBuilderTests(unittest.TestCase):
             {
                 "breakfast": "skipped",
                 "morning": "skipped",
-                "lunch": "conditional",
+                "lunch": "required",
                 "afternoon": "required",
                 "dinner": "required",
                 "evening": "required",
@@ -145,19 +144,39 @@ class PlanningInputBuilderTests(unittest.TestCase):
                 "morning": "required",
                 "lunch": "required",
                 "afternoon": "required",
-                "dinner": "conditional",
+                "dinner": "required",
                 "evening": "skipped",
             },
         )
-        self.assertIsNotNone(day1["lunch"].condition_reason)
-        self.assertIn("返程", day3["dinner"].condition_reason)
+        self.assertTrue(all(slot.condition_reason is None for day in result.days for slot in day.slots))
+        self.assertIsNone(result.boundary_facts.day_ready_at)
+
+    def test_confirmed_october_11_to_13_example_uses_production_rules(self):
+        result = make_input(
+            "2026-10-11T08:00:00+08:00",
+            "2026-10-13T18:00:00+08:00",
+            rules=default_planning_v4_rules(),
+        )
+        self.assertEqual([
+            tuple(slot.period for slot in day.slots if slot.eligibility == "required")
+            for day in result.days
+        ], [
+            ("breakfast", "lunch", "afternoon", "dinner", "evening"),
+            PERIODS,
+            ("breakfast", "morning", "lunch", "afternoon"),
+        ])
+        self.assertEqual(result.days[-1].available_end.isoformat(), "2026-10-13T17:00:00+08:00")
 
     def test_arrival_boundaries_are_half_open(self):
         cases = (
             ("00:00:00", ("skipped", "required", "required")),
+            ("05:59:59", ("skipped", "required", "required")),
             ("06:00:00", ("skipped", "required", "required")),
+            ("11:59:59", ("skipped", "required", "required")),
             ("12:00:00", ("skipped", "skipped", "required")),
+            ("17:59:59", ("skipped", "skipped", "required")),
             ("18:00:00", ("skipped", "skipped", "skipped")),
+            ("23:59:59", ("skipped", "skipped", "skipped")),
         )
         for clock, expected in cases:
             with self.subTest(clock=clock):
@@ -170,6 +189,7 @@ class PlanningInputBuilderTests(unittest.TestCase):
                     tuple(first_day[period].eligibility for period in ("morning", "afternoon", "evening")),
                     expected,
                 )
+                self.assertEqual(slot_map(result.days[1])["morning"].eligibility, "required")
 
     def test_arrival_uses_destination_timezone_for_dates_and_boundaries(self):
         request = make_request("2026-10-09T22:00:00+00:00", "2026-10-12T11:00:00+00:00")
@@ -182,7 +202,7 @@ class PlanningInputBuilderTests(unittest.TestCase):
         self.assertEqual([day.day_date for day in result.days], [
             date(2026, 10, 10), date(2026, 10, 11), date(2026, 10, 12),
         ])
-        self.assertIsNone(result.days[0].available_start)
+        self.assertEqual(result.days[0].available_start.isoformat(), "2026-10-10T06:00:00+08:00")
         self.assertEqual(
             result.boundary_facts.arrival_start_optimistic_at.isoformat(),
             "2026-10-10T06:00:00+08:00",
@@ -196,12 +216,12 @@ class PlanningInputBuilderTests(unittest.TestCase):
             explicit_return_buffer_s=3600,
         )
         breakfast = slot_map(exactly_three_hours.days[0])["breakfast"]
-        self.assertEqual(breakfast.eligibility, "conditional")
-        self.assertIn("到达", breakfast.condition_reason)
+        self.assertEqual(breakfast.eligibility, "required")
+        self.assertIsNone(breakfast.condition_reason)
 
         below_three_hours = make_input(
             "2026-10-10T08:00:00+08:00",
-            "2026-10-10T11:59:00+08:00",
+            "2026-10-10T11:59:59+08:00",
             explicit_return_buffer_s=3600,
         )
         self.assertEqual({slot.eligibility for slot in below_three_hours.days[0].slots}, {"skipped"})
@@ -219,7 +239,7 @@ class PlanningInputBuilderTests(unittest.TestCase):
             rules=rules,
             explicit_return_buffer_s=7200,
         )
-        self.assertEqual(slot_map(defaulted.days[0])["breakfast"].eligibility, "conditional")
+        self.assertEqual(slot_map(defaulted.days[0])["breakfast"].eligibility, "required")
         self.assertEqual({slot.eligibility for slot in explicit_two_hours.days[0].slots}, {"skipped"})
         self.assertEqual(explicit_two_hours.boundary_facts.effective_return_buffer_s, 7200)
         self.assertEqual(explicit_two_hours.boundary_facts.return_buffer_source, "explicit_user")
@@ -227,41 +247,45 @@ class PlanningInputBuilderTests(unittest.TestCase):
         restored = PlanningInput.model_validate_json(explicit_two_hours.model_dump_json())
         self.assertEqual(restored.boundary_facts, explicit_two_hours.boundary_facts)
 
-    def test_short_meal_window_skips_but_exact_one_hour_is_conditional(self):
-        one_hour = make_input(
-            "2026-10-10T13:00:00+08:00",
-            "2026-10-11T19:00:00+08:00",
-        )
-        under_one_hour = make_input(
-            "2026-10-10T13:01:00+08:00",
-            "2026-10-11T19:00:00+08:00",
-        )
-        self.assertEqual(slot_map(one_hour.days[0])["lunch"].eligibility, "conditional")
-        self.assertEqual(slot_map(under_one_hour.days[0])["lunch"].eligibility, "skipped")
+    def test_arrival_meals_require_at_least_one_hour_independently_of_sightseeing(self):
+        for period, clock, expected in (
+            ("breakfast", "08:00:00", "required"),
+            ("breakfast", "08:00:01", "skipped"),
+            ("lunch", "13:00:00", "required"),
+            ("lunch", "13:00:01", "skipped"),
+            ("dinner", "18:00:00", "required"),
+            ("dinner", "18:00:01", "skipped"),
+        ):
+            with self.subTest(period=period, clock=clock):
+                result = make_input(f"2026-10-10T{clock}+08:00")
+                self.assertEqual(slot_map(result.days[0])[period].eligibility, expected)
 
-    def test_sightseeing_window_is_not_subject_to_three_hour_minimum(self):
-        result = make_input(
-            "2026-10-10T09:00:00+08:00",
-            "2026-10-11T16:00:00+08:00",
-            explicit_return_buffer_s=0,
-        )
-        afternoon = slot_map(result.days[-1])["afternoon"]
-        self.assertEqual(afternoon.eligibility, "conditional")
-        self.assertIn("返程", afternoon.condition_reason)
+    def test_departure_windows_require_full_sightseeing_block_or_one_hour_meal(self):
+        for period, departure, expected in (
+            ("morning", "13:00:00", "required"),
+            ("morning", "12:59:59", "skipped"),
+            ("afternoon", "18:00:00", "required"),
+            ("afternoon", "17:59:59", "skipped"),
+            ("evening", "23:00:00", "required"),
+            ("evening", "22:59:59", "skipped"),
+            ("lunch", "14:00:00", "required"),
+            ("lunch", "13:59:59", "skipped"),
+            ("dinner", "19:00:00", "required"),
+            ("dinner", "18:59:59", "skipped"),
+        ):
+            with self.subTest(period=period, departure=departure):
+                result = make_input(departure=f"2026-10-12T{departure}+08:00")
+                self.assertEqual(slot_map(result.days[-1])[period].eligibility, expected)
 
-    def test_verified_day_ready_at_replaces_arrival_upper_bound(self):
-        result = make_input(
-            "2026-10-10T09:00:00+08:00",
-            "2026-10-12T19:00:00+08:00",
-            day_ready_at="2026-10-10T14:30:00+08:00",
-        )
-        self.assertEqual(result.days[0].available_start.isoformat(), "2026-10-10T14:30:00+08:00")
-        self.assertEqual(result.boundary_facts.day_ready_at.isoformat(), "2026-10-10T14:30:00+08:00")
-        day1 = slot_map(result.days[0])
-        self.assertEqual(day1["lunch"].eligibility, "skipped")
-        self.assertEqual(day1["afternoon"].eligibility, "required")
+    def test_departure_day_under_three_hours_skips_all_slots_but_exact_three_hours_keeps_breakfast(self):
+        for departure, expected in (("11:59:59", "skipped"), ("12:00:00", "required")):
+            with self.subTest(departure=departure):
+                result = make_input(departure=f"2026-10-12T{departure}+08:00")
+                day = result.days[-1]
+                self.assertEqual(slot_map(day)["breakfast"].eligibility, expected)
+                self.assertEqual({slot.eligibility for slot in day.slots[1:]}, {"skipped"})
 
-    def test_return_upper_bound_at_meal_window_end_stays_conditional(self):
+    def test_return_cutoff_at_meal_window_end_is_required(self):
         result = make_input(
             "2026-10-10T09:00:00+08:00",
             "2026-10-12T15:00:00+08:00",
@@ -270,19 +294,42 @@ class PlanningInputBuilderTests(unittest.TestCase):
         last_day = slot_map(result.days[-1])
         self.assertEqual(last_day["breakfast"].eligibility, "required")
         self.assertEqual(last_day["morning"].eligibility, "required")
-        self.assertEqual(last_day["lunch"].eligibility, "conditional")
+        self.assertEqual(last_day["lunch"].eligibility, "required")
         self.assertEqual(last_day["afternoon"].eligibility, "skipped")
-        self.assertIn("返程", last_day["lunch"].condition_reason)
+        self.assertIsNone(last_day["lunch"].condition_reason)
 
-    def test_day_ready_at_must_fall_inside_trip(self):
+    def test_day_ready_at_is_not_an_input_to_slot_rules(self):
         request = make_request("2026-10-10T09:00:00+08:00", "2026-10-12T19:00:00+08:00")
         with self.assertRaises(ValidationError):
             PlanningInputBuildRequest(
                 request=request,
                 requirements=make_summary(request),
                 rules=make_rules(),
-                day_ready_at=datetime.fromisoformat("2026-10-09T22:00:00+00:00"),
+                day_ready_at=datetime.fromisoformat("2026-10-10T14:30:00+08:00"),
             )
+
+    def test_buffer_covering_available_day_keeps_six_skipped_slots(self):
+        for buffer_s in (4 * 3600, 5 * 3600, 24 * 3600):
+            with self.subTest(buffer_s=buffer_s):
+                result = make_input(
+                    "2026-10-10T08:00:00+08:00", "2026-10-10T12:00:00+08:00",
+                    explicit_return_buffer_s=buffer_s,
+                )
+                self.assertEqual(len(result.days[0].slots), 6)
+                self.assertEqual({slot.eligibility for slot in result.days[0].slots}, {"skipped"})
+                self.assertIsNone(result.days[0].available_end)
+                self.assertEqual(result.boundary_facts.effective_return_buffer_s, buffer_s)
+                self.assertEqual(PlanningInput.model_validate_json(result.model_dump_json()), result)
+
+    def test_explicit_build_buffer_takes_precedence_over_request_buffer(self):
+        request = make_request("2026-10-10T08:00:00+08:00", "2026-10-10T12:00:00+08:00")
+        request = request.model_copy(update={"explicit_return_buffer_s": 7200})
+        result = build_planning_input(PlanningInputBuildRequest(
+            request=request, requirements=make_summary(request), rules=make_rules(),
+            explicit_return_buffer_s=0,
+        ))
+        self.assertEqual(result.boundary_facts.effective_return_buffer_s, 0)
+        self.assertEqual(slot_map(result.days[0])["breakfast"].eligibility, "required")
 
     def test_candidate_return_duration_is_not_an_input_to_day_rules(self):
         request = make_request("2026-10-10T09:00:00+08:00", "2026-10-12T19:00:00+08:00")

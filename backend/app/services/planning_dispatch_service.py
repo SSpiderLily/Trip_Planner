@@ -1,6 +1,8 @@
 """F05b 主智能体派发、子任务调度与事实收集。"""
 from __future__ import annotations
 
+from app.services.planning_lodging_policy import lodging_stays, stay_for_days, city_for_days, pending_lodging_stays, previous_lodging_poi_ids
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 import asyncio
 import hashlib
 import json
@@ -229,7 +231,7 @@ class PlanningDispatchService:
             (self._task_fingerprint(task, state), task.task_id) for task in state.existing_tasks
         )
         started = self.clock()
-        deadline = started + self.total_timeout_seconds
+        deadline = deadline_after(started, self.total_timeout_seconds)
         safe_input = {
             "request_id": context.request_id,
             "run_id": context.run_id,
@@ -384,7 +386,7 @@ class PlanningDispatchService:
                 invocation = asyncio.to_thread(decider.run, decision_context)
             return await asyncio.wait_for(
                 invocation,
-                timeout=remaining,
+                timeout=wait_timeout(remaining),
             )
         except asyncio.CancelledError:
             cancel_event.set()
@@ -507,6 +509,7 @@ class PlanningDispatchService:
                     )
         local_refs: set[str] = set()
         task_ids: set[str] = set()
+        lodging_groups = set()
         for resolved in decision.tasks:
             task = resolved.subtask
             if (task.run_id != context.run_id or task.context_revision != context.context_revision
@@ -516,6 +519,21 @@ class PlanningDispatchService:
                 raise _DispatchFault("MASTER_TASK_DUPLICATE_ID", "master_decision", "派发子任务标识重复。")
             local_refs.add(resolved.local_ref)
             task_ids.add(task.task_id)
+            try:
+                expected_city = city_for_days(context.planning_input, task.scope.day_ids)
+                if not _city_matches(expected_city, task.scope.city):
+                    raise ValueError("city mismatch")
+                if task.role == "lodging":
+                    stay = stay_for_days(context.planning_input, task.scope.day_ids)
+                    candidates = live_context.candidates if live_context is not None else context.candidate_refs
+                    facts = live_context.fact_store if live_context is not None else context.fact_store
+                    hints = live_context.area_hints if live_context is not None else area_hints
+                    if (stay.specified or stay not in pending_lodging_stays(context.planning_input, candidates, facts, hints)
+                            or stay.day_ids in lodging_groups or set(task.scope.day_ids) != set(stay.day_ids)):
+                        raise ValueError("lodging already specified, covered or not full stay")
+                    lodging_groups.add(stay.day_ids)
+            except ValueError:
+                raise _DispatchFault("MASTER_TASK_SCOPE_INVALID", "master_decision", "地点任务城市或住宿范围无效；指定/已覆盖住宿不能追加推荐。") from None
             if context.dispatch_scope is not None:
                 live_anchors = list(context.dispatch_scope.anchors)
                 if live_context is not None:
@@ -559,8 +577,11 @@ class PlanningDispatchService:
                     for day in context.planning_input.days
                     for slot in day.slots
                 }
+                allowed_target_days = {target.day_id for target in targets}
+                if task.role == "lodging" and allowed_target_days.intersection(task.scope.day_ids):
+                    allowed_target_days.update(stay_for_days(context.planning_input, task.scope.day_ids).day_ids)
                 for day_id in task.scope.day_ids:
-                    if not any(target.day_id == day_id for target in targets):
+                    if day_id not in allowed_target_days:
                         raise _DispatchFault(
                             "DISPATCH_SCOPE_DAY_INVALID", "master_decision",
                             "子任务日期没有对应的定向缺项。",
@@ -825,7 +846,7 @@ class PlanningDispatchService:
         tasks = [asyncio.create_task(invoke(job)) for job in jobs]
         remaining = max(0.0, deadline - self.clock())
         try:
-            done, pending = await asyncio.wait(tasks, timeout=remaining)
+            done, pending = await asyncio.wait(tasks, timeout=wait_timeout(remaining))
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
@@ -852,6 +873,11 @@ class PlanningDispatchService:
     async def _run_task_job(self, state: _MutableState, job: _Job):
         subtask = job.subtask
         execution_context = self._make_execution_context(state, job)
+        if subtask.role == "lodging":
+            excluded = previous_lodging_poi_ids(state.context.planning_input,
+                stay_for_days(state.context.planning_input, subtask.scope.day_ids),
+                state.candidate_refs, state.fact_store, state.area_hints)
+            subtask = subtask.model_copy(update={"excluded_poi_ids": tuple(dict.fromkeys((*subtask.excluded_poi_ids, *excluded)))})
         runner = self._new_runner(subtask.role)
         return await runner.run_async(subtask, execution_context)
 
@@ -961,7 +987,9 @@ class PlanningDispatchService:
             if candidate.category != expected_category or candidate.poi_id in excluded:
                 continue
             place = fact_by_id.get(candidate.place_fact_id)
-            if place is None or place.poi_id != candidate.poi_id:
+            if place is None or place.poi_id != candidate.poi_id or not _city_matches(subtask.scope.city, place.city):
+                continue
+            if subtask.role == "lodging" and candidate.lodging_day_ids and not set(subtask.scope.day_ids).issubset(candidate.lodging_day_ids):
                 continue
             if (candidate.area_hint_id is not None
                     and candidate.area_hint_id not in subtask.scope.area_hint_ids):
@@ -1196,7 +1224,7 @@ class PlanningDispatchService:
         for candidate in result.candidates:
             fact = all_places.get(candidate.place_fact_id)
             if (candidate.category != expected_category or fact is None or fact.poi_id != candidate.poi_id
-                    or fact.location is None or not _city_matches(state.context.planning_input.request.city, fact.city)
+                    or fact.location is None or not _city_matches(task.scope.city, fact.city)
                     or not fact.source_refs or not set(fact.source_refs).issubset(sources)
                     or not set(fact.field_sources.values()).issubset(sources)):
                 raise _DispatchFault("TASK_CANDIDATE_SOURCE_INVALID", "task_result", "TaskResult 候选事实或来源未闭合。")
@@ -1209,12 +1237,14 @@ class PlanningDispatchService:
                 if task.role != "lodging" or hint is None or candidate.area_hint_id not in task.scope.area_hint_ids:
                     raise _DispatchFault("TASK_CANDIDATE_AREA_INVALID", "task_result", "住宿候选区域关联不在任务范围内。")
             if task.role == "lodging":
-                specified_query = state.context.planning_input.request.lodging_query
-                if specified_query and specified_query.strip() and candidate.area_hint_id is not None:
-                    raise _DispatchFault("TASK_CANDIDATE_AREA_INVALID", "task_result", "指定住处不能关联推荐区域。")
-                if not specified_query or not specified_query.strip():
-                    if candidate.area_hint_id is None:
-                        raise _DispatchFault("TASK_CANDIDATE_AREA_INVALID", "task_result", "推荐住宿候选必须保留区域关联。")
+                stay = stay_for_days(state.context.planning_input, task.scope.day_ids)
+                if stay.specified or candidate.area_hint_id is None:
+                    raise _DispatchFault("TASK_CANDIDATE_AREA_INVALID", "task_result", "只有未指定住处的范围可以推荐酒店，且必须关联区域。")
+                if candidate.poi_id in previous_lodging_poi_ids(state.context.planning_input, stay,
+                        state.candidate_refs, state.fact_store, state.area_hints):
+                    raise _DispatchFault("TASK_CANDIDATE_SCOPE_INVALID", "task_result", "用户明确换住处时不能再推荐前一家酒店。")
+                if candidate.lodging_day_ids != stay.day_ids:
+                    raise _DispatchFault("TASK_CANDIDATE_SCOPE_INVALID", "task_result", "住宿候选必须绑定完整连续住宿范围。")
 
     def _accept_weather_execution(self, state: _MutableState, job: _Job, execution: Any) -> None:
         self._validate_direct_identity(state.context, execution, "weather")
@@ -1312,7 +1342,7 @@ class PlanningDispatchService:
             if hint.area_hint_id in area_ids:
                 raise _DispatchFault("AREA_HINT_ID_DUPLICATE", "initial_snapshot", "初始区域标识重复。")
             area_ids.add(hint.area_hint_id)
-            self._validate_area_hint(hint, state.fact_store, state.context.planning_input.request.city)
+            self._validate_area_hint(hint, state.fact_store, tuple(stay.city for stay in lodging_stays(state.context.planning_input)))
 
     @staticmethod
     def _validate_candidate_closure(candidates, facts: FactStore) -> None:
@@ -1424,7 +1454,7 @@ class PlanningDispatchService:
                 if prior != hint:
                     raise _DispatchFault("AREA_HINT_ID_CONFLICT", "area_merge", "相同区域标识的内容冲突，拒绝合并。")
                 continue
-            self._validate_area_hint(hint, state.fact_store, state.context.planning_input.request.city)
+            self._validate_area_hint(hint, state.fact_store, tuple(stay.city for stay in lodging_stays(state.context.planning_input)))
             by_id[hint.area_hint_id] = hint
             merged.append(hint)
         state.area_hints = merged
@@ -1435,8 +1465,11 @@ class PlanningDispatchService:
             raise _DispatchFault("AREA_HINT_SOURCE_INVALID", "area_merge", "区域必须引用已核实地点事实。")
         by_fact = {item.fact_id: item for item in facts.places}
         cited = [by_fact.get(item) for item in hint.basis_fact_ids]
+        cities = (requested_city,) if isinstance(requested_city, str) else requested_city
+        if not any(all(item is not None and _city_matches(city, item.city) for item in cited) for city in cities):
+            raise _DispatchFault("AREA_HINT_SOURCE_INVALID", "area_merge", "区域来源必须属于一个已确认城市。")
         if any(item is None or item.location is None or not item.city
-               or not _city_matches(requested_city, item.city) for item in cited):
+               or not any(_city_matches(city, item.city) for city in cities) for item in cited):
             raise _DispatchFault("AREA_HINT_SOURCE_INVALID", "area_merge", "区域依据必须是有坐标的地点事实。")
         if len(hint.basis_fact_ids) != len(set(hint.basis_fact_ids)):
             raise _DispatchFault("AREA_HINT_SOURCE_INVALID", "area_merge", "区域依据事实不能重复。")

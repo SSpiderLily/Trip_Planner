@@ -15,6 +15,9 @@ class TripBudget(ContractModel):
     amount: Decimal | None = Field(default=None, ge=0)
     currency: Literal["CNY"] = "CNY"
     scope: Literal["whole_trip"] = "whole_trip"
+    # 旧请求没有此字段时保持原总旅费语义；新前端显式提交per_person。
+    amount_basis: Literal["per_person", "whole_party"] = Field(
+        default="whole_party", description="per_person为全程人均预算；whole_party仅兼容旧请求的全程总预算")
     party_basis: Literal["unspecified", "specified"] = "unspecified"
     party_size: PositiveInt | None = None
 
@@ -39,6 +42,7 @@ class TripRequest(ContractModel):
     arrival_place_query: str | None = None
     departure_place_query: str | None = None
     lodging_query: str | None = None
+    lodging_poi_id: str | None = Field(default=None, min_length=1, max_length=128)
     explicit_return_buffer_s: int | None = Field(default=None, ge=0)
     budget: TripBudget = Field(default_factory=TripBudget)
     remarks: str = ""
@@ -82,10 +86,19 @@ class HardRequirement(ContractModel):
     source: RequirementSource
 
 
+class LodgingChange(ContractModel):
+    """用户明确提出的住宿变更；从该日期开始，沿用到下一次变更。"""
+    start_date: date
+    city: str | None = Field(default=None, min_length=1)
+    lodging_query: str | None = Field(default=None, min_length=1)
+    source: RequirementSource
+
+
 class RequirementSummary(ContractModel):
     requirements_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     core_goals: tuple[str, ...] = ()
+    lodging_changes: tuple[LodgingChange, ...] = ()
     hard_requirements: tuple[HardRequirement, ...] = ()
     preferences: tuple[str, ...] = ()
     unknowns: tuple[str, ...] = ()
@@ -136,9 +149,8 @@ class ArrivalBlockRule(ContractModel):
 class RuleSet(ContractModel):
     rule_version: str = Field(min_length=1)
     windows: tuple[ReferenceWindow, ...]
-    meal_default_s: PositiveInt = 3600
-    sightseeing_default_s: PositiveInt = 10800
-    sightseeing_duration_adjustable: bool = True
+    meal_minimum_available_s: PositiveInt = 3600
+    sightseeing_minimum_available_s: PositiveInt = 10800
     max_repair_rounds_per_day: PositiveInt = 3
     full_day_start_minute: int = Field(default=8 * 60, ge=0, lt=24 * 60)
     return_buffer_default_s: PositiveInt = 3600
@@ -250,6 +262,8 @@ class PlanningInput(ContractModel):
             )
             if facts.departure_activity_end_upper_bound_at.astimezone(timezone.utc) != expected_departure_upper_bound:
                 raise ValueError("离开日乐观上界必须等于离开时间减实际采用缓冲")
+        from app.services.planning_lodging_policy import validate_lodging_changes
+        validate_lodging_changes(self.request, self.requirements.lodging_changes)
         day_ids = [day.day_id for day in self.days]
         if len(day_ids) != len(set(day_ids)):
             raise ValueError("day_id 必须唯一")

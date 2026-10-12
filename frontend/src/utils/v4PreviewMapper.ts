@@ -1,7 +1,5 @@
 import type {
-  ActivityTiming,
   DayReferenceCostSummary,
-  DayTimingResult,
   DraftActivity,
   DraftDay,
   ItineraryPreview,
@@ -13,7 +11,6 @@ import type {
   V4PreviewEnvelope,
   V4SlotPeriod,
   V4TravelMode,
-  ReturnTiming,
   ValidationIssue,
   ValidationDay,
 } from '@/types/v4Preview'
@@ -42,10 +39,6 @@ export interface PreviewActivityView {
   address: string
   area: string
   description: string
-  durationSeconds: number
-  durationLabel: string
-  timing: ActivityTiming | null
-  timingLabel: string
   cost: PreviewCostView
   issues: ValidationIssue[]
   coordinate: GeoPoint | null
@@ -125,28 +118,15 @@ export interface PreviewDayView {
   area: {
     label: string
     coordinate: GeoPoint | null
-  }
+  } | null
   weather: {
     known: boolean
     summary: string
     advice: string
   }
-  timing: {
-    knownStaySeconds: number
+  transport: {
     knownTravelSeconds: number
     unknownLegCount: number
-    elapsedSeconds: number | null
-    feasibility: string
-    schedulingDecision: string
-  }
-  returnTiming: {
-    status: string
-    headline: string
-    detail: string
-    bufferLabel: string
-    overrunLabel: string | null
-    departureLabel: string | null
-    deadlineLabel: string | null
   }
   returnLeg: PreviewLegView | null
   cost: {
@@ -195,6 +175,14 @@ const MODE_LABEL: Record<V4TravelMode, string> = {
   transit: '公共交通', bicycling: '骑行', walking: '步行',
 }
 
+// S01只收敛用户展示；后端暂时仍会返回旧时间报告，不能让它从提示区泄漏。
+const HIDDEN_SCHEDULE_ISSUES = new Set([
+  'timing_not_provided', 'activity_timing_unverified', 'activity_exceeds_available_end',
+  'departure_day_below_minimum_with_activities', 'departure_day_not_required',
+  'return_deadline_conflict', 'return_timing_unverified', 'return_route_unverified',
+  'opening_hours_conflict', 'opening_hours_unavailable', 'opening_hours_unverified',
+])
+
 export function formatReferenceDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '时间未核实'
   const minutes = Math.round(seconds / 60)
@@ -220,10 +208,15 @@ export function formatPreviewEvidenceTime(value: string | null | undefined): str
 
 export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
   const preview = envelope.preview
+  const displayIssues = preview.validation.issues.filter((issue) => !HIDDEN_SCHEDULE_ISSUES.has(issue.code))
+  const hasSpecifiedLodging = Boolean(
+    preview.planning_input.request.lodging_poi_id?.trim()
+    || preview.planning_input.request.lodging_query?.trim(),
+  )
   const placesByFact = new Map(preview.facts.places.map((place) => [place.fact_id, place]))
   const placesByPoi = new Map(preview.facts.places.map((place) => [place.poi_id, place]))
   const candidatesByRef = new Map(preview.candidates.map((candidate) => [candidate.candidate_id, candidate]))
-  const timingByDay = new Map(envelope.timing.days.map((day) => [day.day_id, day]))
+  const transportByDay = new Map(preview.day_summaries.map((day) => [day.day_id, day]))
   const costByDay = new Map(envelope.cost.days.map((day) => [day.day_id, day]))
   const dayConstraints = new Map(preview.planning_input.days.map((day) => [day.day_id, day]))
   const validationsByDay = new Map(preview.validation.days.map((day) => [day.day_id, day]))
@@ -238,24 +231,21 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
 
   const days: PreviewDayView[] = preview.draft.days.map((day) => {
     const constraint = dayConstraints.get(day.day_id)
-    const dayTiming = timingByDay.get(day.day_id)
+    const dayTransport = transportByDay.get(day.day_id)
     const dayCost = costByDay.get(day.day_id)
     const costEntries = dayCost?.entries ?? []
     const activityCost = new Map<string, ReferenceCostEntry>()
     for (const entry of costEntries) {
       for (const activityId of entry.activity_ids) activityCost.set(activityId, entry)
     }
-    const issues = preview.validation.issues
+    const issues = displayIssues
       .filter((issue) => issue.day_id === day.day_id)
       .map(mapValidationIssue)
-    const timingByActivity = new Map((dayTiming?.activities ?? []).map((activity) => [activity.activity_id, activity]))
     const activityViews = day.activities.map((activity) => mapActivity(
       activity,
       placesByFact,
       activityCost.get(activity.activity_id),
-      timingByActivity.get(activity.activity_id) ?? null,
       constraint?.slots.find((slot) => slot.slot_id === activity.slot_id)?.period ?? null,
-      preview.planning_input.request.timezone,
       issues,
     ))
     const legs = preview.draft.legs
@@ -273,7 +263,6 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
       constraint?.slots ?? [],
       validationsByDay.get(day.day_id),
       issues,
-      dayTiming?.scheduling_decision,
     )
     const hiddenSlotIssues = collectUnboundSlotIssues(issues, constraint?.slots ?? [], activityViews, missingSlots)
     const timeline = buildTimeline(activityViews, missingSlots, constraint?.slots ?? [], incomingLegByActivity, hiddenSlotIssues)
@@ -295,12 +284,16 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
     const areaHint = preview.draft.area_hints.find((hint) => hint.area_hint_id === areaHintId)
     const lodgingEntry = dayCost?.lodging ?? null
     const hotelCost = mapCost(lodgingEntry, lodgingEntry ? '未查询到住宿人均消费参考' : '住宿消费参考尚未汇总')
-    const hotelLabel = day.lodging?.selection_source === 'recommended'
-      ? '推荐酒店'
-      : day.lodging?.selection_source === 'user' ? '已指定住处' : '住宿参考地点'
+    const lodgingChange = preview.planning_input.requirements?.lodging_changes
+      ?.filter((change) => change.start_date <= day.day_date)
+      .sort((left, right) => right.start_date.localeCompare(left.start_date))[0]
+    const dayHasSpecifiedLodging = lodgingChange ? Boolean(lodgingChange.lodging_query?.trim()) : hasSpecifiedLodging
+    const hotelLabel = dayHasSpecifiedLodging || day.lodging?.selection_source === 'user'
+      ? '已指定住处'
+      : day.lodging?.selection_source === 'recommended' ? '推荐酒店' : '住宿参考地点'
     const hotelName = lodgingFact?.name ?? '具体住宿地点未核实'
     const hotelAddress = lodgingFact?.address ?? ''
-    const area = {
+    const area = dayHasSpecifiedLodging || day.lodging?.selection_source === 'user' ? null : {
       label: areaHint?.label ?? '住宿区域未确定',
       coordinate: toGeoPoint(areaHint?.center),
     }
@@ -323,7 +316,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
       kind: 'hotel',
       coordinate: toGeoPoint(lodgingFact.location),
     })
-    if (areaHint) locations.push({
+    if (areaHint && area) locations.push({
       id: `area:${areaHint.area_hint_id}`,
       name: areaHint.label,
       address: '推荐住宿区域参考点',
@@ -353,13 +346,9 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
       },
       area,
       weather,
-      timing: {
-        knownStaySeconds: dayTiming?.summary.known_stay_s ?? 0,
-        knownTravelSeconds: dayTiming?.summary.known_travel_s ?? 0,
-        unknownLegCount: countUnknownTransitions(dayTiming),
-        elapsedSeconds: dayTiming?.elapsed_s ?? null,
-        feasibility: dayTiming?.summary.feasibility ?? 'unverified',
-        schedulingDecision: dayTiming?.scheduling_decision ?? 'conditional',
+      transport: {
+        knownTravelSeconds: dayTransport?.known_travel_s ?? 0,
+        unknownLegCount: dayTransport?.unknown_leg_ids.length ?? 0,
       },
       cost: {
         status: (dayCost?.status ?? 'unavailable') as PreviewDayView['cost']['status'],
@@ -368,9 +357,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
         conflictCount: costEntries.filter((entry) => entry.status === 'conflict').length,
         entries: costEntries,
       },
-      returnTiming: mapReturnTiming(dayTiming?.return_timing, preview.planning_input.request.timezone),
-      returnLeg: legs.find((leg) => leg.id === dayTiming?.return_timing.route_leg_id)
-        ?? legs.find((leg) => leg.isReturn)
+      returnLeg: legs.find((leg) => leg.isReturn)
         ?? null,
       issues,
       unboundIssues,
@@ -384,7 +371,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
     departureAt: preview.planning_input.request.departure_at,
     timezone: preview.planning_input.request.timezone,
     tripBudget: formatReferenceAmount(preview.planning_input.request.budget?.amount ?? null),
-    planIssues: preview.validation.issues
+    planIssues: displayIssues
       .filter((issue) => issue.day_id === null || issue.scope === 'plan')
       .map(mapValidationIssue),
     cost: {
@@ -401,17 +388,12 @@ function mapActivity(
   activity: DraftActivity,
   placesByFact: Map<string, PlaceFact>,
   costEntry: ReferenceCostEntry | undefined,
-  timing: ActivityTiming | null,
   period: V4SlotPeriod | null,
-  timezone: string,
   dayIssues: ValidationIssue[],
 ): PreviewActivityView {
   const place = activity.place_fact_id ? placesByFact.get(activity.place_fact_id) : undefined
   const cost = mapCost(costEntry ?? null, '未查询到人均消费参考')
   const periodLabel = period ? PERIOD_LABEL[period] : '行程安排'
-  const timingLabel = timing?.status === 'estimated' && timing.start_at && timing.end_at
-    ? `${formatClock(timing.start_at, timezone)}—${formatClock(timing.end_at, timezone)}`
-    : timing?.status === 'unverified' ? '安排时刻待核实' : '时刻未核实'
   return {
     id: activity.activity_id,
     slotId: activity.slot_id,
@@ -425,10 +407,6 @@ function mapActivity(
     address: place?.address ?? '',
     area: place?.business_area ?? '',
     description: activity.recommendation_reason,
-    durationSeconds: activity.duration_s,
-    durationLabel: formatReferenceDuration(activity.duration_s),
-    timing,
-    timingLabel,
     cost,
     issues: dayIssues.filter((issue) => (
       issue.scope === 'activity' && issue.target_id === activity.activity_id
@@ -532,7 +510,7 @@ function routeTimeBasisLabel(leg: RouteLeg, timezone: string): string | null {
     return `公共交通按${requestedAt ? `${requestedAt} ` : ''}参考时刻查询；实际出发时刻未核实。`
   }
   if (leg.time_basis === 'computed') {
-    return requestedAt ? `路线按${requestedAt}计划时刻查询。` : '路线按计划时刻查询。'
+    return requestedAt ? `公共交通查询时刻：${requestedAt}；仅作交通参考。` : '公共交通查询仅作交通参考。'
   }
   return requestedAt ? `查询时刻依据未核实（记录时刻：${requestedAt}）。` : '路线查询时刻依据未核实。'
 }
@@ -565,9 +543,8 @@ function buildMissingSlots(
   slots: Array<{ slot_id: string; period: V4SlotPeriod; eligibility: string; condition_reason?: string | null }>,
   validationDay: ValidationDay | undefined,
   issues: ValidationIssue[],
-  schedulingDecision: string | undefined,
 ): PreviewMissingSlot[] {
-  if (validationDay?.completeness === 'not_required' || schedulingDecision === 'not_scheduled_insufficient_time') return []
+  if (validationDay?.completeness === 'not_required') return []
   return slots
     .filter((slot) => {
       if (slot.eligibility === 'skipped') return false
@@ -657,14 +634,6 @@ function collectUnboundSlotIssues(
     if (!slot || slot.eligibility === 'skipped') return []
     return [{ slotId: slot.slot_id, period: slot.period, issue }]
   })
-}
-
-function countUnknownTransitions(dayTiming: DayTimingResult | undefined): number {
-  if (!dayTiming) return 0
-  const transitionLegIds = new Set(dayTiming.unknown_transitions.flatMap((transition) => transition.leg_id ? [transition.leg_id] : []))
-  const unboundTransitionCount = dayTiming.unknown_transitions.filter((transition) => transition.leg_id == null).length
-  const summaryOnlyLegCount = dayTiming.summary.unknown_leg_ids.filter((legId) => !transitionLegIds.has(legId)).length
-  return transitionLegIds.size + unboundTransitionCount + summaryOnlyLegCount
 }
 
 function mapRecommendations(
@@ -759,49 +728,6 @@ function mapFactCost(place: PlaceFact, sourcesById: Map<string, { provider: stri
     : { status: 'known', amount, text: `¥${amount} / 人`, sourceLabel, queriedAt, evidenceLabel }
 }
 
-function mapReturnTiming(returnTiming: ReturnTiming | undefined, timezone: string): PreviewDayView['returnTiming'] {
-  if (!returnTiming || returnTiming.status === 'not_applicable') {
-    return { status: 'not_applicable', headline: '', detail: '', bufferLabel: '', overrunLabel: null, departureLabel: null, deadlineLabel: null }
-  }
-  const bufferLabel = `返程预留 ${formatReferenceDuration(returnTiming.buffer_s)}`
-  const reasonLabels: Record<string, string> = {
-    departure_endpoint_not_provided: '未提供离开地点',
-    departure_fact_not_bound: '离开地点尚未核实',
-    return_origin_unverified: '返程起点尚未核实',
-    return_endpoint_unverified: '返程终点尚未核实',
-    return_route_missing: '返程路线未查到',
-    return_travel_unknown: '返程耗时未核实',
-    terminal_activity_end_unknown: '最后活动结束时间未核实',
-    activity_end_exceeds_return_deadline: '最后活动结束时间已超过返程截止时间',
-    minimum_activity_end_exceeds_return_deadline: '最早可能的活动结束时间已超过返程截止时间',
-    minimum_return_arrival_exceeds_deadline: '最早可能的返程到达时间已超过截止时间',
-    free_time_movement_not_included: '不含自由活动离开区域后的路程',
-    insufficient_departure_day_time: '离开日可用时间不足',
-    day_not_scheduled_under_minimum_usable_time: '离开日未达到最小可安排时长',
-  }
-  const detail = returnTiming.unknown_reasons.map((reason) => reasonLabels[reason] ?? '返程信息未核实').join('；')
-  const overrunLabel = returnTiming.overrun_s == null
-    ? null
-    : `${returnTiming.overrun_is_lower_bound ? '至少' : '约'}超出 ${formatReferenceDuration(returnTiming.overrun_s)}`
-  const departureLabel = returnTiming.departure_at ? `离开时间 ${formatClock(returnTiming.departure_at, timezone)}` : null
-  const deadlineLabel = returnTiming.deadline_at ? `最晚到达 ${formatClock(returnTiming.deadline_at, timezone)}` : null
-  if (returnTiming.status === 'verified') {
-    return { status: 'verified', headline: '返程地点与路线已核实', detail: cleanTechnicalTerms(returnTiming.notes.join(' ')), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
-  }
-  if (returnTiming.status === 'conflict') {
-    return { status: 'conflict', headline: '返程安排可能超出可用时间', detail: detail || cleanTechnicalTerms(returnTiming.notes.join(' ')), bufferLabel, overrunLabel, departureLabel, deadlineLabel }
-  }
-  return {
-    status: 'unverified',
-    headline: '返程仍有待核实',
-    detail: [detail, ...returnTiming.notes.map(cleanTechnicalTerms)].filter(Boolean).join('；') || '返程终点或路线信息不足。',
-    bufferLabel,
-    overrunLabel,
-    departureLabel,
-    deadlineLabel,
-  }
-}
-
 function endpointLabel(
   leg: RouteLeg,
   side: 'from' | 'to',
@@ -832,12 +758,6 @@ function toGeoPoint(point: { lng: number; lat: number } | null | undefined): Geo
   return [point.lng, point.lat]
 }
 
-function formatClock(value: string, timezone?: string): string {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return '时刻未核实'
-  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, ...(timezone ? { timeZone: timezone } : {}) }).format(date)
-}
-
 function formatCostEvidence(sourceLabel: string | null, queriedAt: string | null): string | null {
   if (!sourceLabel && !queriedAt) return null
   const time = formatPreviewEvidenceTime(queriedAt)
@@ -849,23 +769,11 @@ function mapValidationIssue(issue: ValidationIssue): ValidationIssue {
   switch (issue.code) {
     case 'route_unverified':
       message = issue.message.includes('missing_route_leg')
-        ? '尚未查到该路段耗时，安排时间待核实。'
-        : '该路段耗时尚未核实，安排时间待核实。'
+        ? '尚未查到该路段耗时。'
+        : '该路段耗时尚未核实。'
       break
-    case 'departure_day_below_minimum_with_activities':
-      message = '离开日可用时间不足 3 小时；现有活动仍保留，但需要调整。'
-      break
-    case 'departure_day_not_required':
-      message = '离开日可用时间不足 3 小时，因此当天不要求覆盖全部餐次和游览时段。'
-      break
-    case 'timing_not_provided':
-      message = '当前行程的时间与返程计算尚未核实，日程可行性仍待确认。'
-      break
-    case 'activity_timing_unverified':
-      message = '活动安排时刻尚未核实。'
-      break
-    case 'activity_exceeds_available_end':
-      message = '活动结束时间超过已核实的当日可用终点。'
+    case 'conditional_slot_unresolved':
+      message = '该时段是否需要安排地点仍待确认。'
       break
   }
   return { ...issue, message: cleanTechnicalTerms(message) }

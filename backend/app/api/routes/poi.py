@@ -1,6 +1,6 @@
 """POI相关API路由"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
@@ -127,3 +127,15 @@ async def get_attraction_photo(name: str):
             detail=f"获取景点图片失败: {str(e)}"
         )
 
+
+
+@router.get("/hotels", summary="搜索可选择的真实酒店")
+def search_hotels(keywords: str = Query(min_length=1, max_length=100),
+                  city: str = Query(min_length=1, max_length=100)):
+    from ...services.hotel_selection_service import HotelSelectionService
+    if not keywords.strip() or not city.strip():
+        raise HTTPException(status_code=422, detail="请输入城市和酒店名称")
+    try:
+        return {"items": HotelSelectionService().search(keywords.strip(), city.strip())}
+    except Exception:
+        raise HTTPException(status_code=503, detail="酒店查询暂时不可用，请重试") from None

@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from uuid import uuid4
 from .task_repository import dumps, now
 
+_active_model_span = ContextVar('active_model_span', default=None)
 _context = ContextVar('trip_observation', default=None)
 _sensitive = re.compile(r'api.?key|token|secret|password|authorization|cookie|credential', re.I)
 
@@ -40,7 +41,16 @@ class ObservationService:
         self.repository, self.content_limit = repository, content_limit
         self.incomplete = set()
 
-    def missing(self, task_id):
+    def missing(self, task_id, reason="task_state_write_failed", error=None):
+        # 只输出分类、异常类型和数值错误码；异常原文可能携带凭据或响应内容。
+        exception_type = type(error).__name__ if error is not None else "none"
+        sqlite_code = getattr(error, "sqlite_errorcode", None)
+        if type(sqlite_code) is not int:
+            sqlite_code = "unknown"
+        try:
+            print(f"[observation] task={task_id} reason={reason} exception={exception_type} sqlite_code={sqlite_code}", flush=True)
+        except Exception:
+            pass  # 控制台不可写也不能打断规划。
         self.incomplete.add(task_id)
         try:
             self.repository.mark_incomplete(task_id)
@@ -60,6 +70,7 @@ class Span:
     def __init__(self):
         self.output = None
         self.usage = None
+        self.model_diagnostics = None
 
 
 def token_usage(value):
@@ -74,8 +85,28 @@ def token_usage(value):
     return usage if any(item is not None for item in usage.values()) else None
 
 
+def record_model_diagnostics(value):
+    item = _active_model_span.get()
+    if item is not None:
+        item.model_diagnostics = value
+
+
 @contextmanager
 def span(name, kind, input_data=None):
+    # 即使未挂观测仓库也恢复上下文，避免跨任务/线程串线。
+    with _span_impl(name, kind, input_data) as item:
+        token = _active_model_span.set(item if kind == "llm" else None)
+        try:
+            yield item
+        finally:
+            _active_model_span.reset(token)
+            if item.model_diagnostics is not None:
+                output = item.output if isinstance(item.output, dict) else {"result": item.output}
+                item.output = {**output, "model_call": item.model_diagnostics}
+
+
+@contextmanager
+def _span_impl(name, kind, input_data=None):
     item = Span()
     context = _context.get()
     if context is None:
@@ -89,9 +120,9 @@ def span(name, kind, input_data=None):
             recorder.repository.begin_span((span_id, task_id, parent, name, kind, now(), data, int(truncated)))
             saved = True
         else:
-            recorder.missing(task_id)
-    except Exception:
-        recorder.missing(task_id)
+            recorder.missing(task_id, "parent_not_saved" if not parent_saved else "capacity_exceeded")
+    except Exception as exc:
+        recorder.missing(task_id, "span_begin_failed", exc)
     token = _context.set((recorder, task_id, span_id, saved))
     failure = None
     try:
@@ -112,8 +143,8 @@ def span(name, kind, input_data=None):
                 # 不保存第三方异常文本，避免凭据、HTTP请求体或完整模型响应外泄。
                 error = {'code':getattr(failure,'code','EXECUTION_FAILED'), 'message':'操作失败', 'type':type(failure).__name__} if failure else None
                 recorder.repository.end_span(span_id, 'failed' if failure else 'succeeded', output, truncated, error, item.usage)
-            except Exception:
-                recorder.missing(task_id)
+            except Exception as exc:
+                recorder.missing(task_id, "span_end_failed", exc)
 
 
 class ObservedLLM:

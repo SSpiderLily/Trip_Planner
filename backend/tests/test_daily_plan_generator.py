@@ -276,7 +276,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         self.assertEqual(execution.proposal.request_id, planning_input.request.request_id)
         self.assertEqual(len(fake.calls), 1)
 
-    def test_three_days_repeat_poi_duration_defaults_area_and_weather(self):
+    def test_three_days_repeat_poi_order_area_and_weather_without_duration(self):
         planning_input = make_input()
         candidates = make_candidates()
         facts = make_facts()
@@ -290,7 +290,6 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                     "candidate_ref": "candidate-bund",
                     "slot_id": "slot-2026-10-11-morning",
                     "kind": "sightseeing",
-                    "duration_s": 0,
                 },
                 {
                     "proposal_ref": "bund-afternoon",
@@ -340,7 +339,8 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["candidates"][0]["applicable_slot_ids"],
-            ["slot-2026-10-11-morning", "slot-2026-10-11-afternoon"],
+            [slot.slot_id for day in planning_input.days for slot in day.slots
+             if slot.eligibility != "skipped" and slot.period in {"morning", "afternoon", "evening"}],
         )
         self.assertEqual(len(payload["weather_facts"]), 1)
 
@@ -356,19 +356,11 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         first, second_visit, meal, free_time = day2.activities
         self.assertEqual(first.poi_id, second_visit.poi_id)
         self.assertNotEqual(first.activity_id, second_visit.activity_id)
-        self.assertEqual(first.duration_s, 0)
-        self.assertEqual(first.duration_source, "model")
+        self.assertFalse({"duration_s", "duration_source", "duration_reason"} & first.model_dump().keys())
         self.assertEqual(first.activity_source, "model")
-        self.assertEqual(second_visit.duration_s, 3 * 60 * 60)
-        self.assertEqual(second_visit.duration_source, "default")
         self.assertEqual(second_visit.activity_source, "model")
-        self.assertEqual(meal.duration_s, 60 * 60)
-        self.assertEqual(meal.duration_source, "default")
         self.assertEqual(meal.activity_source, "model")
-        self.assertEqual(free_time.duration_s, 0)
-        self.assertEqual(free_time.duration_source, "default")
         self.assertEqual(free_time.activity_source, "model")
-        self.assertIn("不表示", free_time.duration_reason)
         self.assertEqual(day1.lodging.selection_source, "recommended")
         self.assertEqual(day1.lodging.area_hint_id, "area-bund")
 
@@ -728,7 +720,6 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 "candidate_ref": "candidate-bund",
                 "slot_id": "slot-2026-10-11-morning",
                 "kind": "sightseeing",
-                "duration_s": 10800,
             },
             {
                 "proposal_ref": "unknown-candidate-activity",
@@ -737,11 +728,10 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 "kind": "sightseeing",
             },
             {
-                "proposal_ref": "invalid-duration-activity",
+                "proposal_ref": "invalid-structure-activity",
                 "candidate_ref": "candidate-bund",
                 "slot_id": "slot-2026-10-11-afternoon",
                 "kind": "sightseeing",
-                "duration_s": -5,
                 "private_unknown_field_2648": "sensitive_value_5821",
             },
             {
@@ -755,7 +745,6 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 "candidate_ref": "candidate-bund",
                 "slot_id": "slot-2026-10-11-afternoon",
                 "kind": "sightseeing",
-                "duration_s": 7200,
             },
         )}))
         response = "```json\n" + json.dumps({
@@ -806,7 +795,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         feedback = json.dumps(patch_payload, ensure_ascii=False)
         self.assertIn("candidate_ref 不在当前已核实候选中", feedback)
         self.assertIn("地点活动必须引用一个当前有效候选", feedback)
-        self.assertIn("duration_s 必须是非负整数秒", feedback)
+        self.assertIn("活动字段结构不符合契约", feedback)
         self.assertIn("candidate-bund-evening", feedback)
         self.assertIn('"candidate_id": "candidate-bund"', feedback)
         self.assertIn("candidate-meal", feedback)
@@ -816,13 +805,13 @@ class DailyPlanGeneratorTests(unittest.TestCase):
 
         day = execution.draft.days[1]
         self.assertEqual(
-            [(item.slot_id, item.candidate_ref, item.duration_s) for item in day.activities],
+            [(item.slot_id, item.candidate_ref) for item in day.activities],
             [
-                ("slot-2026-10-11-morning", "candidate-bund", 10800),
-                ("slot-2026-10-11-evening", "candidate-bund-evening", 3 * 60 * 60),
-                ("slot-2026-10-11-afternoon", "candidate-bund", 3 * 60 * 60),
-                ("slot-2026-10-11-lunch", "candidate-meal", 60 * 60),
-                ("slot-2026-10-11-afternoon", "candidate-bund", 7200),
+                ("slot-2026-10-11-morning", "candidate-bund"),
+                ("slot-2026-10-11-evening", "candidate-bund-evening"),
+                ("slot-2026-10-11-afternoon", "candidate-bund"),
+                ("slot-2026-10-11-lunch", "candidate-meal"),
+                ("slot-2026-10-11-afternoon", "candidate-bund"),
             ],
         )
         self.assertEqual(day.theme, "第11日城市漫步")
@@ -840,7 +829,6 @@ class DailyPlanGeneratorTests(unittest.TestCase):
                 "candidate_ref": "candidate-bund",
                 "slot_id": "slot-2026-10-11-morning",
                 "kind": "sightseeing",
-                "duration_s": 5400,
             },
             {
                 "proposal_ref": "bad-morning",
@@ -858,7 +846,6 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         day = execution.draft.days[1]
         self.assertEqual(len(day.activities), 1)
         self.assertEqual(day.activities[0].candidate_ref, "candidate-bund")
-        self.assertEqual(day.activities[0].duration_s, 5400)
         # The slot remains covered by a valid visit, but F06 still reports the rejected
         # original activity through the slot-scoped recovery notice.
         self.assertNotIn("slot-2026-10-11-morning", day.unfilled_slot_ids)
@@ -1217,7 +1204,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
         self.assertEqual(execution.usage, {"input_tokens": 240, "output_tokens": 120, "total_tokens": 360})
         repair = fake.calls[1][0][-1]["content"]
         self.assertIn("只修复结构诊断中的问题", repair)
-        self.assertEqual(fake.calls[0][1]["max_tokens"], 8192)
+        self.assertNotIn("max_tokens", fake.calls[0][1])
         self.assertEqual(fake.calls[0][1]["max_retries"], 0)
         self.assertLessEqual(fake.calls[0][1]["request_timeout"], 120)
 

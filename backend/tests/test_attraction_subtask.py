@@ -486,7 +486,9 @@ class AttractionSubtaskTests(unittest.TestCase):
             (search_action("外滩"), usage()),
             (search_action("外滩景区"), usage()),
         ])
-        _, result = self.run_subtask(llm, lambda *_: map_result([place()]))
+        # 目标尚差一个地点，才继续查询；只更换call_id仍不算进展。
+        _, result = self.run_subtask(llm, lambda *_: map_result([place()]),
+                                     task=subtask().model_copy(update={"candidate_target": 2}))
 
         self.assertEqual(len(self.tool_calls), 2)
         self.assertEqual(len(result.fact_store.sources), 2)

@@ -16,8 +16,8 @@
     </div>
     <div class="map-legend" aria-label="地图图例">
       <span><i class="activity-dot"></i>行程地点</span>
-      <span><i class="hotel-dot"></i>推荐住宿</span>
-      <span><i class="area-dot"></i>住宿区域参考点</span>
+      <span><i class="hotel-dot"></i>住宿地点</span>
+      <span v-if="locations.some((location) => location.kind === 'area')"><i class="area-dot"></i>住宿区域参考点</span>
       <span><i class="transit-line"></i>公共交通</span>
       <span><i class="cycling-line"></i>骑行</span>
       <span><i class="walking-line"></i>步行</span>
@@ -54,7 +54,7 @@ function drawMap(): void {
     markerContent.textContent = location.kind === 'hotel'
       ? '住'
       : location.kind === 'area' ? '区' : String(location.number ?? '')
-    markerContent.setAttribute('aria-label', `${location.kind === 'hotel' ? '推荐住宿' : location.kind === 'area' ? '住宿区域参考点' : '行程地点'}：${location.name}`)
+    markerContent.setAttribute('aria-label', `${location.kind === 'hotel' ? '住宿地点' : location.kind === 'area' ? '住宿区域参考点' : '行程地点'}：${location.name}`)
     const marker = new AMap.Marker({
       position: location.coordinate,
       content: markerContent,

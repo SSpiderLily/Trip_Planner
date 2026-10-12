@@ -35,10 +35,8 @@
             <div class="v4-export-section-title"><small>DAY {{ index + 1 }}</small><h2>{{ day.theme }}</h2></div>
             <p class="v4-export-muted">{{ day.date }} · {{ day.activities.length ? `按顺序安排 ${day.activities.length} 项活动` : '当天没有具体活动安排' }}</p>
             <div class="v4-export-facts">
-              <span>已知停留 {{ formatReferenceDuration(day.timing.knownStaySeconds) }}</span>
-              <span>已知交通 {{ formatReferenceDuration(day.timing.knownTravelSeconds) }}</span>
-              <span v-if="day.timing.unknownLegCount">{{ day.timing.unknownLegCount }} 段交通耗时待确认</span>
-              <span v-else-if="day.timing.elapsedSeconds !== null">参考安排 {{ formatReferenceDuration(day.timing.elapsedSeconds) }}</span>
+              <span>已知交通耗时 {{ formatReferenceDuration(day.transport.knownTravelSeconds) }}</span>
+              <span v-if="day.transport.unknownLegCount">{{ day.transport.unknownLegCount }} 段交通耗时待确认</span>
               <span v-if="day.cost.knownSubtotal !== null">当日已知景点与餐饮 ¥{{ day.cost.knownSubtotal }} / 人</span>
               <span v-if="day.cost.unknownCount || day.cost.conflictCount">{{ costGapText(day.cost.unknownCount, day.cost.conflictCount) }}</span>
             </div>
@@ -50,12 +48,12 @@
             <small>{{ day.weather.advice }}</small>
           </section>
 
-          <section class="v4-export-card v4-export-lodging">
+          <section class="v4-export-card v4-export-lodging" :class="{ 'hotel-only': !day.area }">
             <div><small>{{ day.hotel.label }}</small><b>{{ day.hotel.name }}</b><p>{{ day.hotel.address || '具体酒店信息未核实' }}</p>
               <small>住宿人均消费参考：{{ day.hotel.cost.text }} · 不按房晚推算</small>
               <small v-if="day.hotel.cost.evidenceLabel">{{ day.hotel.cost.evidenceLabel }}</small>
             </div>
-            <div><small>推荐寻找区域</small><b>{{ day.area.label }}</b><p>区域参考点不代表已选酒店。</p></div>
+            <div v-if="day.area"><small>推荐寻找区域</small><b>{{ day.area.label }}</b><p>区域参考点不代表已选酒店。</p></div>
           </section>
 
           <section v-if="dayLevelIssues(day).length || day.unboundIssues.length" class="v4-export-issues">
@@ -76,9 +74,8 @@
               <article v-else class="v4-export-activity">
                 <div class="v4-export-activity-head">
                   <b>{{ item.position }}. {{ item.activity.title }}</b>
-                  <span>{{ item.activity.durationLabel }}</span>
                 </div>
-                <small>{{ item.activity.periodLabel }} · {{ item.activity.timingLabel }}</small>
+                <small>{{ item.activity.periodLabel }}</small>
                 <p v-if="item.activity.address">{{ item.activity.address }}</p>
                 <p v-if="item.activity.description">{{ item.activity.description }}</p>
                 <div class="v4-export-cost-detail">{{ item.activity.cost.text }}</div>
@@ -101,11 +98,9 @@
             </article>
           </section>
 
-          <section v-if="day.returnTiming.status !== 'not_applicable'" class="v4-export-return">
-            <b>{{ day.returnTiming.headline }}</b>
-            <p>{{ day.returnTiming.bufferLabel }}<span v-if="day.returnTiming.departureLabel"> · {{ day.returnTiming.departureLabel }}</span><span v-if="day.returnTiming.deadlineLabel"> · {{ day.returnTiming.deadlineLabel }}</span><span v-if="day.returnTiming.overrunLabel"> · {{ day.returnTiming.overrunLabel }}</span></p>
-            <p v-if="day.returnTiming.detail">{{ day.returnTiming.detail }}</p>
-            <article v-if="day.returnLeg" class="v4-export-route">
+          <section v-if="day.returnLeg" class="v4-export-section">
+            <h3>返程交通参考</h3>
+            <article class="v4-export-route">
               <div class="v4-export-activity-head"><b>{{ day.returnLeg.fromLabel }} → {{ day.returnLeg.toLabel }}</b><span>{{ day.returnLeg.selectedModeLabel }} · {{ day.returnLeg.selectedDurationLabel }}</span></div>
               <div v-if="day.returnLeg.modes.length" class="v4-export-modes">
                 <span v-for="mode in day.returnLeg.modes" :key="mode.mode" :class="{ chosen: day.returnLeg.selectedMode === mode.mode }">{{ mode.label }}：{{ mode.durationLabel }}{{ day.returnLeg.selectedMode === mode.mode ? '（当前采用）' : '' }}</span>
@@ -299,10 +294,6 @@ function collectDayBlocks(dayElement: HTMLElement): HTMLElement[] {
       const heading = [...child.children].find((item) => (item as HTMLElement).tagName === 'H3') as HTMLElement | undefined
       if (heading) blocks.push(heading)
       for (const route of [...child.querySelectorAll<HTMLElement>(':scope > .v4-export-route')]) blocks.push(...routeFragments(route))
-    } else if (child.classList.contains('v4-export-return')) {
-      for (const item of [...child.children] as HTMLElement[]) {
-        blocks.push(...(item.classList.contains('v4-export-route') ? routeFragments(item) : [makeFragment('v4-export-return', item)]))
-      }
     } else {
       blocks.push(child)
     }
@@ -437,9 +428,9 @@ defineExpose({ renderAll })
 .v4-export-section { margin: 0 0 18px; }.v4-export-section-title { display: flex; align-items: baseline; gap: 12px; }.v4-export-section-title small { color: #a65c40; letter-spacing: .12em; font-weight: 700; }.v4-export-section-title h2 { margin: 0; color: #254130; font: 25px 'Songti SC', 'Noto Serif SC', serif; }.v4-export-section h3 { margin: 0 0 10px; color: #355342; font: 18px 'Songti SC', 'Noto Serif SC', serif; }
 .v4-export-facts { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }.v4-export-facts span { padding: 7px 9px; color: #45624f; background: #edf2e4; font-size: 11px; }
 .v4-export-card,.v4-export-route { margin: 0 0 13px; padding: 15px 17px; border: 1px solid #d9dfd3; border-radius: 9px; background: #f7f8f1; line-height: 1.7; overflow-wrap: anywhere; }.v4-export-card p,.v4-export-route p { margin: 6px 0; color: #61746a; font-size: 12px; }.v4-export-card > b { display: block; margin-bottom: 6px; color: #355342; }
-.v4-export-lodging { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }.v4-export-lodging > div + div { border-left: 1px solid #dce3d3; padding-left: 16px; }.v4-export-lodging b { display: block; margin: 4px 0; }.v4-export-lodging small { display: block; }
+.v4-export-lodging { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }.v4-export-lodging.hotel-only { grid-template-columns: 1fr; }.v4-export-lodging > div + div { border-left: 1px solid #dce3d3; padding-left: 16px; }.v4-export-lodging b { display: block; margin: 4px 0; }.v4-export-lodging small { display: block; }
 .v4-export-timeline { margin-top: 20px; }.v4-export-activity { margin: 10px 0; padding: 14px 16px; border: 1px solid #dce7e0; border-radius: 10px; background: #fffdfa; overflow-wrap: anywhere; }.v4-export-activity p { margin: 6px 0; color: #61746a; font-size: 12px; line-height: 1.7; }.v4-export-activity-head { display: flex; justify-content: space-between; gap: 14px; }.v4-export-activity-head b { color: #355342; }.v4-export-activity-head span { flex: 0 0 auto; color: #63745f; font-size: 11px; }.v4-export-activity > small { display: block; margin-top: 4px; }.v4-export-cost-detail { margin-top: 7px; color: #59704f; font-size: 12px; }
-.v4-export-missing,.v4-export-issue-row,.v4-export-return { margin: 9px 0; padding: 12px 14px; border: 1px dashed #c8b791; border-radius: 8px; color: #64563c; background: #fbf7eb; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }.v4-export-missing p { margin: 5px 0; }.v4-export-missing small { display: block; }.v4-export-issue-row { display: flex; gap: 10px; padding: 8px 10px; border-style: solid; }.v4-export-issue-row b { flex: 0 0 auto; }.v4-export-return { margin-top: 18px; border-style: solid; }.v4-export-return p { margin: 6px 0; }
+.v4-export-missing,.v4-export-issue-row { margin: 9px 0; padding: 12px 14px; border: 1px dashed #c8b791; border-radius: 8px; color: #64563c; background: #fbf7eb; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }.v4-export-missing p { margin: 5px 0; }.v4-export-missing small { display: block; }.v4-export-issue-row { display: flex; gap: 10px; padding: 8px 10px; border-style: solid; }.v4-export-issue-row b { flex: 0 0 auto; }
 .v4-export-route { background: #f3f7f4; }.v4-export-route > small { display: block; margin-top: 5px; }.v4-export-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }.v4-export-modes span { padding: 7px; border: 1px solid #e0e7d5; color: #657765; font-size: 10px; }.v4-export-modes span.chosen { border-color: #789272; background: #eaf1df; color: #355342; }
 .v4-export-card ol { margin: 10px 0 0; padding-left: 22px; }.v4-export-card li { padding: 7px 0; border-bottom: 1px solid #e7ece2; }.v4-export-card li small { display: block; }.v4-export-cost-list > div { padding: 9px 0; border-top: 1px solid #e7ece2; }.v4-export-cost-list > div span,.v4-export-cost-list > div b,.v4-export-cost-list > div small { display: block; }.v4-export-cost-list > div b { margin: 3px 0; color: #4c684f; font-size: 12px; }
 .v4-export-page-content { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; }.v4-export-page-content > h3 { margin: 6px 0 0; color: #355342; font: 18px 'Songti SC', 'Noto Serif SC', serif; }.v4-export-destination-item { padding: 8px 0; border-bottom: 1px solid #e7ece2; line-height: 1.7; }.v4-export-cost-entry { padding: 9px 0; border-top: 1px solid #e7ece2; line-height: 1.7; overflow-wrap: anywhere; }.v4-export-cost-entry span,.v4-export-cost-entry b,.v4-export-cost-entry small { display: block; }.v4-export-cost-entry b { margin: 3px 0; color: #4c684f; font-size: 12px; }.v4-export-continuation { margin-top: 4px; padding: 8px 12px; border-left: 3px solid #b2c7a6; color: #61746a; background: #f7f8f1; line-height: 1.7; overflow-wrap: anywhere; }.v4-export-activity-fragment,.v4-export-route-fragment { margin-bottom: 0; }

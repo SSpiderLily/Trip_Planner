@@ -39,7 +39,7 @@ class AmapStdioTest(unittest.TestCase):
                 self.server_command = kwargs["server_command"]
                 self.env = kwargs["env"]
                 self._available_tools = ["maps_text_search"]
-        settings = SimpleNamespace(amap_api_key="fixture-key", planner_tool_timeout_seconds=7)
+        settings = SimpleNamespace(amap_api_key="fixture-key", planner_tool_timeout_seconds=7, planner_enforce_timeouts=True)
         with patch.object(amap_service, "_amap_mcp_tool", None), \
              patch.object(amap_service, "get_settings", return_value=settings), \
              patch.object(amap_service.shutil, "which", return_value="/fixture/uvx"), \

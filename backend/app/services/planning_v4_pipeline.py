@@ -1,11 +1,12 @@
 """从公开 TripRequest 生成同一版本的 planning_v4 预览快照。"""
 from __future__ import annotations
 
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
+from app.services.planning_timeout_policy import planning_timeout_scope
 import asyncio
 import inspect
 import math
 import time
-from dataclasses import dataclass
 from datetime import date
 from threading import Event
 from typing import Any, Callable
@@ -39,7 +40,10 @@ from app.services.day_repair_service import (
     DayRevisionRequest,
 )
 from app.services.daily_plan_adapter import DailyPlanGeneratorAdapter
+from app.services.planning_candidate_policy import candidate_allows_slot
+from app.agents.master_reference_repair import RECOVERABLE_REFERENCE_CODES
 from app.services.endpoint_verification_service import EndpointVerificationExecution
+from app.services.planning_diagnostics import diagnostic_stage, observe_pipeline_run, repair_stage
 from app.services.observation_service import span
 from app.services.planning_dispatch_service import (
     PlanningDispatchContext,
@@ -48,13 +52,11 @@ from app.services.planning_dispatch_service import (
 )
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from app.services.planning_v4_rules import default_planning_v4_rules
-from app.services.planning_v4_timing import PlanTimingResult, calculate_plan_timing
-from app.services.planning_v4_validation import validate_daily_plan
+from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import validate_preview
 from app.services.preview_task_service import (
     PreviewPipelineResult,
     PreviewProgress,
-    make_route_backfill_runner,
 )
 from app.services.current_route_service import (
     CurrentRouteError,
@@ -63,7 +65,6 @@ from app.services.current_route_service import (
     build_pending_route_legs_for_day,
 )
 from app.services.reference_cost import aggregate_reference_costs
-from app.services.route_backfill_service import RouteBackfillService
 
 
 DEFAULT_PIPELINE_TIMEOUT_SECONDS = 1800.0
@@ -82,17 +83,13 @@ class PlanningV4PipelineError(RuntimeError):
         super().__init__(code)
 
 
-@dataclass
-class _RevisionHolder:
-    value: int
-
-
 class PlanningV4Pipeline:
-    """串接 F01/F02/F05/F06/F08/F07/F09/F09a/成本，并构造单一快照。"""
+    """串接需求、地点初版与按日修订，先交付地点快照，再独立查询相邻交通。"""
 
     def __init__(
         self,
         *,
+        enforce_timeouts: bool = True,
         total_timeout_seconds: float = DEFAULT_PIPELINE_TIMEOUT_SECONDS,
         initial_collection_timeout_seconds: float = DEFAULT_INITIAL_COLLECTION_TIMEOUT_SECONDS,
         rules_factory: Callable[[], Any] = default_planning_v4_rules,
@@ -100,9 +97,7 @@ class PlanningV4Pipeline:
         dispatch_service_factory: Callable[[float], Any] | None = None,
         daily_plan_adapter_factory: Callable[[float], Any] | None = None,
         current_route_service_factory: Callable[[], Any] | None = None,
-        route_backfill_service_factory: Callable[[], Any] | None = None,
         day_repair_service_factory: Callable[..., Any] | None = None,
-        current_revision_lookup: Callable[[str], int | None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         for name, value in (
@@ -112,6 +107,7 @@ class PlanningV4Pipeline:
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"{name} 必须是有限正数")
+        self.enforce_timeouts = enforce_timeouts
         self.total_timeout_seconds = float(total_timeout_seconds)
         self.initial_collection_timeout_seconds = float(initial_collection_timeout_seconds)
         self.rules_factory = rules_factory
@@ -119,11 +115,11 @@ class PlanningV4Pipeline:
         self.dispatch_service_factory = dispatch_service_factory or self._dispatch_factory
         self.daily_plan_adapter_factory = daily_plan_adapter_factory or self._daily_plan_factory
         self.current_route_service_factory = current_route_service_factory or CurrentRouteService
-        self.route_backfill_service_factory = route_backfill_service_factory or RouteBackfillService
         self.day_repair_service_factory = day_repair_service_factory or DayRepairService
-        self.current_revision_lookup = current_revision_lookup
         self.clock = clock
 
+    @planning_timeout_scope
+    @observe_pipeline_run
     async def run(self, request: TripRequest, *, task_id: str, plan_id: str, progress) -> PreviewPipelineResult:
         if not isinstance(request, TripRequest):
             raise PlanningV4PipelineError("TRIP_REQUEST_INVALID", "request_validation")
@@ -131,7 +127,7 @@ class PlanningV4Pipeline:
             raise PlanningV4PipelineError("PIPELINE_IDENTITY_INVALID", "pipeline_start")
 
         started = self.clock()
-        deadline = started + self.total_timeout_seconds
+        deadline = deadline_after(started, self.total_timeout_seconds)
         cancel_event = Event()
         route_context = None
         retain_route_context = False
@@ -154,34 +150,23 @@ class PlanningV4Pipeline:
             }) as record:
                 record.output = {"day_count": len(planning_input.days), "built": True}
 
-            route_service = self.current_route_service_factory()
-            route_context = route_service.create_route_context(planning_input, plan_id)
-
-            async def refresh_cancelled_route_context(facts_for_context: FactStore) -> None:
-                nonlocal route_context
-                if route_context is None or not route_context.cancel_event.is_set():
-                    return
-                previous_context = route_context
-                route_context = None
-                try:
-                    await previous_context.aclose()
-                except Exception:
-                    pass
-                if self._remaining(deadline) <= 0 or cancel_event.is_set():
-                    return
-                route_context = route_service.create_route_context(planning_input, plan_id)
-                route_context.register_facts(facts_for_context)
-
             await self._progress(progress, "dispatch", 0, 1, "收集地点、天气与端点事实")
             initial_timeout = min(self.initial_collection_timeout_seconds, self._remaining(deadline))
             if initial_timeout <= 0:
                 raise PlanningV4PipelineError("PIPELINE_DEADLINE_BEFORE_COLLECTION", "dispatch")
             dispatch_service = self.dispatch_service_factory(initial_timeout)
+            hotel_facts, hotel_candidates = FactStore(), ()
+            from app.services.hotel_selection_service import HotelSelectionService
+            hotel_facts, hotel_candidates = await asyncio.to_thread(
+                HotelSelectionService().verify_stays, planning_input, cancel_event,
+            )
             dispatch_context = PlanningDispatchContext(
                 planning_input=planning_input,
                 run_id=task_id,
                 context_revision=1,
                 base_revision=None,
+                fact_store=hotel_facts,
+                candidate_refs=hotel_candidates,
             )
             dispatch_result = await self._await_global_deadline(
                 dispatch_service.run_async(dispatch_context),
@@ -231,9 +216,8 @@ class PlanningV4Pipeline:
             candidates = dispatch_result.candidate_refs
             area_hints = dispatch_result.area_hints
             task_results = dispatch_result.task_results
-            departure_fact_id, endpoint_execution = self._verified_departure(
-                dispatch_result, task_id, request,
-            )
+            # 端点事实仍须通过请求/运行身份校验，但不再进入生成中的交通查询。
+            self._verified_departure(dispatch_result, task_id, request)
 
             await self._progress(progress, "proposal", 0, 1, "生成每日安排草稿")
             proposal_timeout = min(MODEL_TIMEOUT_SECONDS, self._remaining(deadline))
@@ -286,28 +270,11 @@ class PlanningV4Pipeline:
             # F06 may enrich area hints; these are the exact hints validated with the proposal.
             area_hints = draft.area_hints
 
-            await self._progress(progress, "current_routes", 0, 1, "核算当前路线与活动时间")
-            draft, facts, timing, current_routes_status = await self._current_routes(
-                route_service,
-                planning_input,
-                draft,
-                facts,
-                endpoint_execution=endpoint_execution,
-                endpoint_context_revision=1,
-                departure_fact_id=departure_fact_id,
-                route_context=route_context,
-                deadline=deadline,
-                cancel_event=cancel_event,
-            )
-            failed_route_days = self._failed_route_days(draft)
-            if current_routes_status == "failed" and not failed_route_days:
-                failed_route_days.update(day.day_id for day in planning_input.days)
-            await refresh_cancelled_route_context(facts)
-            if route_context is not None:
-                route_context.register_facts(facts)
-
-            await self._progress(progress, "validation", 0, 1, "检查缺项与已知约束")
-            report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+            await self._progress(progress, "validation", 0, 1, "检查必需时段的真实地点覆盖")
+            with diagnostic_stage("planning.v4.initial_validation", "validation", {
+                "plan_id": plan_id, "revision": draft.revision,
+            }, draft=draft, facts=facts, timezone_name=request.timezone):
+                report = validate_daily_plan(planning_input, draft, facts, candidates)
             await self._progress(progress, "repair", 0, 1, "按日补查并修订缺项")
             collection_revision = [1]
 
@@ -368,100 +335,19 @@ class PlanningV4Pipeline:
                     raise DayRepairError(code) from None
 
             async def recalculate(request_data: DayRepairRecalculationRequest) -> DayRepairRecalculation:
-                if self._remaining(deadline) <= 0:
-                    cancel_event.set()
-                    failed_route_days.add(request_data.day_id)
-                    return self._failed_day_route_recalculation(
-                        request_data, departure_fact_id, error_category="timeout",
+                # 地点修订只做轻量校验；交通不参与采用、轮数或技术恢复判定。
+                with repair_stage("place_validation", {
+                    "plan_id": request_data.draft.plan_id, "day_id": request_data.day_id,
+                    "round_id": request_data.round_id, "round_number": request_data.round_number,
+                    "proposed_revision": request_data.draft.revision,
+                }, draft=request_data.draft, facts=request_data.facts,
+                    timezone_name=planning_input.request.timezone):
+                    next_report = validate_daily_plan(
+                        planning_input, request_data.draft, request_data.facts,
+                        request_data.candidates, repair_states=request_data.repair_states,
                     )
-                route_timeout = min(MODEL_TIMEOUT_SECONDS, self._remaining(deadline))
-                route_stage_cancel_event = Event()
-                try:
-                    await refresh_cancelled_route_context(request_data.facts)
-                    if route_context is None:
-                        failed_route_days.add(request_data.day_id)
-                        return self._failed_day_route_recalculation(
-                            request_data, departure_fact_id, error_category="provider_error",
-                        )
-                    routed = await self._await_stage(
-                        route_service.run_async(
-                            planning_input,
-                            request_data.draft,
-                            request_data.facts,
-                            verified_departure_fact_id=departure_fact_id,
-                            route_context=route_context,
-                            only_day_id=request_data.day_id,
-                        ),
-                        timeout=route_timeout,
-                        stage="repair_routes",
-                        cancel_event=route_stage_cancel_event,
-                        global_deadline=deadline,
-                        global_cancel_event=cancel_event,
-                        timeout_code="REPAIR_ROUTE_TIMEOUT",
-                    )
-                except PlanningV4PipelineError as exc:
-                    if exc.global_deadline:
-                        cancel_event.set()
-                    await refresh_cancelled_route_context(request_data.facts)
-                    failed_route_days.add(request_data.day_id)
-                    return self._failed_day_route_recalculation(
-                        request_data,
-                        departure_fact_id,
-                        error_category=(
-                            "timeout" if exc.global_deadline or "TIMEOUT" in exc.code
-                            else "provider_error"
-                        ),
-                    )
-                except CurrentRouteError as exc:
-                    raise DayRepairError(exc.code, fatal=True) from None
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    if self._remaining(deadline) <= 0:
-                        cancel_event.set()
-                        category = "timeout"
-                    else:
-                        category = "provider_error"
-                    await refresh_cancelled_route_context(request_data.facts)
-                    failed_route_days.add(request_data.day_id)
-                    return self._failed_day_route_recalculation(
-                        request_data, departure_fact_id, error_category=category,
-                    )
-
-                if not isinstance(routed.draft, PlanDraft):
-                    raise DayRepairError("REPAIR_ROUTE_DRAFT_INVALID", fatal=True)
-                if (routed.draft.plan_id != request_data.draft.plan_id
-                        or routed.draft.revision != request_data.draft.revision
-                        or routed.draft.base_revision != request_data.draft.base_revision):
-                    raise DayRepairError("REPAIR_ROUTE_IDENTITY_MISMATCH", fatal=True)
-                route_draft = routed.draft
-                next_timing = routed.timing
-                if self._has_pending_route_legs(route_draft):
-                    route_context.cancel_event.set()
-                    await refresh_cancelled_route_context(request_data.facts)
-                    failed_route_days.add(request_data.day_id)
-                    return self._failed_day_route_recalculation(
-                        request_data, departure_fact_id, error_category="provider_error",
-                    )
-                next_report = validate_daily_plan(
-                    planning_input,
-                    route_draft,
-                    routed.fact_store,
-                    request_data.candidates,
-                    next_timing,
-                    repair_states=request_data.repair_states,
-                )
-                if route_context is not None:
-                    route_context.register_facts(routed.fact_store)
-                await refresh_cancelled_route_context(routed.fact_store)
-                self._record_route_day_result(
-                    failed_route_days, route_draft, request_data.day_id, succeeded=True,
-                )
                 return DayRepairRecalculation(
-                    draft=route_draft,
-                    facts=routed.fact_store,
-                    timing=next_timing,
-                    report=next_report,
+                    draft=request_data.draft, facts=request_data.facts, report=next_report,
                 )
 
             repair_service = self.day_repair_service_factory(
@@ -477,9 +363,8 @@ class PlanningV4Pipeline:
                     candidates,
                     area_hints,
                     task_results,
-                    timing,
                     report,
-                    global_deadline_monotonic=deadline,
+                    global_deadline_monotonic=wait_timeout(deadline),
                 )
             except asyncio.CancelledError:
                 raise
@@ -496,27 +381,18 @@ class PlanningV4Pipeline:
             candidates, area_hints, task_results = (
                 repair.candidates, repair.area_hints, repair.task_results,
             )
-            timing = repair.timing or calculate_plan_timing(
-                planning_input, draft, facts,
-                verified_departure_fact_id=departure_fact_id,
+            # 按最终地点顺序构造路线骨架，不访问供应商；地点先落盘。
+            draft = draft.model_copy(update={
+                "legs": tuple(
+                    leg for day in draft.days
+                    for leg in build_pending_route_legs_for_day(
+                        planning_input, draft, facts, day.day_id,
+                    )
+                ),
+            }, deep=True)
+            report = validate_daily_plan(
+                planning_input, draft, facts, candidates, repair_states=repair.repair_states,
             )
-            report = repair.report
-            if self._has_pending_route_legs(draft):
-                failed_route_days.update(
-                    leg.day_id for leg in draft.legs
-                    if any(mode.status == "pending" for mode in leg.mode_results)
-                )
-                draft = self._mark_pending_route_modes(draft, error_category="provider_error")
-                timing = calculate_plan_timing(
-                    planning_input, draft, facts,
-                    verified_departure_fact_id=departure_fact_id,
-                )
-                report = validate_daily_plan(
-                    planning_input, draft, facts, candidates, timing,
-                    repair_states=repair.repair_states,
-                )
-            failed_route_days.update(self._failed_route_days(draft))
-            current_routes_status = "failed" if failed_route_days else "completed"
             report = self._with_initial_recovery_notices(report, recovery_notices)
             if initial_dispatch_recovery_code is not None:
                 report = report.model_copy(update={
@@ -540,28 +416,16 @@ class PlanningV4Pipeline:
 
             await self._progress(progress, "cost", 0, 1, "汇总已知消费参考")
             cost = aggregate_reference_costs(planning_input, draft, facts)
-            summaries = self._day_summaries_with_costs(timing, cost)
+            summaries = self._day_summaries_with_costs(planning_input, draft, facts, cost)
             pending_leg_ids = tuple(
                 leg.leg_id for leg in draft.legs
                 if any(mode.status == "pending" for mode in leg.mode_results)
             )
-            calculation_status = (
-                "failed" if current_routes_status == "failed"
-                else "pending" if pending_leg_ids
-                else "completed"
+            calculation_status = "pending" if pending_leg_ids else "completed"
+            route_day_ids = tuple(
+                day.day_id for day in draft.days
+                if any(leg.day_id == day.day_id and leg.leg_id in pending_leg_ids for leg in draft.legs)
             )
-            backfill = None
-            if route_context is not None and not route_context.cancel_event.is_set():
-                revision_holder = _RevisionHolder(draft.revision)
-                backfill_service = self.route_backfill_service_factory()
-                backfill = make_route_backfill_runner(
-                    backfill_service,
-                    planning_input,
-                    draft,
-                    facts,
-                    route_context,
-                    current_revision=self._revision_reader(plan_id, revision_holder),
-                )
             preview = self._preview(
                 planning_input,
                 draft,
@@ -571,17 +435,27 @@ class PlanningV4Pipeline:
                 summaries,
                 calculation_status,
                 pending_leg_ids,
-                backfill_status="pending" if backfill is not None else "failed",
+                backfill_status="not_required",
             )
-            snapshot = PreviewSnapshot(preview=preview, timing=timing, cost=cost)
-            validate_preview(preview)
+            snapshot = PreviewSnapshot(preview=preview, cost=cost)
+            with diagnostic_stage("planning.v4.preview_validation", "validation", {
+                "plan_id": plan_id, "revision": draft.revision,
+            }, draft=draft, facts=facts, timezone_name=request.timezone):
+                validate_preview(preview)
             if preview.planning_input.request != request:
                 raise PlanningV4PipelineError("PREVIEW_REQUEST_MISMATCH", "preview_validation")
-            await self._progress(progress, "ready", 1, 1, "预览已生成")
+            route_service = None
+            try:
+                route_service = self.current_route_service_factory()
+                route_context = route_service.create_route_context(planning_input, plan_id)
+            except Exception as exc:
+                # 交通初始化失败不能撤回已验证的地点草稿；worker独立记录结果。
+                with span("route.context_initialization", "planning") as record:
+                    record.output = {"status": "unavailable", "exception_type": type(exc).__name__}
+            await self._progress(progress, "cost", 1, 1, "地点安排已完成，正在保存预览")
             result = PreviewPipelineResult(
-                snapshot=snapshot,
-                route_context=route_context if backfill is not None else None,
-                backfill=backfill,
+                snapshot=snapshot, route_context=route_context,
+                initial_route_day_ids=route_day_ids, route_service=route_service,
             )
             retain_route_context = result.route_context is not None
             return result
@@ -618,7 +492,7 @@ class PlanningV4Pipeline:
                 asyncio.to_thread(
                     interpreter.interpret,
                     request,
-                    deadline_monotonic=deadline,
+                    deadline_monotonic=wait_timeout(deadline),
                     cancel_event=stage_cancel_event,
                 ),
                 timeout=timeout,
@@ -723,6 +597,12 @@ class PlanningV4Pipeline:
             code = result.error.code if result.error else "REPAIR_DISPATCH_TECHNICAL_ERROR"
             if self._is_dispatch_data_corruption(code):
                 raise DayRepairError(code, fatal=True)
+            if code in RECOVERABLE_REFERENCE_CODES:
+                # 引用修复失败不证明已有候选无效；先验证完整快照，再交F09判断能否修订。
+                try:
+                    result = PlanningDispatchService.validate_result_snapshot(context, result)
+                except Exception as exc:
+                    raise DayRepairError(self._safe_code(exc, "REPAIR_PARTIAL_SNAPSHOT_INVALID"), fatal=True) from None
             return DayRepairCollectionResult(
                 stop_reason="technical_error",
                 fact_store=result.fact_store,
@@ -738,8 +618,7 @@ class PlanningV4Pipeline:
                     candidates=request_data.candidates, area_hints=request_data.area_hints,
                     task_results=request_data.task_results,
                 )
-            # The dispatcher's own collection window expired. Keep its verified partial
-            # snapshot, consume this repair round, and let F09 continue with other dates.
+            # 采集窗口超时保留已核实快照；技术恢复独立计数，不占业务轮。
             return DayRepairCollectionResult(
                 stop_reason="technical_error",
                 fact_store=result.fact_store,
@@ -819,8 +698,7 @@ class PlanningV4Pipeline:
                 and target.role == "attractions"
                 and candidate_by_id.get(candidate_id) is not None
                 and candidate_by_id[candidate_id].category == "sightseeing"
-                and (not candidate_by_id[candidate_id].slot_ids
-                     or bool(set(candidate_by_id[candidate_id].slot_ids) & set(target.slot_ids)))
+                and any(candidate_allows_slot(candidate_by_id[candidate_id], slot_id) for slot_id in target.slot_ids)
                 and place_by_id.get(candidate_by_id[candidate_id].place_fact_id) is not None
                 and place_by_id[candidate_by_id[candidate_id].place_fact_id].poi_id
                     == candidate_by_id[candidate_id].poi_id
@@ -847,13 +725,13 @@ class PlanningV4Pipeline:
                     place_name=lodging_place.name,
                 )
         # Existing candidates are eligible as static anchors only when this F09
-        # target explicitly names them and their slot bindings include this day.
+        # target explicitly names them and the planning scope allows this target.
         for target in targets:
             expected_category = "meal" if target.role == "dining" else "sightseeing"
             for candidate_id in target.candidate_ids:
                 candidate = candidate_by_id.get(candidate_id)
                 if (candidate is None or candidate.category != expected_category
-                        or (candidate.slot_ids and not set(candidate.slot_ids) & set(target.slot_ids))):
+                        or not any(candidate_allows_slot(candidate, slot_id) for slot_id in target.slot_ids)):
                     continue
                 place = place_by_id.get(candidate.place_fact_id)
                 if (place is None or place.poi_id != candidate.poi_id
@@ -906,77 +784,6 @@ class PlanningV4Pipeline:
 
         return key(place.city) == key(city)
 
-    async def _current_routes(
-        self,
-        route_service,
-        planning_input: PlanningInput,
-        draft: PlanDraft,
-        facts: FactStore,
-        *,
-        endpoint_execution: EndpointVerificationExecution | None,
-        endpoint_context_revision: int,
-        departure_fact_id: str | None,
-        route_context,
-        deadline: float,
-        cancel_event: Event,
-    ) -> tuple[PlanDraft, FactStore, PlanTimingResult, str]:
-        remaining = self._remaining(deadline)
-        if remaining <= 0:
-            cancel_event.set()
-            route_context.cancel_event.set()
-            failed_draft, timing = self._pending_routes(
-                planning_input, draft, facts, departure_fact_id, error_category="timeout",
-            )
-            return failed_draft, facts, timing, "failed"
-        route_stage_cancel_event = Event()
-        try:
-            routed = await self._await_stage(
-                route_service.run_async(
-                    planning_input,
-                    draft,
-                    facts,
-                    endpoint_execution=endpoint_execution,
-                    verified_departure_fact_id=departure_fact_id,
-                    current_context_revision=(endpoint_context_revision if endpoint_execution else None),
-                    route_context=route_context,
-                ),
-                timeout=remaining,
-                stage="current_routes",
-                cancel_event=route_stage_cancel_event,
-                global_deadline=deadline,
-                global_cancel_event=cancel_event,
-                timeout_code="CURRENT_ROUTE_TIMEOUT",
-            )
-            if self._has_pending_route_legs(routed.draft):
-                route_context.cancel_event.set()
-                failed_draft = self._mark_pending_route_modes(
-                    routed.draft, error_category="provider_error",
-                )
-                failed_timing = calculate_plan_timing(
-                    planning_input, failed_draft, routed.fact_store,
-                    verified_departure_fact_id=departure_fact_id,
-                )
-                return failed_draft, routed.fact_store, failed_timing, "failed"
-            return routed.draft, routed.fact_store, routed.timing, "completed"
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # F06 already produced a validated draft. A route provider/service error leaves
-            # route durations unknown; expose a finished failure state instead of leaving
-            # pending legs that no current-route worker will update.
-            category = (
-                "timeout"
-                if isinstance(exc, (PlanningV4PipelineError, asyncio.TimeoutError))
-                else "provider_error"
-            )
-            if isinstance(exc, PlanningV4PipelineError) and exc.global_deadline:
-                cancel_event.set()
-        route_context.cancel_event.set()
-        failed_draft, timing = self._pending_routes(
-            planning_input, draft, facts, departure_fact_id, error_category=category,
-        )
-        return failed_draft, facts, timing, "failed"
-
     @staticmethod
     def _pending_routes(
         planning_input, draft, facts, departure_fact_id, *, error_category="timeout",
@@ -989,11 +796,7 @@ class PlanningV4Pipeline:
         failed_draft = PlanningV4Pipeline._mark_pending_route_modes(
             failed_draft, error_category=error_category,
         )
-        timing = calculate_plan_timing(
-            planning_input, failed_draft, facts,
-            verified_departure_fact_id=departure_fact_id,
-        )
-        return failed_draft, timing
+        return failed_draft
 
     @staticmethod
     def _failed_day_route_recalculation(
@@ -1029,24 +832,22 @@ class PlanningV4Pipeline:
             failed_draft = PlanningV4Pipeline._mark_pending_route_modes(
                 failed_draft, error_category=error_category,
             )
-            timing = calculate_plan_timing(
-                request_data.planning_input,
-                failed_draft,
-                request_data.facts,
-                verified_departure_fact_id=departure_fact_id,
-            )
-            report = validate_daily_plan(
-                request_data.planning_input,
-                failed_draft,
-                request_data.facts,
-                request_data.candidates,
-                timing,
-                repair_states=request_data.repair_states,
-            )
+            with repair_stage("route_fallback_validation", {
+                "plan_id": failed_draft.plan_id, "day_id": request_data.day_id,
+                "round_id": request_data.round_id, "round_number": request_data.round_number,
+                "proposed_revision": failed_draft.revision,
+            }, draft=failed_draft, facts=request_data.facts,
+                timezone_name=request_data.planning_input.request.timezone):
+                report = validate_daily_plan(
+                    request_data.planning_input,
+                    failed_draft,
+                    request_data.facts,
+                    request_data.candidates,
+                    repair_states=request_data.repair_states,
+                )
             return DayRepairRecalculation(
                 draft=failed_draft,
                 facts=request_data.facts,
-                timing=timing,
                 report=report,
             )
         except CurrentRouteError as exc:
@@ -1136,7 +937,7 @@ class PlanningV4Pipeline:
             day_summaries=summaries,
             calculation=PreviewCalculation(
                 based_on_revision=draft.revision,
-                calculation_id="calculation_" + uuid4().hex,
+                calculation_id="generation:" + draft.plan_id + ":" + uuid4().hex,
                 current_routes=current_routes,
                 alternative_backfill=backfill_status,
                 pending_leg_ids=pending_leg_ids,
@@ -1144,15 +945,15 @@ class PlanningV4Pipeline:
         )
 
     @staticmethod
-    def _day_summaries_with_costs(timing, cost):
+    def _day_summaries_with_costs(planning_input, draft, facts, cost):
         by_cost_day = {day.day_id: day for day in cost.days}
         summaries = []
-        for timing_day in timing.days:
-            cost_day = by_cost_day[timing_day.day_id]
+        for summary in build_day_summaries(planning_input, draft, facts):
+            cost_day = by_cost_day[summary.day_id]
             cost_status = (
                 "available" if cost_day.status in {"all_known", "known_partial"} else "missing"
             )
-            summaries.append(timing_day.summary.model_copy(update={
+            summaries.append(summary.model_copy(update={
                 "cost_status": cost_status,
                 "known_cost_subtotal": str(cost_day.known_sightseeing_meal_per_person_subtotal),
             }))
@@ -1205,7 +1006,7 @@ class PlanningV4Pipeline:
         timeout_code: str | None = None,
     ):
         try:
-            return await asyncio.wait_for(awaitable, timeout=max(0.001, timeout))
+            return await asyncio.wait_for(awaitable, timeout=wait_timeout(max(0.001, timeout)))
         except asyncio.TimeoutError:
             cancel_event.set()
             is_global_deadline = (
@@ -1241,7 +1042,7 @@ class PlanningV4Pipeline:
             # global deadline and gives the service a small return/serialization window.
             return await asyncio.wait_for(
                 awaitable,
-                timeout=remaining + GLOBAL_STAGE_GRACE_SECONDS,
+                timeout=wait_timeout(remaining + GLOBAL_STAGE_GRACE_SECONDS),
             )
         except asyncio.TimeoutError:
             is_global_deadline = self._remaining(deadline) <= 0
@@ -1274,6 +1075,10 @@ class PlanningV4Pipeline:
         return code in exact or "IDENTITY_MISMATCH" in code
 
     async def _progress(self, callback, stage, completed, total, message):
+        # 这里只表示进入/报告阶段；不据此宣称模型输出有效或修订已采用。
+        with span("planning.v4.progress", "planning", {"stage": stage}) as record:
+            record.output = {"schema_version": 1, "stage": stage, "outcome": "reported",
+                             "completed": completed, "total": total}
         value = callback(PreviewProgress(
             stage=stage,
             completed=completed,
@@ -1306,17 +1111,6 @@ class PlanningV4Pipeline:
         if isinstance(value, DayRevision):
             return value
         raise DayRepairError("DAY_REVISION_RESULT_INVALID")
-
-    def _revision_reader(self, plan_id: str, fallback: _RevisionHolder) -> Callable[[], int]:
-        def current_revision() -> int:
-            if self.current_revision_lookup is None:
-                return fallback.value
-            revision = self.current_revision_lookup(plan_id)
-            # A missing draft means the preview was removed or never persisted. Treat it
-            # as superseded so a late background query cannot run against an orphan.
-            return revision if isinstance(revision, int) and not isinstance(revision, bool) else 0
-
-        return current_revision
 
     @classmethod
     def _stage_error(cls, exc, stage, fallback):

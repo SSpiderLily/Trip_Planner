@@ -114,9 +114,9 @@ async def startup_event(application: FastAPI):
     pipeline = getattr(application.state, "planning_v4_pipeline", None)
     if pipeline is None:
         pipeline = PlanningV4Pipeline(
+            enforce_timeouts=settings.planner_enforce_timeouts,
             total_timeout_seconds=settings.planner_v4_total_timeout_seconds,
             initial_collection_timeout_seconds=settings.planner_v4_initial_collection_timeout_seconds,
-            current_revision_lookup=preview_repository.current_plan_revision,
         )
     application.state.planning_v4_pipeline = pipeline
     application.state.preview_task_service = PreviewTaskService(

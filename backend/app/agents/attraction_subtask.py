@@ -1,6 +1,8 @@
 """运行一个景点 Subtask；本模块不调度其他角色或生成整趟行程。"""
 from __future__ import annotations
 
+from app.services.planning_lodging_policy import city_for_days
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from contextvars import copy_context
@@ -355,6 +357,42 @@ class AttractionSubtaskRunner:
     def _action_allowed(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> bool:
         return True
 
+    def _acquisition_targets_met(self, subtask, context, candidates):
+        """核心地点齐备时阻止继续搜索补费用或营业信息，最终绑定仍由模型finish完成。"""
+        if len({place.poi_id for place in candidates}) < subtask.candidate_target:
+            return False
+        if subtask.requirement_ids:
+            if subtask.role == "attractions":
+                requirements = {item.requirement_id: item for item in context.planning_input.requirements.hard_requirements}
+                if any(len({place.poi_id for place in candidates if _requirement_matches_name(requirements[ref], place.name)}) != 1
+                       for ref in subtask.requirement_ids):
+                    return False
+            elif subtask.role == "dining":
+                from app.agents.dining_subtask import eligible_named_restaurant_requirement_ids
+                matched = {ref: set() for ref in subtask.requirement_ids}
+                for place in candidates:
+                    for ref in eligible_named_restaurant_requirement_ids(
+                        place, must_eat_restaurants=context.must_eat_restaurants,
+                        allowed_requirement_ids=set(subtask.requirement_ids),
+                    ):
+                        matched[ref].add(place.poi_id)
+                if any(len(pois) != 1 for pois in matched.values()):
+                    return False
+            else:
+                return False
+        if subtask.role == "dining":
+            covered = {slot for place in candidates for slot in self._eligible_slot_ids(place, context)}
+            searched = set(self._searched_radius_by_slot)
+            scoped_existing = {slot for candidate in context.candidate_refs for slot in candidate.slot_ids}
+            return self._target_slot_ids(subtask, context).issubset(covered & (searched | scoped_existing))
+        return True
+
+    def _record_output_rejection(self, condition: str, path: str, **details) -> None:
+        """子类可记录安全拒绝诊断，不改变执行结果。"""
+
+    def _record_action_format_error(self, exc: Exception, *, repair_exhausted: bool) -> None:
+        """子类可记录解析失败位置；不得保存原始响应或异常文本。"""
+
     def _empty_result_is_terminal(self, action, subtask, context, store) -> bool:
         return True
 
@@ -364,7 +402,7 @@ class AttractionSubtaskRunner:
     def _search_history_context(self, action, subtask, context, result) -> dict[str, Any]:
         return {
             "keywords": self._action_keywords(action) if self._is_search_action(action) else None,
-            "city": context.planning_input.request.city,
+            "city": subtask.scope.city,
             "citylimit": True,
             "page": 1,
             "offset": MAX_SEARCH_PAGE_SIZE,
@@ -380,7 +418,7 @@ class AttractionSubtaskRunner:
         self, adapter, action, subtask, context, deadline, pending, trace, store, cancel_event,
     ):
         return self._search_with_retry(
-            adapter, self._action_keywords(action), context.planning_input.request.city,
+            adapter, self._action_keywords(action), subtask.scope.city,
             deadline, pending, trace, store, cancel_event,
         )
 
@@ -440,8 +478,8 @@ class AttractionSubtaskRunner:
         self._usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self._usage_known = {key: True for key in self._usage_totals}
         started = time.monotonic()
-        deadline = started + self.subtask_timeout_seconds
-        if subtask.deadline_at is not None:
+        deadline = deadline_after(started, self.subtask_timeout_seconds)
+        if timeouts_enabled() and subtask.deadline_at is not None:
             wall_remaining = (subtask.deadline_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
             deadline = min(deadline, started + max(0.0, wall_remaining))
 
@@ -562,6 +600,11 @@ class AttractionSubtaskRunner:
                     agent_span.output = self._safe_result_summary(task_result)
                     return self._execution(context, store, task_result, tool_calls, started)
 
+                if (self._is_search_action(action) or self._is_verification_action(action)) and self._acquisition_targets_met(subtask, context, candidates):
+                    return self._finish(
+                        subtask, context, store, tool_calls, "partial", "scope_exhausted", started,
+                        tool_calls, progress_seen, "已有有效地点候选，不为费用或营业信息继续查询；候选保留供每日安排使用。",
+                    )
                 if (not self._is_search_action(action) and not self._is_verification_action(action)) or not self._action_allowed(action, subtask, context):
                     return self._finish(
                         subtask, context, store, tool_calls,
@@ -571,6 +614,7 @@ class AttractionSubtaskRunner:
                     )
                 keywords = self._action_keywords(action).strip() if self._is_search_action(action) else ""
                 if _FORBIDDEN_QUERY.search(keywords):
+                    self._record_output_rejection("query_keyword_forbidden", "keywords")
                     return self._finish(
                         subtask, context, store, tool_calls, "failed", "invalid_output", started,
                         tool_calls, progress_seen, "模型搜索关键词不符合安全格式",
@@ -716,8 +760,12 @@ class AttractionSubtaskRunner:
             reject("CONTEXT_REVISION_MISMATCH", "Subtask.context_revision 已过期")
         if subtask.base_revision != context.base_revision:
             reject("BASE_REVISION_MISMATCH", "Subtask.base_revision 与当前版本不一致")
-        if _normalize(subtask.scope.city) != _normalize(planning_input.request.city):
-            reject("SCOPE_CITY_MISMATCH", "景点任务城市必须与原始旅行请求一致")
+        try:
+            expected_city = city_for_days(planning_input, subtask.scope.day_ids)
+        except ValueError:
+            reject("SCOPE_CITY_MISMATCH", "任务日期不属于一个已确认城市")
+        if _normalize(subtask.scope.city) != _normalize(expected_city):
+            reject("SCOPE_CITY_MISMATCH", "地点任务城市必须与该日期已确认城市一致")
 
         facts = context.fact_store
         try:
@@ -979,7 +1027,7 @@ class AttractionSubtaskRunner:
                 "context_revision": context.context_revision,
                 "candidate_count": len(candidates),
                 "repair": repairs > 0,
-                "request_timeout_seconds": round(timeout, 3),
+                "request_timeout_seconds": wait_timeout(round(timeout, 3)),
             }
             copied_context = copy_context()
             call_state = _ModelCallState(cancel_event)
@@ -1010,7 +1058,8 @@ class AttractionSubtaskRunner:
             try:
                 payload = self._parse_json(text)
                 action = self._action_adapter().validate_python(payload)
-            except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
+            except (TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+                self._record_action_format_error(exc, repair_exhausted=repairs >= repair_budget)
                 if repairs >= repair_budget:
                     return PlanningError("INVALID_OUTPUT", "模型输出不符合景点动作格式", step="invalid_output")
                 repairs += 1
@@ -1419,7 +1468,7 @@ class AttractionSubtaskRunner:
         )
         action = FinishAction(action="finish", selections=tuple(
             CandidateSelection(poi_id=place.poi_id) for place in screened
-        )[:20])
+        )[:(subtask.candidate_target if subtask.role == "lodging" else 20)])
         if status == "failed" and (screened or context.candidate_refs):
             status = "partial"
         result = self._make_result(

@@ -23,3 +23,17 @@ export async function submitV4TripTask(request: V4TripRequest): Promise<V4TripAc
   }
   return accepted as V4TripAccepted
 }
+
+
+export interface HotelOption {
+  poi_id: string
+  name: string
+  address: string | null
+  city: string
+  location: { lng: number; lat: number }
+}
+
+export async function searchHotels(city: string, keywords: string): Promise<HotelOption[]> {
+  const response = await v4TaskClient.get('/api/poi/hotels', { params: { city, keywords } })
+  return response.data.items
+}

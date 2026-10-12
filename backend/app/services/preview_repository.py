@@ -1,6 +1,6 @@
 """独立的 SQLite 预览草稿与最近成功保存仓库。
 
-本模块只验证 ItineraryPreview 的模型结构。业务引用与可行性校验由服务组装器执行。
+完整 PreviewSnapshot 验证来源与引用图；单独 ItineraryPreview 只验证模型结构和存储身份。
 每条草稿和最终结果均以一个完整 JSON snapshot 保存，避免事实、候选、报告和行程跨版本混写。
 """
 from __future__ import annotations
@@ -15,10 +15,11 @@ import sqlite3
 from typing import Callable, Iterator
 import hmac
 
+from pydantic import ValidationError
+
 from app.models.planning_v4.plan import ItineraryPreview
 from app.models.planning_v4.cost import ReferenceCostSummary
 from app.models.planning_v4_preview import PreviewSnapshot
-from app.services.planning_v4_timing import PlanTimingResult
 from app.models.preview_storage import (
     CreatedPreview,
     ClaimedPreviewRouteJob,
@@ -32,6 +33,7 @@ from app.models.preview_storage import (
     PreviewFinalUnavailable,
     PreviewIdentityConflict,
     PreviewRestoreResult,
+    PreviewSnapshotUnsupported,
     PreviewRouteJob,
     SavedPreview,
     SavedPreviewMetadata,
@@ -44,7 +46,6 @@ CREATE TABLE IF NOT EXISTS preview_drafts (
     plan_id TEXT PRIMARY KEY NOT NULL,
     access_token_hash TEXT NOT NULL UNIQUE,
     preview_json TEXT NOT NULL,
-    timing_json TEXT,
     cost_json TEXT,
     plan_revision INTEGER NOT NULL CHECK (plan_revision > 0),
     store_version INTEGER NOT NULL CHECK (store_version > 0),
@@ -53,7 +54,6 @@ CREATE TABLE IF NOT EXISTS preview_drafts (
 CREATE TABLE IF NOT EXISTS preview_finals (
     plan_id TEXT PRIMARY KEY NOT NULL,
     preview_json TEXT NOT NULL,
-    timing_json TEXT,
     cost_json TEXT,
     plan_revision INTEGER NOT NULL CHECK (plan_revision > 0),
     source_store_version INTEGER NOT NULL CHECK (source_store_version > 0),
@@ -189,7 +189,7 @@ class PreviewRepository:
             conn.executescript(SCHEMA)
             for table in ("preview_drafts", "preview_finals"):
                 existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-                for field in ("timing_json", "cost_json"):
+                for field in ("cost_json",):
                     if field not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
             job_fields = {row["name"] for row in conn.execute("PRAGMA table_info(preview_jobs)")}
@@ -209,7 +209,7 @@ class PreviewRepository:
 
         ``access_token`` 仅供受信任的异步任务服务传入预先签发的标识；旧调用仍由仓库生成。
         """
-        validated, timing_json, cost_json = self._validated_snapshot(preview)
+        validated, cost_json = self._validated_snapshot(preview)
         preview_json = self._dump_preview(validated)
         token = self.issue_access_token() if access_token is None else access_token
         token_hash = self._token_hash(token)
@@ -219,15 +219,15 @@ class PreviewRepository:
                 raise PreviewIdentityConflict("plan_id 已存在")
             conn.execute(
                 """INSERT INTO preview_drafts
-                   (plan_id,access_token_hash,preview_json,timing_json,cost_json,plan_revision,store_version,updated_at)
-                   VALUES (?,?,?,?,?,?,1,?)""",
-                (validated.draft.plan_id, token_hash, preview_json, timing_json, cost_json,
+                   (plan_id,access_token_hash,preview_json,cost_json,plan_revision,store_version,updated_at)
+                   VALUES (?,?,?,?,?,1,?)""",
+                (validated.draft.plan_id, token_hash, preview_json, cost_json,
                  validated.draft.revision, timestamp),
             )
         record = StoredPreview(
             validated, store_version=1, plan_revision=validated.draft.revision,
             updated_at=timestamp,
-            timing=self._timing_from_json(timing_json), cost=self._cost_from_json(cost_json),
+            cost=self._cost_from_json(cost_json),
         )
         return CreatedPreview(access_token=token, record=record)
 
@@ -247,6 +247,28 @@ class PreviewRepository:
                 (self._required_id(task_id, "task_id"), self._required_id(plan_id, "plan_id"),
                  self._token_hash(access_token), timestamp),
             )
+
+    def recover_local_access(self, task_id: str) -> dict | None:
+        """仅供受限本机恢复路由调用；只轮换凭据，不修改任何行程快照。"""
+        token = self.issue_access_token()
+        with self._write_transaction() as conn:
+            row = conn.execute(
+                """SELECT j.plan_id FROM preview_jobs j JOIN preview_drafts p
+                   ON p.plan_id=j.preview_plan_id AND p.plan_id=j.plan_id
+                   WHERE j.task_id=? AND j.generation_state='ready'
+                   AND j.backfill_state!='running'""", (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if conn.execute(
+                "SELECT 1 FROM preview_route_jobs WHERE plan_id=? AND state IN ('pending','running')",
+                (row['plan_id'],),
+            ).fetchone():
+                return None
+            token_hash = self._token_hash(token)
+            conn.execute("UPDATE preview_jobs SET access_token_hash=? WHERE task_id=?", (token_hash, task_id))
+            conn.execute("UPDATE preview_drafts SET access_token_hash=? WHERE plan_id=?", (token_hash, row['plan_id']))
+        return {"task_id": task_id, "plan_id": row['plan_id'], "access_token": token}
 
     def job_status(self, task_id: str, access_token: str) -> dict | None:
         token_hash = self._token_hash(access_token)
@@ -344,9 +366,21 @@ class PreviewRepository:
                 (*[value for _, value in fields], self._now(), task_id),
             )
 
-    def complete_job(self, task_id: str, snapshot: PreviewSnapshot) -> StoredPreview:
-        """在一个事务中写入草稿快照并把任务指针切到 ready。"""
-        validated, timing_json, cost_json = self._validated_snapshot(snapshot)
+    def complete_job(
+        self, task_id: str, snapshot: PreviewSnapshot, *, route_day_ids: tuple[str, ...] = (),
+    ) -> StoredPreview:
+        """原子保存地点快照、ready状态及其独立相邻路线任务。"""
+        validated, cost_json = self._validated_snapshot(snapshot)
+        if route_day_ids:
+            pending_ids = set(validated.calculation.pending_leg_ids)
+            expected_days = {leg.day_id for leg in validated.draft.legs if leg.leg_id in pending_ids}
+            if (
+                validated.calculation.current_routes != "pending"
+                or not validated.calculation.calculation_id.startswith("generation:")
+                or len(set(route_day_ids)) != len(route_day_ids)
+                or set(route_day_ids) != expected_days
+            ):
+                raise PreviewIdentityConflict("初版交通任务必须绑定当前待查询路段及日期")
         preview_json = self._dump_preview(validated)
         timestamp = self._now()
         with self._write_transaction() as conn:
@@ -357,9 +391,9 @@ class PreviewRepository:
                 raise PreviewIdentityConflict("任务计划 ID 与预览不一致")
             conn.execute(
                 """INSERT INTO preview_drafts
-                   (plan_id,access_token_hash,preview_json,timing_json,cost_json,plan_revision,store_version,updated_at)
-                   VALUES (?,?,?,?,?,?,1,?)""",
-                (validated.draft.plan_id, job["access_token_hash"], preview_json, timing_json, cost_json,
+                   (plan_id,access_token_hash,preview_json,cost_json,plan_revision,store_version,updated_at)
+                   VALUES (?,?,?,?,?,1,?)""",
+                (validated.draft.plan_id, job["access_token_hash"], preview_json, cost_json,
                  validated.draft.revision, timestamp),
             )
             conn.execute(
@@ -369,9 +403,16 @@ class PreviewRepository:
                    WHERE task_id=?""",
                 (timestamp, validated.draft.plan_id, timestamp, task_id),
             )
+            if route_day_ids:
+                self._insert_route_job(
+                    conn, task_id=task_id, plan_id=validated.draft.plan_id,
+                    calculation_id=validated.calculation.calculation_id,
+                    source_store_version=1, source_plan_revision=validated.draft.revision,
+                    affected_day_ids=route_day_ids, created_at=timestamp,
+                )
         return StoredPreview(
             validated, store_version=1, plan_revision=validated.draft.revision,
-            updated_at=timestamp, timing=self._timing_from_json(timing_json),
+            updated_at=timestamp,
             cost=self._cost_from_json(cost_json),
         )
 
@@ -396,7 +437,11 @@ class PreviewRepository:
                 draft_row = conn.execute(
                     "SELECT * FROM preview_drafts WHERE plan_id=?", (route_row["plan_id"],)
                 ).fetchone()
-                current = self._stored_from_row(draft_row) if draft_row is not None else None
+                try:
+                    current = self._route_source_record(draft_row)
+                except PreviewSnapshotUnsupported:
+                    self._fail_unsupported_route_job(conn, route_row)
+                    continue
                 if current is not None and self._job_matches_record(route_row, current):
                     conn.execute(
                         "UPDATE preview_route_jobs SET state='pending',updated_at=? WHERE calculation_id=?",
@@ -522,11 +567,10 @@ class PreviewRepository:
             ).fetchone()
             if current_job is not None:
                 inherited_days.update(json.loads(current_job["affected_day_ids_json"]))
-
             updated_snapshot, changed_activity_ids, changed_leg_ids = transform(
                 snapshot, tuple(sorted(inherited_days)),
             )
-            updated, timing_json, cost_json = self._validated_snapshot(updated_snapshot)
+            updated, cost_json = self._validated_snapshot(updated_snapshot)
             preview_json = self._dump_preview(updated)
             self._check_immutable_identity(current.preview, updated)
             if updated.draft.revision != current.plan_revision + 1:
@@ -554,10 +598,10 @@ class PreviewRepository:
             new_store_version = current.store_version + 1
             changed = conn.execute(
                 """UPDATE preview_drafts
-                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
+                   SET preview_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
                    WHERE plan_id=? AND access_token_hash=? AND store_version=? AND plan_revision=?""",
                 (
-                    preview_json, timing_json, cost_json, updated.draft.revision,
+                    preview_json, cost_json, updated.draft.revision,
                     new_store_version, timestamp, current.preview.draft.plan_id,
                     token_hash, expected_store_version, command.base_revision,
                 ),
@@ -656,7 +700,14 @@ class PreviewRepository:
             draft_row = conn.execute(
                 "SELECT * FROM preview_drafts WHERE plan_id=?", (job_row["plan_id"],),
             ).fetchone()
-            current = self._stored_from_row(draft_row) if draft_row is not None else None
+            try:
+                current = self._route_source_record(draft_row)
+            except PreviewSnapshotUnsupported:
+                self._fail_unsupported_route_job(conn, job_row)
+                return self._route_job_from_row(conn.execute(
+                    "SELECT * FROM preview_route_jobs WHERE calculation_id=?",
+                    (calculation_id,),
+                ).fetchone())
             state = (
                 "pending"
                 if current is not None and self._job_matches_record(job_row, current)
@@ -705,19 +756,26 @@ class PreviewRepository:
                 draft_row = conn.execute(
                     "SELECT * FROM preview_drafts WHERE plan_id=?", (job_row["plan_id"],)
                 ).fetchone()
-                current = self._stored_from_row(draft_row) if draft_row is not None else None
+                try:
+                    current = self._route_source_record(draft_row)
+                except PreviewSnapshotUnsupported:
+                    self._fail_unsupported_route_job(conn, job_row)
+                    continue
                 state = "pending" if current is not None and self._job_matches_record(job_row, current) else "superseded"
                 conn.execute(
                     "UPDATE preview_route_jobs SET state=?,updated_at=? WHERE calculation_id=?",
                     (state, now, job_row["calculation_id"]),
                 )
 
-    def claim_route_job(self, plan_id: str) -> ClaimedPreviewRouteJob | None:
+    def claim_route_job(
+        self, plan_id: str, calculation_id: str | None = None,
+    ) -> ClaimedPreviewRouteJob | None:
         with self._write_transaction() as conn:
             job_row = conn.execute(
                 """SELECT * FROM preview_route_jobs WHERE plan_id=? AND state='pending'
+                   AND (? IS NULL OR calculation_id=?)
                    ORDER BY created_at DESC LIMIT 1""",
-                (plan_id,),
+                (plan_id, calculation_id, calculation_id),
             ).fetchone()
             if job_row is None:
                 return None
@@ -730,7 +788,11 @@ class PreviewRepository:
                     (self._now(), job_row["calculation_id"]),
                 )
                 return None
-            record = self._stored_from_row(draft_row)
+            try:
+                record = self._route_source_record(draft_row)
+            except PreviewSnapshotUnsupported:
+                self._fail_unsupported_route_job(conn, job_row)
+                return None
             if not self._job_matches_record(job_row, record):
                 conn.execute(
                     "UPDATE preview_route_jobs SET state='superseded',updated_at=? WHERE calculation_id=?",
@@ -759,7 +821,9 @@ class PreviewRepository:
     ) -> StoredPreview | None:
         if status not in {"completed", "failed"}:
             raise ValueError("路线任务终态无效")
-        updated, timing_json, cost_json = self._validated_snapshot(snapshot)
+        updated, cost_json = self._validated_snapshot(snapshot)
+        if updated.calculation.current_routes != status or updated.calculation.pending_leg_ids:
+            raise PreviewIdentityConflict("路线任务终态必须与预览计算状态一致，不能保留待查询路段")
         preview_json = self._dump_preview(updated)
         with self._write_transaction() as conn:
             job = conn.execute(
@@ -790,10 +854,10 @@ class PreviewRepository:
             timestamp = self._now()
             changed = conn.execute(
                 """UPDATE preview_drafts
-                   SET preview_json=?,timing_json=?,cost_json=?,store_version=?,updated_at=?
+                   SET preview_json=?,cost_json=?,store_version=?,updated_at=?
                    WHERE plan_id=? AND store_version=? AND plan_revision=?""",
                 (
-                    preview_json, timing_json, cost_json, new_store_version,
+                    preview_json, cost_json, new_store_version,
                     timestamp, plan_id, current.store_version, current.plan_revision,
                 ),
             )
@@ -819,7 +883,7 @@ class PreviewRepository:
         command_id: str,
     ) -> DraftWriteResult:
         """通过双版本 CAS 原子替换整份草稿，并按 command_id 幂等重放。"""
-        validated, timing_json, cost_json = self._validated_snapshot(preview)
+        validated, cost_json = self._validated_snapshot(preview)
         preview_json = self._dump_preview(validated)
         command_id = self._required_id(command_id, "command_id")
         expected_store_version = self._positive_version(expected_store_version, "expected_store_version")
@@ -828,7 +892,6 @@ class PreviewRepository:
             "expected_store_version": expected_store_version,
             "expected_plan_revision": expected_plan_revision,
             "preview_json": preview_json,
-            "timing_json": timing_json,
             "cost_json": cost_json,
         })
         token_hash = self._token_hash(access_token)
@@ -875,11 +938,10 @@ class PreviewRepository:
             timestamp = self._now()
             changed = conn.execute(
                 """UPDATE preview_drafts
-                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
+                   SET preview_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
                    WHERE plan_id=? AND store_version=? AND plan_revision=?""",
                 (
                     preview_json,
-                    timing_json,
                     cost_json,
                     validated.draft.revision,
                     new_store_version,
@@ -954,7 +1016,11 @@ class PreviewRepository:
 
             now = self._now()
             current_store_version = row["store_version"]
-            current_preview = self._preview_from_json(row["preview_json"])
+            current_record = self._stored_from_row(row)
+            # 完整新快照保存前核对来源闭包和版本。损坏草稿不能覆盖上次成功保存。
+            if current_record.cost is not None:
+                current_record.snapshot
+            current_preview = current_record.preview
             final_row = conn.execute("SELECT * FROM preview_finals WHERE plan_id=?", (plan_id,)).fetchone()
             if source_store_version != current_store_version:
                 status = "stale"
@@ -970,11 +1036,10 @@ class PreviewRepository:
                 receipt_version = source_store_version
                 conn.execute(
                     """INSERT INTO preview_finals
-                       (plan_id,preview_json,timing_json,cost_json,plan_revision,source_store_version,save_id,saved_at)
-                       VALUES (?,?,?,?,?,?,?,?)
+                       (plan_id,preview_json,cost_json,plan_revision,source_store_version,save_id,saved_at)
+                       VALUES (?,?,?,?,?,?,?)
                        ON CONFLICT(plan_id) DO UPDATE SET
                          preview_json=excluded.preview_json,
-                         timing_json=excluded.timing_json,
                          cost_json=excluded.cost_json,
                          plan_revision=excluded.plan_revision,
                          source_store_version=excluded.source_store_version,
@@ -983,7 +1048,6 @@ class PreviewRepository:
                     (
                         plan_id,
                         row["preview_json"],
-                        row["timing_json"],
                         row["cost_json"],
                         current_preview.draft.revision,
                         source_store_version,
@@ -1095,6 +1159,8 @@ class PreviewRepository:
             final = self._final_from_row(final_row)
             try:
                 source_snapshot = final.snapshot
+            except PreviewSnapshotUnsupported:
+                raise
             except (TypeError, ValueError):
                 source_snapshot = None
             if source_snapshot is None:
@@ -1108,17 +1174,16 @@ class PreviewRepository:
                     else source_snapshot.preview.calculation.calculation_id
                 ),
             )
-            validated, timing_json, cost_json = self._validated_snapshot(restored_snapshot)
+            validated, cost_json = self._validated_snapshot(restored_snapshot)
             preview_json = self._dump_preview(validated)
             new_store_version = current.store_version + 1
             timestamp = self._now()
             changed = conn.execute(
                 """UPDATE preview_drafts
-                   SET preview_json=?,timing_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
+                   SET preview_json=?,cost_json=?,plan_revision=?,store_version=?,updated_at=?
                    WHERE plan_id=? AND store_version=? AND plan_revision=?""",
                 (
                     preview_json,
-                    timing_json,
                     cost_json,
                     validated.draft.revision,
                     new_store_version,
@@ -1221,7 +1286,6 @@ class PreviewRepository:
         })
         return PreviewSnapshot.model_validate({
             "preview": preview.model_dump(mode="json"),
-            "timing": snapshot.timing.model_copy(update={"based_on_revision": new_revision}).model_dump(mode="json"),
             "cost": snapshot.cost.model_copy(update={"based_on_revision": new_revision}).model_dump(mode="json"),
         })
 
@@ -1391,18 +1455,17 @@ class PreviewRepository:
     @classmethod
     def _validated_snapshot(
         cls, value: ItineraryPreview | PreviewSnapshot
-    ) -> tuple[ItineraryPreview, str | None, str | None]:
+    ) -> tuple[ItineraryPreview, str | None]:
         if isinstance(value, PreviewSnapshot):
             snapshot = value
         else:
             snapshot = None
         preview = cls._validated_preview(snapshot.preview if snapshot else value)
         if snapshot is None:
-            return preview, None, None
+            return preview, None
         validated = PreviewSnapshot.model_validate(snapshot.model_dump(mode="json"))
         return (
             preview,
-            cls._dump_model(validated.timing),
             cls._dump_model(validated.cost),
         )
 
@@ -1411,13 +1474,13 @@ class PreviewRepository:
         return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"), allow_nan=False)
 
-    @staticmethod
-    def _timing_from_json(value: str | None) -> PlanTimingResult | None:
-        return PlanTimingResult.model_validate_json(value) if value else None
 
     @staticmethod
     def _cost_from_json(value: str | None) -> ReferenceCostSummary | None:
-        return ReferenceCostSummary.model_validate_json(value) if value else None
+        try:
+            return ReferenceCostSummary.model_validate_json(value) if value else None
+        except ValidationError as exc:
+            raise PreviewSnapshotUnsupported() from exc
 
     @staticmethod
     def _dump_preview(preview: ItineraryPreview) -> str:
@@ -1431,7 +1494,10 @@ class PreviewRepository:
 
     @staticmethod
     def _preview_from_json(value: str) -> ItineraryPreview:
-        return ItineraryPreview.model_validate_json(value)
+        try:
+            return ItineraryPreview.model_validate_json(value)
+        except ValidationError as exc:
+            raise PreviewSnapshotUnsupported() from exc
 
     def _stored_from_row(self, row: sqlite3.Row) -> StoredPreview:
         preview = self._preview_from_json(row["preview_json"])
@@ -1440,8 +1506,23 @@ class PreviewRepository:
             store_version=row["store_version"],
             plan_revision=row["plan_revision"],
             updated_at=row["updated_at"],
-            timing=self._timing_from_json(row["timing_json"]),
             cost=self._cost_from_json(row["cost_json"]),
+        )
+
+    def _route_source_record(self, row: sqlite3.Row | None) -> StoredPreview | None:
+        if row is None:
+            return None
+        record = self._stored_from_row(row)
+        if record.snapshot is None or record.plan_revision != record.preview.draft.revision:
+            raise PreviewSnapshotUnsupported()
+        return record
+
+    def _fail_unsupported_route_job(self, conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+        # 原始草稿保持原样；只终止无法安全恢复的路线任务，避免重启或读取触发循环查询。
+        conn.execute(
+            """UPDATE preview_route_jobs SET state='failed',error_code='PREVIEW_CONTRACT_UNSUPPORTED',
+               updated_at=? WHERE calculation_id=?""",
+            (self._now(), row["calculation_id"]),
         )
 
     def _final_from_row(self, row: sqlite3.Row) -> SavedPreview:
@@ -1452,7 +1533,6 @@ class PreviewRepository:
             source_store_version=row["source_store_version"],
             save_id=row["save_id"],
             saved_at=row["saved_at"],
-            timing=self._timing_from_json(row["timing_json"]),
             cost=self._cost_from_json(row["cost_json"]),
         )
 

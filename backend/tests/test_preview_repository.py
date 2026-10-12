@@ -18,7 +18,6 @@ from app.models.preview_storage import (
     PreviewFinalUnavailable,
     PreviewIdentityConflict,
 )
-from app.services.planning_v4_timing import DayTimingResult, PlanTimingResult, ReturnTiming
 from app.services.preview_repository import PreviewRepository
 from app.services.reference_cost import aggregate_reference_costs
 from app.services.task_repository import TaskRepository
@@ -41,22 +40,8 @@ def baseline_preview() -> ItineraryPreview:
 
 def baseline_snapshot() -> PreviewSnapshot:
     planning_input, facts, _, _, preview = make_full_baseline_preview()
-    summaries = {summary.day_id: summary for summary in preview.day_summaries}
-    timing = PlanTimingResult(
-        plan_id=preview.draft.plan_id,
-        based_on_revision=preview.draft.revision,
-        days=tuple(
-            DayTimingResult(
-                day_id=day.day_id,
-                summary=summaries[day.day_id],
-                scheduling_decision="conditional",
-                return_timing=ReturnTiming(status="not_applicable", buffer_s=0),
-            )
-            for day in preview.draft.days
-        ),
-    )
     cost = aggregate_reference_costs(planning_input, preview.draft, facts)
-    return PreviewSnapshot(preview=preview, timing=timing, cost=cost)
+    return PreviewSnapshot(preview=preview, cost=cost)
 
 
 def revised_snapshot(snapshot: PreviewSnapshot, revision: int, calculation_id: str) -> PreviewSnapshot:
@@ -72,7 +57,6 @@ def revised_snapshot(snapshot: PreviewSnapshot, revision: int, calculation_id: s
     preview_value["calculation"]["calculation_id"] = calculation_id
     return PreviewSnapshot.model_validate({
         "preview": preview_value,
-        "timing": snapshot.timing.model_copy(update={"based_on_revision": revision}).model_dump(mode="json"),
         "cost": snapshot.cost.model_copy(update={"based_on_revision": revision}).model_dump(mode="json"),
     })
 

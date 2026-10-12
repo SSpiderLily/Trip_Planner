@@ -101,6 +101,36 @@ const failedSave = await exportV4Snapshot({
 assert.equal(failedSave.status, 'failed')
 assert.deepEqual(saveFailureEvents, ['download', 'save'], 'a save outage happens after the download starts')
 
+for (const routeState of ['pending', 'failed']) {
+  const placesFirst = mixedSyntheticEnvelope()
+  placesFirst.preview.calculation.current_routes = routeState
+  const placesView = mapV4Preview(placesFirst)
+  const captured = captureV4PreviewExport(placesFirst, placesView, { dirty: false, saving: false })
+  assert.ok(captured.persistence, `${routeState} traffic does not block saving a place snapshot`)
+  const events = []
+  const result = await exportV4Snapshot({
+    snapshot: captured,
+    renderAll: async visible => {
+      // A later traffic response cannot change the image currently being rendered.
+      placesFirst.preview.calculation.current_routes = 'completed'
+      placesFirst.store_version += 1
+      assert.equal(visible.envelope.preview.calculation.current_routes, routeState)
+      assert.equal(visible.view.days.length, placesView.days.length)
+      events.push('render')
+      return [{ filename: 'places-first.png', blob: 'synthetic-image' }]
+    },
+    startDownloads: () => events.push('download'),
+    saveFinal: async source => {
+      assert.equal(source.storeVersion, captured.visible.envelope.store_version)
+      events.push('save')
+      throw new Error('storage unavailable')
+    },
+    isSaved: () => true,
+  })
+  assert.equal(result.status, 'failed')
+  assert.deepEqual(events, ['render', 'download', 'save'])
+}
+
 let didDownload = false
 let didSave = false
 await assert.rejects(exportV4Snapshot({

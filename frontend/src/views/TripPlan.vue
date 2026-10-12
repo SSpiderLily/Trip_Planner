@@ -38,6 +38,30 @@
                 <span>目的地城市 <i>*</i></span>
                 <a-input v-model:value="form.city" size="large" placeholder="例如：上海、成都" autocomplete="address-level2" />
               </label>
+              <label class="field full-field">
+                <span>已订酒店 <small>选填，从查询结果中选择</small></span>
+                <a-auto-complete
+                  v-model:value="form.lodgingQuery"
+                  :options="hotelAutocompleteOptions"
+                  :disabled="!form.city.trim()"
+                  :filter-option="false"
+                  allow-clear
+                  size="large"
+                  class="full-width"
+                  placeholder="输入酒店名称，选择下拉候选"
+                  @select="handleHotelSelect"
+                >
+                  <template #option="option">
+                    <div class="hotel-option-name">{{ option.hotel.name }}</div>
+                    <div class="hotel-option-address">{{ option.hotel.address || option.hotel.city }}</div>
+                  </template>
+                </a-auto-complete>
+                <small v-if="!form.city.trim()">请先填写目的地城市，再输入酒店名称。</small>
+                <small v-if="hotelSearching" role="status">正在查询酒店…</small>
+                <small v-else-if="hotelMessage" role="status">{{ hotelMessage }}</small>
+                <small v-if="selectedHotel">已选择：{{ selectedHotel.name }} · {{ selectedHotel.address || selectedHotel.city }}</small>
+                <small>酒店须从高德查询结果中选择；不填则推荐住宿区域和酒店。</small>
+              </label>
               <label class="field">
                 <span>到达时间 <i>*</i></span>
                 <a-date-picker
@@ -73,15 +97,11 @@
             <h3>预算与偏好</h3>
             <div class="field-grid">
               <label class="field">
-                <span>全程预算 <small>选填，人民币</small></span>
+                <span>人均预算 <small>元/全程，选填</small></span>
                 <a-input-number v-model:value="form.budgetAmount" :min="0" :precision="0" size="large" placeholder="例如：5000" class="full-width" />
               </label>
-              <label class="field">
-                <span>已订住处 <small>选填</small></span>
-                <a-input v-model:value="form.lodgingQuery" size="large" :maxlength="300" placeholder="酒店名称或具体地址" />
-              </label>
             </div>
-            <p class="field-help">预算按全程填写，不需要填写出行人数。已订住处可填写酒店名称或地址。</p>
+            <p class="field-help">预算是每人整个旅程的参考金额，不代表已知消费小计。</p>
             <div class="field preference-field">
               <span class="field-title">旅行偏好 <small>可多选</small></span>
               <div class="preference-options" role="group" aria-label="旅行偏好">
@@ -122,7 +142,7 @@
                 <a-input-number v-model:value="form.returnBufferMinutes" :min="0" :max="59" :precision="0" size="large" placeholder="分钟" />
                 <span>分钟</span>
               </div>
-              <p class="field-help">留空时默认预留 1 小时；填写 0 小时 0 分钟表示不额外预留。返程交通也会纳入行程安排。</p>
+              <p class="field-help">留空时默认预留 1 小时；填写 0 小时 0 分钟表示不额外预留。后端按到离时间和缓冲确定可用时段。</p>
             </div>
           </div>
         </div>
@@ -152,7 +172,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Dayjs } from 'dayjs'
 import {
@@ -161,7 +181,7 @@ import {
   retrySavePreviewAccess,
   savePreviewAccess,
 } from '@/services/v4Preview'
-import { submitV4TripTask } from '@/services/v4TripTasks'
+import { submitV4TripTask, searchHotels, type HotelOption } from '@/services/v4TripTasks'
 import type { V4PreviewAccess } from '@/types/v4Preview'
 import { createSingleFlightSubmitter, buildV4TripRequest } from '@/utils/v4TripRequest'
 
@@ -186,6 +206,61 @@ const form = reactive({
   preferences: [] as string[],
   remarks: '',
 })
+
+const hotelOptions = ref<HotelOption[]>([])
+const selectedHotel = ref<HotelOption | null>(null)
+const hotelSearching = ref(false)
+const hotelMessage = ref('')
+const hotelAutocompleteOptions = computed(() => hotelOptions.value.map(hotel => ({
+  value: hotel.poi_id, label: hotel.name, hotel,
+})))
+let hotelSearchVersion = 0
+let hotelSearchTimer: ReturnType<typeof setTimeout> | undefined
+function cancelHotelSearch(): void {
+  clearTimeout(hotelSearchTimer)
+  hotelSearchTimer = undefined
+  hotelSearchVersion += 1
+}
+onUnmounted(cancelHotelSearch)
+watch(() => [form.city, form.lodgingQuery], () => {
+  cancelHotelSearch()
+  hotelSearching.value = false
+  hotelOptions.value = []
+  hotelMessage.value = ''
+  selectedHotel.value = null
+  if (form.city.trim() && form.lodgingQuery.trim()) {
+    hotelSearchTimer = setTimeout(() => { void findHotels() }, 350)
+  }
+}, { flush: 'sync' })
+
+async function findHotels(): Promise<void> {
+  const version = ++hotelSearchVersion
+  hotelSearching.value = true
+  selectedHotel.value = null
+  hotelOptions.value = []
+  hotelMessage.value = ''
+  try {
+    const items = await searchHotels(form.city.trim(), form.lodgingQuery.trim())
+    if (version !== hotelSearchVersion) return
+    hotelOptions.value = items.slice(0, 5)
+    hotelMessage.value = items.length ? '请选择酒店，并核对地址。' : '未找到可选择的酒店，请换关键词，或清空酒店由系统推荐。'
+  } catch {
+    if (version === hotelSearchVersion) hotelMessage.value = '酒店查询失败，请重试。'
+  } finally {
+    if (version === hotelSearchVersion) hotelSearching.value = false
+  }
+}
+
+function handleHotelSelect(_value: unknown, option: { hotel?: HotelOption }): void {
+  if (!option.hotel) return
+  const hotel = option.hotel
+  form.lodgingQuery = hotel.name
+  cancelHotelSearch()
+  hotelSearching.value = false
+  selectedHotel.value = hotel
+  hotelOptions.value = []
+  hotelMessage.value = ''
+}
 
 const preferenceOptions = [
   { value: '历史文化', icon: '◈' },
@@ -220,6 +295,7 @@ async function handleSubmit(): Promise<void> {
       departureLocal: form.departureAt?.format('YYYY-MM-DDTHH:mm') ?? null,
       budgetAmount: form.budgetAmount,
       lodgingQuery: form.lodgingQuery,
+      lodgingPoiId: selectedHotel.value?.poi_id,
       arrivalPlaceQuery: form.arrivalPlaceQuery,
       departurePlaceQuery: form.departurePlaceQuery,
       returnBufferHours: form.returnBufferHours,
@@ -305,6 +381,8 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.hotel-option-name { font-weight: 600; }
+.hotel-option-address { font-size: 12px; color: #64756b; white-space: normal; }
 .plan-page { max-width: 1120px; margin: 0 auto; padding: clamp(42px, 7vw, 88px) clamp(20px, 5vw, 64px) 76px; }
 .plan-heading { max-width: 760px; margin: 0 auto 36px; text-align: center; }
 .eyebrow, .section-index { color: #a65e46; font-size: 10px; font-weight: 700; letter-spacing: .2em; }

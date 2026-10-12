@@ -19,7 +19,8 @@ const request = buildV4TripRequest({
   arrivalLocal: '2026-11-05T08:30',
   departureLocal: '2026-11-07T18:10',
   budgetAmount: '5200',
-  lodgingQuery: ' 浦东新区世纪大道附近 ',
+  lodgingQuery: ' 上海环球港凯悦酒店 ',
+  lodgingPoiId: 'hotel-fixture',
   arrivalPlaceQuery: ' 上海虹桥站 ',
   departurePlaceQuery: '',
   returnBufferHours: null,
@@ -38,12 +39,14 @@ assert.deepEqual(request.preferences, ['美食', '历史文化'])
 assert.deepEqual(request.transport_preferences, ['transit', 'bicycling', 'walking'])
 assert.equal(request.arrival_place_query, '上海虹桥站')
 assert.equal(request.departure_place_query, null)
-assert.equal(request.lodging_query, '浦东新区世纪大道附近')
+assert.equal(request.lodging_query, '上海环球港凯悦酒店')
+assert.equal(request.lodging_poi_id, 'hotel-fixture')
 assert.equal(request.explicit_return_buffer_s, null, 'both blank buffer inputs preserve the backend default')
 assert.deepEqual(request.budget, {
   amount: 5200,
   currency: 'CNY',
   scope: 'whole_trip',
+  amount_basis: 'per_person',
   party_basis: 'unspecified',
   party_size: null,
 })
@@ -113,11 +116,15 @@ assert.match(pageSource, /continueToPreview\(\)/)
 assert.match(pageSource, /if \(submitting\.value \|\| acceptedAccess\.value\) return/)
 assert.match(pageSource, /继续上次预览/)
 assert.match(pageSource, /getLatestPreviewAccess\(\)/)
-assert.match(routeSource, /path: '\/plan'/)
-assert.match(appSource, /route\.path === '\/preview'.*to: '\/plan'/)
-assert.match(appSource, /route\.path === '\/plan'.*to: '\/plan#plan-form-title'/)
-assert.match(appSource, /to: '\/#plan', label: '开始规划'/, 'the default v3 home keeps its original planner link')
+assert.match(routeSource, /(?:path|alias): '\/plan'/)
+assert.match(appSource, /to: '\/#plan-form-title', label: '开始规划'/)
 assert.match(pageSource, /例如：上海、成都/)
 assert.doesNotMatch(pageSource, /京都|巴黎|无障碍设施/)
 assert.doesNotMatch(pageSource, /· V4|v4规划任务|后端会核实|Asia\/Shanghai/)
 console.log('v4TripRequest: request mapping, invalid dates, buffer semantics and duplicate-submit boundary passed')
+
+assert.throws(() => buildV4TripRequest({
+  city: '上海', arrivalLocal: '2026-11-05T08:30', departureLocal: '2026-11-07T18:10',
+  budgetAmount: 4000, lodgingQuery: '随意输入酒店', arrivalPlaceQuery: '', departurePlaceQuery: '',
+  returnBufferHours: null, returnBufferMinutes: null, preferences: [], remarks: '',
+}, 'hotel-invalid'), /搜索并选择/)

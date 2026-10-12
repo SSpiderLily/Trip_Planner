@@ -33,7 +33,7 @@ class Subtask(ContractModel):
     requirement_ids: tuple[str, ...] = ()
     excluded_poi_ids: tuple[str, ...] = ()
     candidate_target: int = Field(ge=1, le=20)
-    required_fields: tuple[Literal["poi_id", "name", "location", "cost", "opening_hours"], ...] = (
+    required_fields: tuple[Literal["poi_id", "name", "location"], ...] = (
         "poi_id",
         "name",
         "location",
@@ -55,12 +55,15 @@ class CandidateRef(ContractModel):
     poi_id: str = Field(min_length=1)
     place_fact_id: str = Field(min_length=1)
     area_hint_id: str | None = Field(default=None, min_length=1)
+    lodging_day_ids: tuple[str, ...] = ()
     slot_ids: tuple[str, ...] = ()
     requirement_ids: tuple[str, ...] = ()
     recommendation_reason: str = ""
 
     @model_validator(mode="after")
     def validate_area_hint(self):
+        if self.lodging_day_ids and (self.category != "lodging" or len(self.lodging_day_ids) != len(set(self.lodging_day_ids))):
+            raise ValueError("住宿日期范围仅用于住宿候选，且日期不能重复")
         if self.area_hint_id is not None and self.category != "lodging":
             raise ValueError("只有住宿候选可以关联 area_hint_id")
         return self

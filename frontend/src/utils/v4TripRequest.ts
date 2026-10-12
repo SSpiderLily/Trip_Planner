@@ -6,6 +6,7 @@ export interface V4TripFormInput {
   departureLocal: string | null
   budgetAmount: number | string | null | undefined
   lodgingQuery: string
+  lodgingPoiId?: string | null
   arrivalPlaceQuery: string
   departurePlaceQuery: string
   returnBufferHours: number | string | null | undefined
@@ -23,7 +24,11 @@ export function buildV4TripRequest(input: V4TripFormInput, requestId: string): V
   const departureAt = formatShanghaiDateTime(input.departureLocal, '请选择有效的离开日期和时间。')
   if (departureAt <= arrivalAt) throw new Error('离开时间必须晚于到达时间。')
 
-  const budget = optionalNonNegativeNumber(input.budgetAmount, '全程预算')
+  const budget = optionalNonNegativeNumber(input.budgetAmount, '全程人均预算')
+  if (input.lodgingQuery.trim() && !input.lodgingPoiId?.trim()) {
+    throw new Error('请搜索并选择具体酒店，或清空酒店由系统推荐。')
+  }
+  if (input.lodgingPoiId && !input.lodgingQuery.trim()) throw new Error('请选择完整的酒店查询结果。')
   const returnBuffer = buildReturnBuffer(input.returnBufferHours, input.returnBufferMinutes)
 
   return {
@@ -38,11 +43,13 @@ export function buildV4TripRequest(input: V4TripFormInput, requestId: string): V
     arrival_place_query: optionalText(input.arrivalPlaceQuery),
     departure_place_query: optionalText(input.departurePlaceQuery),
     lodging_query: optionalText(input.lodgingQuery),
+    lodging_poi_id: input.lodgingPoiId?.trim() || null,
     explicit_return_buffer_s: returnBuffer,
     budget: {
       amount: budget,
       currency: 'CNY',
       scope: 'whole_trip',
+      amount_basis: 'per_person',
       party_basis: 'unspecified',
       party_size: null,
     },

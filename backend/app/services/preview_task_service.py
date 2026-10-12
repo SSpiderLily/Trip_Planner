@@ -27,6 +27,7 @@ from app.models.preview_storage import (
     PreviewFinalChanged,
     PreviewFinalUnavailable,
     PreviewRestoreResult,
+    PreviewSnapshotUnsupported,
     SavedPreview,
     StoredPreview,
 )
@@ -39,7 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class PreviewProgress(ContractModel):
     stage: Literal[
-        "planning_input", "dispatch", "proposal", "current_routes", "timing",
+        "planning_input", "dispatch", "proposal", "current_routes",
         "validation", "repair", "cost", "ready",
     ]
     completed: int = Field(default=0, ge=0)
@@ -62,6 +63,8 @@ class PreviewPipelineResult:
     snapshot: PreviewSnapshot
     route_context: object | None = None
     backfill: BackfillRunner | None = None
+    initial_route_day_ids: tuple[str, ...] = ()
+    route_service: object | None = None
 
 
 class PlanningV4Pipeline(Protocol):
@@ -154,7 +157,15 @@ class PreviewTaskService:
             from app.services.planning_v4_validator import validate_preview
 
             validate_preview(result.snapshot.preview)
-            await asyncio.to_thread(self.repository.complete_job, task_id, result.snapshot)
+            write_task = asyncio.create_task(asyncio.to_thread(
+                self.repository.complete_job, task_id, result.snapshot,
+                route_day_ids=result.initial_route_day_ids,
+            ))
+            try:
+                stored = await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                # SQLite线程中的事务不能随协程取消；先确认落盘结果再决定终态。
+                stored = await write_task
         except asyncio.CancelledError:
             await self._close_unretained_context(result)
             await self._update_job_best_effort(
@@ -173,6 +184,13 @@ class PreviewTaskService:
         # The preview is durable now. Context bookkeeping or background scheduling failures
         # must not turn this successful preview into a failed generation task.
         self.task_service.release_active(task_id)
+        try:
+            await self._after_ready(task_id, plan_id, result, stored)
+        except asyncio.CancelledError:
+            # 地点事务已提交；停止交通调度不能撤回主任务成功。
+            return
+
+    async def _after_ready(self, task_id, plan_id, result, stored) -> None:
         if result.route_context is not None:
             if self.closing:
                 try:
@@ -181,6 +199,25 @@ class PreviewTaskService:
                     pass
             else:
                 self.route_contexts[plan_id] = result.route_context
+        if result.initial_route_day_ids:
+            from app.services.planning_v4_preview_edit_service import PlanningV4PreviewEditService
+
+            coordinator = getattr(self, "edit_coordinator", None)
+            try:
+                if coordinator is None:
+                    coordinator = PlanningV4PreviewEditService(
+                        self, self.repository, route_service=result.route_service,
+                    )
+                    self.edit_coordinator = coordinator
+                await coordinator.schedule_for_record(stored)
+            except Exception as exc:
+                _LOGGER.warning("initial route scheduling failed for plan %s (%s)", plan_id, type(exc).__name__)
+                try:
+                    if coordinator is None:
+                        coordinator = PlanningV4PreviewEditService(self, self.repository)
+                    await coordinator.fail_scheduling_for_record(stored)
+                except Exception as recovery_error:
+                    _LOGGER.warning("route failure state could not be persisted (%s)", type(recovery_error).__name__)
         if result.backfill is not None and not self.closing:
             try:
                 await self._update_job_best_effort(
@@ -259,9 +296,12 @@ class PreviewTaskService:
             return None
         try:
             stored = await asyncio.to_thread(self.repository.get_preview, access_token)
+            snapshot = stored.snapshot if stored is not None else None
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except Exception as exc:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "预览暂不可用", 503) from exc
-        if stored is None or stored.snapshot is None:
+        if stored is None or snapshot is None:
             return None
         return PreviewEnvelope(
             task_id=task_id,
@@ -269,7 +309,6 @@ class PreviewTaskService:
             store_version=stored.store_version,
             plan_revision=stored.plan_revision,
             preview=stored.preview,
-            timing=stored.timing,
             cost=stored.cost,
         )
 
@@ -278,12 +317,14 @@ class PreviewTaskService:
         job = await self._require_ready_job(task_id, access_token)
         try:
             final = await asyncio.to_thread(self.repository.read_final, access_token)
+            restorable = self._is_complete_final(final) if final is not None else False
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except Exception as exc:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "保存结果暂不可用", 503) from exc
         if final is None:
             return PreviewFinalState(task_id=task_id, plan_id=job["plan_id"], restorable=False)
         metadata = self._final_metadata(final)
-        restorable = self._is_complete_final(final)
         return PreviewFinalState(
             task_id=task_id,
             plan_id=job["plan_id"],
@@ -308,6 +349,8 @@ class PreviewTaskService:
                 save_id=save_id,
                 source_store_version=source_store_version,
             )
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except IdempotencyConflict as exc:
             raise TaskError("IDEMPOTENCY_CONFLICT", str(exc), 409) from exc
         except PreviewAccessError as exc:
@@ -318,7 +361,10 @@ class PreviewTaskService:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "保存最终结果失败", 503) from exc
 
         final = result.final
-        restorable = final is not None and self._is_complete_final(final)
+        try:
+            restorable = final is not None and self._is_complete_final(final)
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         return PreviewFinalSaveResponse(
             task_id=task_id,
             plan_id=job["plan_id"],
@@ -351,6 +397,8 @@ class PreviewTaskService:
                 expected_plan_revision=expected_plan_revision,
                 expected_save_id=expected_save_id,
             )
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except PreviewConflict as exc:
             error = TaskError("PREVIEW_VERSION_CONFLICT", str(exc), 409)
             error.details.update({
@@ -364,7 +412,7 @@ class PreviewTaskService:
             raise error from exc
         except PreviewFinalUnavailable as exc:
             code = "FINAL_NOT_AVAILABLE" if exc.reason == "not_saved" else "FINAL_SNAPSHOT_UNAVAILABLE"
-            message = "还没有成功保存的行程" if exc.reason == "not_saved" else "保存结果缺少完整时间或消费信息，暂时无法还原"
+            message = "还没有成功保存的行程" if exc.reason == "not_saved" else "保存结果缺少完整消费摘要，暂时无法还原"
             raise TaskError(code, message, 409) from exc
         except IdempotencyConflict as exc:
             raise TaskError("IDEMPOTENCY_CONFLICT", str(exc), 409) from exc
@@ -404,6 +452,8 @@ class PreviewTaskService:
     def _is_complete_final(final: SavedPreview) -> bool:
         try:
             return final.snapshot is not None
+        except PreviewSnapshotUnsupported:
+            raise
         except (TypeError, ValueError):
             return False
 
@@ -435,7 +485,6 @@ class PreviewTaskService:
             store_version=stored.store_version,
             plan_revision=stored.plan_revision,
             preview=stored.preview,
-            timing=stored.timing,
             cost=stored.cost,
         )
 
@@ -443,6 +492,9 @@ class PreviewTaskService:
         """取消后台协调器，再关闭保留的 context；前台任务由 TaskService 等待。"""
         self.accepting = False
         self.closing = True
+        coordinator = getattr(self, "edit_coordinator", None)
+        if coordinator is not None:
+            await coordinator.close()
         tasks = list(self.backfills.values())
         for task in tasks:
             task.cancel()
@@ -463,36 +515,3 @@ class PreviewTaskService:
 
 class BackfillSuperseded(RuntimeError):
     """计划版本已变化；结果只留在共享事实缓存中，不回写预览。"""
-
-
-def make_route_backfill_runner(
-    backfill_service,
-    planning_input,
-    draft,
-    facts,
-    route_context,
-    *,
-    current_revision: Callable[[], int],
-) -> BackfillRunner:
-    """把 F11b 协调器接入 v4 任务进度；从不把旧版本结果合并进预览。"""
-    async def run(progress: BackfillProgressCallback) -> None:
-        from app.services.route_backfill_service import RouteBackfillProgress
-
-        async def relay(update: RouteBackfillProgress) -> None:
-            await progress(BackfillProgress(
-                completed=update.completed_queries,
-                total=update.total_queries,
-            ))
-
-        result = await backfill_service.run_async(
-            planning_input,
-            draft,
-            facts,
-            route_context,
-            progress_callback=relay,
-            current_revision=current_revision,
-        )
-        if result.status == "cancelled":
-            raise BackfillSuperseded("计划版本已变化")
-
-    return run

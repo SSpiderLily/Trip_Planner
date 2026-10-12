@@ -38,7 +38,6 @@ from app.services.day_repair_service import (
     assign_repair_issues,
 )
 from app.services.llm_service import LLMCompletion
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
 from app.services.planning_v4_pipeline import PlanningV4Pipeline
@@ -85,16 +84,13 @@ def setup_missing_dinner(*, include_placeholder=True):
             activity_id="free-dinner-placeholder",
             slot_id=missing_slot.slot_id,
             kind="free_time",
-            duration_s=1800,
-            duration_source="model",
         ),)
     target_day = old_day.model_copy(update={"activities": activities})
     draft = draft.model_copy(update={
         "days": tuple(target_day if day.day_id == TARGET_DAY else day for day in draft.days),
     })
-    timing = calculate_plan_timing(planning_input, draft, facts)
-    report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
-    return planning_input, facts, candidates, draft, timing, report, missing_slot
+    report = validate_daily_plan(planning_input, draft, facts, candidates)
+    return planning_input, facts, candidates, draft, report, missing_slot
 
 
 def add_dinner_candidate(facts, candidates, slot_id):
@@ -148,7 +144,6 @@ def proposal_day_from_current(day, *, added_candidate=None, added_slot=None, cha
             candidate_ref=activity.candidate_ref,
             slot_id=slot_id,
             kind=activity.kind,
-            duration_s=activity.duration_s,
             requirement_ids=activity.requirement_ids,
             recommendation_reason=recommendation_reason,
         ))
@@ -158,7 +153,6 @@ def proposal_day_from_current(day, *, added_candidate=None, added_slot=None, cha
             candidate_ref=added_candidate.candidate_id,
             slot_id=added_slot,
             kind="meal",
-            duration_s=3600,
         ))
     return ProposalDay(
         day_id=day.day_id,
@@ -172,8 +166,8 @@ def proposal_day_from_current(day, *, added_candidate=None, added_slot=None, cha
 
 
 class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recalculation_must_bind_timing_and_preserve_proposed_target_day(self):
-        planning_input, facts, candidates, draft, _, _, _ = setup_missing_dinner()
+    async def test_recalculation_must_bind_report_and_preserve_proposed_target_day(self):
+        planning_input, facts, candidates, draft, _, _ = setup_missing_dinner()
         revision = draft.revision + 1
         proposed = draft.model_copy(update={
             "revision": revision,
@@ -183,18 +177,17 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
                 for leg in draft.legs
             ),
         })
-        timing = calculate_plan_timing(planning_input, proposed, facts)
         report = validate_daily_plan(
-            planning_input, proposed, facts, candidates, timing,
+            planning_input, proposed, facts, candidates,
         )
 
-        stale_timing = timing.model_copy(update={"based_on_revision": draft.revision})
-        with self.assertRaisesRegex(DayRepairInputError, "timing"):
+        stale_report = report.model_copy(update={"based_on_revision": draft.revision})
+        with self.assertRaisesRegex(DayRepairInputError, "report"):
             DayRepairService._validate_recalculation(
                 draft, proposed,
                 DayRepairRecalculation(
                     draft=proposed, facts=facts,
-                    timing=stale_timing, report=report,
+                    report=stale_report,
                 ),
                 TARGET_DAY,
             )
@@ -212,39 +205,36 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
                 for day in proposed.days
             ),
         })
-        changed_timing = calculate_plan_timing(planning_input, changed_draft, facts)
         changed_report = validate_daily_plan(
-            planning_input, changed_draft, facts, candidates, changed_timing,
+            planning_input, changed_draft, facts, candidates,
         )
         with self.assertRaisesRegex(DayRepairInputError, "target day"):
             DayRepairService._validate_recalculation(
                 draft, proposed,
                 DayRepairRecalculation(
                     draft=changed_draft, facts=facts,
-                    timing=changed_timing, report=changed_report,
+                    report=changed_report,
                 ),
                 TARGET_DAY,
             )
 
     async def test_run_binding_rejects_wrong_rules_and_missing_source_run(self):
-        planning_input, facts, candidates, draft, timing, report, _ = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, _ = setup_missing_dinner()
         with self.assertRaisesRegex(DayRepairInputError, "rule_version"):
             DayRepairService._validate_run_binding(
                 planning_input,
                 draft.model_copy(update={"rule_version": "unbound-rules"}),
-                timing,
                 report,
             )
         with self.assertRaisesRegex(DayRepairInputError, "source_run_id"):
             DayRepairService._validate_run_binding(
                 planning_input,
                 draft.model_copy(update={"source_run_id": "  "}),
-                timing,
                 report,
             )
 
     async def test_missing_dinner_repairs_only_target_day_and_replaces_free_time(self):
-        planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, missing_slot = setup_missing_dinner()
         seen_collect: list[DayRepairCollectionRequest] = []
         seen_revision: list[DayRevisionRequest] = []
 
@@ -279,22 +269,21 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def recalculate(request):
-            next_timing = calculate_plan_timing(request.planning_input, request.draft, request.facts)
             next_report = validate_daily_plan(
                 request.planning_input, request.draft, request.facts,
-                request.candidates, next_timing,
+                request.candidates,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft, facts=request.facts,
-                timing=next_timing, report=next_report,
+                report=next_report,
             )
 
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=recalculate,
             id_factory=lambda: "repair-round-1",
         ).run_async(
-            planning_input, draft, facts, candidates, (), (), timing, report,
+            planning_input, draft, facts, candidates, (), (), report,
         )
 
         self.assertEqual(result.status, "complete")
@@ -328,7 +317,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.repair_states[1].stop_reason, "complete")
 
     async def test_route_timeout_keeps_revised_meal_and_continues_to_next_date(self):
-        planning_input, facts, candidates, draft, timing, report, first_missing = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, first_missing = setup_missing_dinner()
         second_day = planning_input.days[2]
         second_missing = next(slot for slot in second_day.slots if slot.period == "dinner")
         second_draft_day = next(day for day in draft.days if day.day_id == second_day.day_id)
@@ -339,8 +328,6 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             activity_id="second-free-dinner",
             slot_id=second_missing.slot_id,
             kind="free_time",
-            duration_s=1800,
-            duration_source="model",
         ),)
         draft = draft.model_copy(update={
             "days": tuple(
@@ -349,8 +336,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
                 for day in draft.days
             ),
         })
-        timing = calculate_plan_timing(planning_input, draft, facts)
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(planning_input, draft, facts, candidates)
 
         source = FactSource(
             tool_call_id="two-date-meal-source",
@@ -430,24 +416,21 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 return recalculated
-            next_timing = calculate_plan_timing(
-                request.planning_input, request.draft, request.facts,
-            )
             next_report = validate_daily_plan(
                 request.planning_input, request.draft, request.facts,
-                request.candidates, next_timing,
+                request.candidates,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft, facts=request.facts,
-                timing=next_timing, report=next_report,
+                report=next_report,
             )
 
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=recalculate,
             id_factory=lambda: f"route-timeout-{len(recalc_days) + 1}",
         ).run_async(
-            planning_input, draft, facts, candidates, (), (), timing, report,
+            planning_input, draft, facts, candidates, (), (), report,
         )
 
         self.assertEqual(recalc_days, [planning_input.days[1].day_id, planning_input.days[2].day_id])
@@ -473,7 +456,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_no_progress_collection_still_attempts_revision_three_times(self):
-        planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, missing_slot = setup_missing_dinner()
         collected = 0
         revised = 0
 
@@ -502,21 +485,20 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def recalculate(request):
-            next_timing = calculate_plan_timing(request.planning_input, request.draft, request.facts)
             next_report = validate_daily_plan(
                 request.planning_input, request.draft, request.facts,
-                request.candidates, next_timing,
+                request.candidates,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft, facts=request.facts,
-                timing=next_timing, report=next_report,
+                report=next_report,
             )
 
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=recalculate,
             id_factory=lambda: f"no-progress-{revised + 1}",
-        ).run_async(planning_input, draft, facts, candidates, (), (), timing, report)
+        ).run_async(planning_input, draft, facts, candidates, (), (), report)
 
         self.assertEqual(collected, 3)
         self.assertEqual(revised, 3)
@@ -529,7 +511,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.draft.revision, draft.revision)
 
     async def test_invalid_revision_counts_attempt_but_never_changes_draft(self):
-        planning_input, facts, candidates, draft, timing, report, _ = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, _ = setup_missing_dinner()
         revised = 0
 
         async def collect(request):
@@ -557,7 +539,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=unexpected_recalculation,
             id_factory=lambda: f"invalid-{revised + 1}",
-        ).run_async(planning_input, draft, facts, candidates, (), (), timing, report)
+        ).run_async(planning_input, draft, facts, candidates, (), (), report)
 
         self.assertEqual(revised, 3)
         self.assertEqual([attempt.outcome for attempt in result.attempts], ["invalid_revision"] * 3)
@@ -568,7 +550,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target_state.stop_reason, "round_limit")
 
     async def test_deadline_partial_verified_facts_still_reach_day_reviser(self):
-        planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, missing_slot = setup_missing_dinner()
         revise_stops: list[str] = []
 
         async def collect(request):
@@ -599,29 +581,28 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def recalculate(request):
-            next_timing = calculate_plan_timing(request.planning_input, request.draft, request.facts)
             next_report = validate_daily_plan(
                 request.planning_input, request.draft, request.facts,
-                request.candidates, next_timing,
+                request.candidates,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft, facts=request.facts,
-                timing=next_timing, report=next_report,
+                report=next_report,
             )
 
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=recalculate,
             id_factory=lambda: "deadline-partial-round",
-        ).run_async(planning_input, draft, facts, candidates, (), (), timing, report)
+        ).run_async(planning_input, draft, facts, candidates, (), (), report)
 
-        self.assertEqual(revise_stops, ["deadline"])
+        self.assertEqual(revise_stops, ["technical_error"])
         self.assertEqual(result.status, "complete")
-        self.assertEqual(result.attempts[0].collection_stop_reason, "deadline")
+        self.assertEqual(result.attempts[0].collection_stop_reason, "technical_error")
         self.assertEqual(result.draft.revision, draft.revision + 1)
 
     async def test_single_day_model_failures_stop_at_three_and_other_days_continue(self):
-        planning_input, facts, candidates, draft, timing, report, first_missing_slot = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, first_missing_slot = setup_missing_dinner()
         last_day_id = planning_input.days[-1].day_id
         last_day_constraint = planning_input.days[-1]
         second_missing_slot = next(slot for slot in last_day_constraint.slots if slot.period == "dinner")
@@ -632,8 +613,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         draft = draft.model_copy(update={
             "days": tuple(last_day if item.day_id == last_day_id else item for item in draft.days),
         })
-        timing = calculate_plan_timing(planning_input, draft, facts)
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(planning_input, draft, facts, candidates)
         failed_day_calls = 0
         successful_day_calls = 0
 
@@ -668,21 +648,20 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def recalculate(request):
-            next_timing = calculate_plan_timing(request.planning_input, request.draft, request.facts)
             next_report = validate_daily_plan(
                 request.planning_input, request.draft, request.facts,
-                request.candidates, next_timing,
+                request.candidates,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft, facts=request.facts,
-                timing=next_timing, report=next_report,
+                report=next_report,
             )
 
         result = await DayRepairService(
             collect=collect, revise=revise, recalculate=recalculate,
             id_factory=lambda: f"multi-day-{failed_day_calls}-{successful_day_calls}",
-        ).run_async(planning_input, draft, facts, candidates, (), (), timing, report)
+        ).run_async(planning_input, draft, facts, candidates, (), (), report)
 
         self.assertEqual(failed_day_calls, 3)
         self.assertEqual(successful_day_calls, 1)
@@ -694,10 +673,12 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(attempt.day_id == last_day_id and attempt.outcome == "applied" for attempt in result.attempts))
         first_day = next(day for day in result.draft.days if day.day_id == TARGET_DAY)
         self.assertEqual(first_day.model_dump(mode="json"), next(day for day in draft.days if day.day_id == TARGET_DAY).model_dump(mode="json"))
-        self.assertEqual(next(state for state in result.repair_states if state.day_id == TARGET_DAY).stop_reason, "round_limit")
+        self.assertEqual(next(state for state in result.repair_states if state.day_id == TARGET_DAY).stop_reason, "technical_error")
+        self.assertEqual(next(state for state in result.repair_states if state.day_id == TARGET_DAY).completed_rounds, 0)
+        self.assertEqual(result.stop_reason, "technical_error")
 
     async def test_global_deadline_stops_before_starting_any_adapter(self):
-        planning_input, facts, candidates, draft, timing, report, _ = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, _ = setup_missing_dinner()
         calls = 0
 
         async def unexpected(_):
@@ -708,7 +689,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await DayRepairService(
             collect=unexpected, revise=unexpected, recalculate=unexpected,
         ).run_async(
-            planning_input, draft, facts, candidates, (), (), timing, report,
+            planning_input, draft, facts, candidates, (), (), report,
             global_deadline_monotonic=time.monotonic() - 1,
         )
 
@@ -718,8 +699,8 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.draft.revision, draft.revision)
         self.assertEqual(result.attempts, ())
 
-    async def test_global_deadline_during_active_collection_counts_that_round(self):
-        planning_input, facts, candidates, draft, timing, report, _ = setup_missing_dinner()
+    async def test_global_deadline_during_active_collection_does_not_consume_business_round(self):
+        planning_input, facts, candidates, draft, report, _ = setup_missing_dinner()
         deadline = time.monotonic() + 60
         revised = 0
 
@@ -737,7 +718,7 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             collect=collect, revise=revise, recalculate=revise,
             id_factory=lambda: "global-deadline-round",
         ).run_async(
-            planning_input, draft, facts, candidates, (), (), timing, report,
+            planning_input, draft, facts, candidates, (), (), report,
             global_deadline_monotonic=deadline,
         )
 
@@ -746,13 +727,13 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.stop_reason, "deadline")
         self.assertEqual(result.draft.revision, draft.revision)
-        self.assertEqual(state.completed_rounds, 1)
+        self.assertEqual(state.completed_rounds, 0)
         self.assertEqual(state.stop_reason, "deadline")
         self.assertEqual(len(result.attempts), 1)
         self.assertEqual(result.attempts[0].outcome, "deadline")
 
     async def test_unknown_information_never_calls_repair_adapters(self):
-        planning_input, facts, candidates, draft, timing, report, _ = setup_missing_dinner(include_placeholder=False)
+        planning_input, facts, candidates, draft, report, _ = setup_missing_dinner(include_placeholder=False)
         # Fill the missing dinner so only non-triggering unknown information remains.
         all_meal_slot_ids = tuple(
             slot.slot_id for day in planning_input.days for slot in day.slots
@@ -769,13 +750,11 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
             "activities": (*target.activities, DraftActivity(
                 activity_id="late-dinner", candidate_ref=meal.candidate_id,
                 slot_id=dinner.slot_id, kind="meal", poi_id=meal.poi_id,
-                place_fact_id=meal.place_fact_id, duration_s=3600,
-                duration_source="model",
+                place_fact_id=meal.place_fact_id,
             )),
         })
         draft = draft.model_copy(update={"days": tuple(target if item.day_id == TARGET_DAY else item for item in draft.days)})
-        timing = calculate_plan_timing(planning_input, draft, facts)
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(planning_input, draft, facts, candidates)
         calls = 0
 
         async def unexpected(_):
@@ -785,13 +764,13 @@ class DayRepairServiceTests(unittest.IsolatedAsyncioTestCase):
 
         result = await DayRepairService(
             collect=unexpected, revise=unexpected, recalculate=unexpected,
-        ).run_async(planning_input, draft, facts, candidates, (), (), timing, report)
+        ).run_async(planning_input, draft, facts, candidates, (), (), report)
         self.assertEqual(calls, 0)
         self.assertEqual(result.status, "complete")
 
 
 def day_revision_model_case():
-    planning_input, facts, candidates, draft, _, report, missing_slot = setup_missing_dinner()
+    planning_input, facts, candidates, draft, report, missing_slot = setup_missing_dinner()
     target = next(day for day in draft.days if day.day_id == TARGET_DAY)
     new_source = FactSource(
         tool_call_id="revision-model-source", tool_name="offline_fixture", api_version="v4",
@@ -817,13 +796,12 @@ def day_revision_model_case():
         candidate_ref=item.candidate_ref,
         slot_id=item.slot_id,
         kind=item.kind,
-        duration_s=item.duration_s,
         requirement_ids=item.requirement_ids,
         recommendation_reason=item.recommendation_reason,
     ).model_dump(mode="json") for item in target.activities if item.kind != "free_time"]
     activities.append(ProposalActivity(
         proposal_ref="new-dinner", candidate_ref=dinner_candidate.candidate_id,
-        slot_id=missing_slot.slot_id, kind="meal", duration_s=3600,
+        slot_id=missing_slot.slot_id, kind="meal",
     ).model_dump(mode="json"))
     response = json.dumps({"replacement_day": {
         "day_id": target.day_id,
@@ -963,21 +941,16 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             return PlanningV4Pipeline._normalize_day_revision_execution(execution)
 
         async def recalculate(request):
-            timing = calculate_plan_timing(
-                request.planning_input, request.draft, request.facts,
-            )
             report = validate_daily_plan(
                 request.planning_input,
                 request.draft,
                 request.facts,
                 request.candidates,
-                timing,
                 repair_states=request.repair_states,
             )
             return DayRepairRecalculation(
                 draft=request.draft,
                 facts=request.facts,
-                timing=timing,
                 report=report,
             )
 
@@ -992,7 +965,6 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             case["candidates"],
             (),
             (),
-            calculate_plan_timing(case["planning_input"], case["draft"], case["facts"]),
             case["report"],
         ))
 
@@ -1014,7 +986,7 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             PlanningV4Pipeline._normalize_day_revision_execution(malformed_execution)
 
     def test_revise_day_sends_one_date_and_returns_a_bound_day_revision(self):
-        planning_input, facts, candidates, draft, timing, report, missing_slot = setup_missing_dinner()
+        planning_input, facts, candidates, draft, report, missing_slot = setup_missing_dinner()
         target = next(day for day in draft.days if day.day_id == TARGET_DAY)
         source, places = facts.sources[0], facts.places
         new_source = FactSource(
@@ -1041,13 +1013,12 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             candidate_ref=item.candidate_ref,
             slot_id=item.slot_id,
             kind=item.kind,
-            duration_s=item.duration_s,
             requirement_ids=item.requirement_ids,
             recommendation_reason=item.recommendation_reason,
         ).model_dump(mode="json") for item in target.activities if item.kind != "free_time"]
         output_activities.append(ProposalActivity(
             proposal_ref="new-dinner", candidate_ref=dinner_candidate.candidate_id,
-            slot_id=missing_slot.slot_id, kind="meal", duration_s=3600,
+            slot_id=missing_slot.slot_id, kind="meal",
         ).model_dump(mode="json"))
         response = json.dumps({"replacement_day": {
             "day_id": target.day_id,
@@ -1079,6 +1050,11 @@ class DayScopedRevisionModelTests(unittest.TestCase):
         self.assertEqual(len(payload["planning_input"]["days"]), 1)
         self.assertEqual(payload["planning_input"]["days"][0]["day_id"], TARGET_DAY)
         self.assertEqual(payload["target_date_only"]["day_id"], TARGET_DAY)
+        self.assertTrue(payload["other_day_sightseeing"])
+        self.assertTrue(all(item["day_id"] != TARGET_DAY for item in payload["other_day_sightseeing"]))
+        self.assertTrue(any(item["code"] == "cross_day_sightseeing_repeat" for item in payload["advisory_feedback"]))
+        self.assertEqual({item["code"] for item in payload["issues"]}, {"missing_meal"})
+        self.assertEqual(payload["activity_policy"]["modifiable_activity_ids"], [])
         self.assertEqual(execution.revision.day_id, TARGET_DAY)
         self.assertEqual(execution.revision.based_on_report_revision, report.based_on_revision)
         self.assertEqual(execution.revision.preserve_activity_ids, preserve)
@@ -1201,7 +1177,8 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             activity for activity in response_payload["replacement_day"]["activities"]
             if activity.get("existing_activity_id") == user_activity.activity_id
         )
-        existing["duration_s"] = user_activity.duration_s + 600
+        existing["slot_id"] = "slot-2026-10-11-lunch"
+        response_payload["replacement_day"]["unfilled_slot_ids"] = [user_activity.slot_id]
         revision = build_bound_day_revision(
             case,
             preserve_activity_ids=preserve,
@@ -1223,7 +1200,7 @@ class DayScopedRevisionModelTests(unittest.TestCase):
             activity for activity in revised_day.activities
             if activity.activity_id == user_activity.activity_id
         )
-        self.assertEqual(modified.duration_s, user_activity.duration_s + 600)
+        self.assertEqual(modified.slot_id, "slot-2026-10-11-lunch")
         self.assertEqual(modified.activity_source, "model")
 
     def test_revise_day_invalid_output_retains_completed_call_usage(self):
@@ -1345,7 +1322,7 @@ class DayScopedRevisionModelTests(unittest.TestCase):
 
 
 class IssueAssignmentTests(unittest.TestCase):
-    def test_plan_level_must_visit_uses_candidate_applicable_date(self):
+    def test_plan_level_must_visit_does_not_start_business_repair(self):
         requirement_value = requirement("must-visit-waterfront", "must_visit", "外滩")
         planning_input = make_input(requirements=(requirement_value,))
         facts, candidates = make_facts_and_candidates()
@@ -1375,10 +1352,8 @@ class IssueAssignmentTests(unittest.TestCase):
                 based_on_revision=draft.revision,
             ),),
         )
-        assignment = next(item for item in assign_repair_issues(planning_input, report, facts, candidates) if item.issue_id in {issue.issue_id for issue in report.issues if issue.code == "must_visit_unplanned"})
-        self.assertEqual(assignment.assigned_day_id, day2.day_id)
-        self.assertEqual(assignment.reason, "candidate_applicable_day")
-        self.assertEqual(assignment.candidate_id, sightseeing.candidate_id)
+        self.assertEqual(assign_repair_issues(planning_input, report, facts, candidates), ())
+
 
 
 if __name__ == "__main__":

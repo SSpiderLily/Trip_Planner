@@ -194,7 +194,7 @@ class WeatherQueryService:
             "city": city,
             "travel_dates": [item.isoformat() for item in travel_dates],
         }
-        with span("weather.query", "service", safe_context) as record:
+        with span("weather.query", "agent", safe_context) as record:
             adapter = self.adapter or self._adapter_for(cancel_event)
             result = adapter.get_weather(
                 city,

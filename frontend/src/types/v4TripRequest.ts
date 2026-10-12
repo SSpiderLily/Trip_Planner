@@ -11,11 +11,13 @@ export interface V4TripRequest {
   arrival_place_query: string | null
   departure_place_query: string | null
   lodging_query: string | null
+  lodging_poi_id: string | null
   explicit_return_buffer_s: number | null
   budget: {
     amount: number | null
     currency: 'CNY'
     scope: 'whole_trip'
+    amount_basis: 'per_person'
     party_basis: 'unspecified'
     party_size: null
   }
