@@ -14,7 +14,7 @@ from app.services.planning_v4_validator import validate_preview
 from test_daily_plan_generator import (
     FakeLLM, make_input, make_facts, make_candidates, make_areas, make_model_output,
 )
-from test_planning_v4_pipeline import FakeInterpreter, FakeRouteService, FakeBackfill
+from test_planning_v4_pipeline import FakeInterpreter, FakeRouteService
 
 
 class DailyPlanRecoveryPipelineTests(unittest.TestCase):
@@ -48,13 +48,13 @@ class DailyPlanRecoveryPipelineTests(unittest.TestCase):
             async def generate(self, planning_input, *args, **kwargs):
                 activities = (
                     {"proposal_ref": "good-morning", "candidate_ref": "candidate-bund",
-                     "slot_id": morning, "kind": "sightseeing", "duration_s": 10800},
+                     "slot_id": morning, "kind": "sightseeing"},
                     {"proposal_ref": "bad-morning", "candidate_ref": "unknown-candidate",
                      "slot_id": morning, "kind": "sightseeing"},
                     {"proposal_ref": "bad-lunch", "candidate_ref": None,
                      "slot_id": lunch, "kind": "meal"},
                     {"proposal_ref": "good-afternoon", "candidate_ref": "candidate-bund",
-                     "slot_id": afternoon, "kind": "sightseeing", "duration_s": 7200},
+                     "slot_id": afternoon, "kind": "sightseeing"},
                     {"proposal_ref": "bad-evening", "candidate_ref": "candidate-foreign",
                      "slot_id": evening, "kind": "sightseeing"},
                 )
@@ -79,7 +79,6 @@ class DailyPlanRecoveryPipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: Dispatch(),
             daily_plan_adapter_factory=lambda _timeout: ActualF06(),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
         )
         with patch("socket.socket.connect", side_effect=AssertionError("offline test forbids network")):
             result = asyncio.run(pipeline.run(
@@ -92,7 +91,8 @@ class DailyPlanRecoveryPipelineTests(unittest.TestCase):
         self.assertEqual(len(tracker["llm"].calls), 2)
         self.assertEqual(len(preview.draft.days), 3)
         day = next(item for item in preview.draft.days if item.day_id == day_id)
-        self.assertEqual([item.duration_s for item in day.activities], [10800, 7200])
+        self.assertEqual([item.slot_id for item in day.activities], [morning, afternoon])
+        self.assertTrue(all("duration_s" not in item.model_dump() for item in day.activities))
         self.assertEqual([item.poi_id for item in day.activities], ["poi-bund", "poi-bund"])
         self.assertEqual(len({item.activity_id for item in day.activities}), 2)
         self.assertEqual(day.activities, tracker["execution"].draft.days[1].activities)

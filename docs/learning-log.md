@@ -801,3 +801,150 @@
 ## 初版局部修复与保留有效安排（2026-10-11）
 
 已迁入[ISSUE-029：单个坏活动导致整份正常安排丢失](problems/ISSUE-029.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 缺项草稿成功交付不等于补查成功（2026-10-11）
+
+已迁入[ISSUE-030：按日补查完成但是否采用缺少观测证据](problems/ISSUE-030.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 查询精度与校验精度必须一致（2026-10-11）
+
+已迁入[ISSUE-031：分钟级公交查询与秒级路段时间被要求完全相等](problems/ISSUE-031.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 用一次任务的日志驱动修复（2026-10-11）
+
+已迁入[ISSUE-032：首条异常与任务成功摘要误导排查](problems/ISSUE-032.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 派发字段错误不等于候选数据不可用（2026-10-11）
+
+已迁入[ISSUE-033：区域偏好引用错误耗掉补查轮次但不修订](problems/ISSUE-033.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 搜索覆盖不等于排程可用性（2026-10-11）
+
+已迁入[ISSUE-034：搜索时段标签被误当景点硬性可用时间](problems/ISSUE-034.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 输出长度由谁决定（2026-10-11）
+
+已迁入[ISSUE-035：项目固定输出上限与供应商默认输出限制](problems/ISSUE-035.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 关闭超时必须覆盖整个调用链（2026-10-11）
+
+已迁入[ISSUE-036：单层取消超时仍被外层技术期限中断](problems/ISSUE-036.md)，含排查、尝试结果、验证边界和经验。
+
+
+## 补齐失败条件及模型调用诊断（2026-10-11）
+
+日志须在异常被业务层包装前保留安全摘要；同一异常经多层传播不能当成多次失败。结束原因与HTTP调用成功分开记录，避免把截断误当成完整输出。天气记录还需通过真实SQLite父子关联验证。实现、验证与未部署边界见[当前专项](changes/CHG-003-planning-performance-observability.md#v4-complete-error-logging)，相关问题见[043](problems/ISSUE-043.md)、[044](problems/ISSUE-044.md)、[046](problems/ISSUE-046.md)。
+
+
+<a id="observation-result-entry-2026-10-12"></a>
+## 观测页打开对应v4任务与记录缺失排查（2026-10-12）
+
+- 问题与原因：观测页仍请求旧版result接口，v4独立预览存储返回`PREVIEW_RESULT_USE_PREVIEW_API`；预览页原本仅恢复最近任务，且新任务会删除上个任务凭据。
+- 修改：错误码按v4分流到`/preview?task=<task_id>`；预览按指定任务读取本机凭据，不回退到最近任务；保留后续任务凭据。缺失旧凭据不能从服务端散列恢复，也不绕过访问校验。
+- 观测排查：原任务已成功且预览存在，记录558条、缺失标记为1；旧代码吞掉观测写入异常，历史确切原因未确认。隔离测试复现容量检查的exists/stat竞态：WAL/SHM在两步间消失导致FileNotFoundError并跳过记录。已改为单次stat并忽略文件消失；其他异常、超容量及未保存父调用分别输出安全分类，控制台故障不影响业务。不补造历史记录或清除缺失标记。
+- 验证：前端结果入口检查覆盖v4、旧版、缺凭据、网络错误与迟到响应；凭据存储检查覆盖指定旧任务、新任务保留与内存待保存凭据；观测视图53项边界断言、预览进度检查、类型检查和生产构建通过（既有500kB包体提示保留）。浏览器检查确认原历史任务缺凭据时显示明确提示，指定任务预览不回退。完整后端636项unittest通过，包含新增4项观测故障测试；本次没有生成真实规划或重启用户后端，带凭据的真实v4预览成功打开尚未做浏览器验收。
+- 位置：`frontend/src/views/{Observability,TripPreview}.vue`、`frontend/src/services/v4Preview.ts`、`backend/app/services/{observation_service,task_repository}.py`；回归材料`frontend/tests/{observabilityResultEntry,v4PreviewAccessStorage}.test.mjs`、`backend/tests/test_observation_failures.py`。保留此前已有工作区修改，未提交或推送。
+
+
+<a id="local-preview-access-recovery-2026-10-12"></a>
+## 旧任务预览的本机访问恢复（2026-10-12）
+
+- 用户要求：恢复已保存的旧任务，从观测页查看，不重新生成。上一条入口修复的“缺旧凭据无法打开”限制已被本次恢复机制替代。
+- 原因与取舍：原凭据只保存散列，不能反推；可在用户授权的本机访问边界内签发新凭据。新增POST恢复入口只允许回环客户端、回环Host、指定本机Origin及自定义请求头；远程或跨站请求拒绝，响应禁止缓存。恢复要求已有ready预览，且没有正在进行的补齐或编辑重算。
+- 修改：仓库在同一事务中只轮换任务和草稿的凭据散列，不写行程JSON、费用/时间、版本或任务状态；旧凭据失效。观测页缺凭据时调用独立客户端恢复，保存到本机后跳转指定任务；不调用规划管线，凭据不写URL或日志。
+- 验证：完整后端645项测试通过，新增检查覆盖恢复后内容/版本不变、原凭据失效、未知/运行中任务拒绝、远程地址/Host/Origin及缺请求头拒绝。前端入口和存储检查及类型/生产构建通过，既有包体警告保留。
+- 真实恢复：确认无accepted/running任务后重启127.0.0.1:8000后端。内置浏览器点击观测页旧任务trip_a772ac38386541b084b004da0186ce0a的结果入口，成功显示“上海 · 行程预览”，刷新后仍可读。恢复前后对草稿完整数据与job非凭据字段作SHA-256比对，一致；调用记录仍为558条。本次未调用模型/MCP生成行程，未清除原观测缺失标记。
+- 位置：`backend/app/api/routes/trip.py`、`backend/app/services/preview_repository.py`、`frontend/src/services/v4Preview.ts`、`frontend/src/views/Observability.vue`；测试`backend/tests/test_local_preview_recovery.py`及`frontend/tests/observabilityResultEntry.test.mjs`。保留其他工作区改动，未提交或推送。README、CHG-003已同步；工作区INDEX现有入口有效，无路径变化。
+
+
+### 2026-10-12：预算口径与指定酒店
+
+需求整理把酒店归入通用must_include，但派发仅允许餐饮引用该类型，形成跨阶段语义冲突。本轮让指定酒店通过地图ID直接核实，结构化酒店输入不再重复生成硬性要求；新增显式人均预算字段，旧记录保留原口径。实现、局部测试与真实地图验证状态统一见[CHG-003](changes/CHG-003-planning-performance-observability.md#v4-budget-hotel-selection)。
+
+
+### 2026-10-12：餐饮搜索半径与候选过滤不一致
+
+搜索扩大到3公里后，候选过滤仍沿用1公里默认值，导致已查到的餐馆被排除。当前子任务按餐次统一传递实际搜索半径，并增加具体拒绝条件和字段路径日志。离线验证及边界见[CHG-003](changes/CHG-003-planning-performance-observability.md#v4-dining-radius-diagnostics-fix)；未重跑真实旅行任务。
+
+
+### 2026-10-12：接口故障不再耗用业务补查额度
+
+技术故障与有效业务修订使用不同计数；采集接口失败后，已验证的新候选可以推动同轮修订。恢复设独立有限次数，避免关闭超时后无限重试。实现边界与离线证据见[CHG-003](changes/CHG-003-planning-performance-observability.md#v4-technical-recovery-fix)。
+
+<a id="s01-preview-display-20261012"></a>
+### 预览与导出按时段展示（2026-10-12）
+
+精确排程与返程核验让旅行参考页过于复杂，指定住处也仍显示推荐区域。按已确认的简化范围移除预览/导出的活动时间、停留及返程结论，并在共用mapper过滤旧后端报告中的对应提示；指定住处同时隐藏区域卡片、地图位置和图例，保留酒店与交通来源。此步只收敛展示，不改变后端契约或规划规则。
+
+前端类型/构建、映射及编辑/导出/访问缓存回归通过；合成浏览器场景与PNG下载验证通过，模拟保存失败仍可下载。代码位于`TripPreview.vue`、`TripPreviewExport.vue`、`v4PreviewMapper.ts`和`PreviewMap.vue`，展示回归位于`frontend/tests/v4PreviewMapper.test.mjs`；详细状态及验收边界见[CHG-003 S01](changes/CHG-003-planning-performance-observability.md#s01-preview-display)。
+
+
+<a id="s02-slot-availability-20261012"></a>
+### 六时段资格不再等待交通事实（2026-10-12）
+
+旧规则因到达就绪、首餐移动和返程交通未知，把部分时段留为conditional，增加了后续安排和缺项判断的分支。现在按到离时间、返程缓冲和固定窗口确定required/skipped；1/3小时只作资格阈值。交通未知仍属于交通参考状态，不改变时段义务。
+
+代码位于`backend/app/services/planning_input_builder.py`与`planning_v4_rules.py`，边界回归位于`backend/tests/test_planning_input_builder.py`。17项直接测试及共302项禁止网络的相关回归通过；旧逐活动时间和返程校验仍待后续阶段移除。实施、验证和交付边界统一见[CHG-003 S02](changes/CHG-003-planning-performance-observability.md#s02-slot-availability)。
+
+
+<a id="s03-slot-place-contract-20261012"></a>
+### 草稿只保留时段、地点和顺序（2026-10-12）
+
+活动时长既要求模型输出，又在缺失时被填成默认值，导致后续逐项推算与快照读取依赖不需要的数据。现在删除模型/草稿时长和timing快照，统一初版、单日修订与局部恢复；1/3小时仅作为时段资格门槛。交通摘要使用实际路线耗时，未知不填默认值；候选、地点、来源及版本仍校验。旧契约直接拒绝并给安全提示，不转换或删除原数据。
+
+代码位于`backend/app/models/planning_v4/plan.py`、`daily_plan_generator.py`、`preview_repository.py`及其调用方；新契约回归位于`backend/tests/test_slot_plan_contract.py`。全量645项禁止网络的后端测试、11份前端回归及类型/构建通过；剩余简化范围、人工/真实服务及Git状态统一见[CHG-003 S03](changes/CHG-003-planning-performance-observability.md#s03-slot-place-contract)。
+
+
+<a id="s04-lodging-query-policy-20261012"></a>
+### 住宿按连续日期复用，查询只补核心地点（2026-10-12）
+
+指定住处走模型子任务、按天推荐酒店会重复查询，还可能擅自换住处。后端现在直接核实指定住处，并按有原文来源的日期范围固定酒店；明确换住处时才拆分并排除前一家。可选消费和营业信息缺失不再形成查询目标，已核实候选仍保留。
+
+住宿策略集中在`backend/app/services/planning_lodging_policy.py`，专项接线与调用数记录在`backend/tests/test_lodging_stay_policy.py`。全量禁网后端、前端回归和类型/构建通过；实施证据、模型语义边界与未完成阶段统一见[CHG-003 S04](changes/CHG-003-planning-performance-observability.md#s04-lodging-query-policy)。未执行真实服务专项、重启、暂存、提交或推送。
+
+
+<a id="s05-light-validation-repair-2026-10-12"></a>
+## S05：地点缺项补查与技术恢复额度分离（2026-10-12）
+
+- 问题与取舍：移除活动时间字段后，必去未落实与旧冲突分配仍可能启动修订，截止/中断及重算异常也可能扣业务轮。统一限定为必需时段缺真实地点；其他要求保留反馈，已有候选直接修订并保护有效安排。技术恢复单独限次，不把失败请求当成一次有效业务机会。
+- 代码/测试：`planning_v4_validation.py`、`day_repair_service.py`与`daily_plan_generator.py`共用入口；`test_simplified_day_repair.py`验证真实服务状态机的调用集合、轮号与日期保留，原模型/管线/保存恢复回归继续保留。
+- 验证结论、证据及未核实项统一见[CHG-003 S05](changes/CHG-003-planning-performance-observability.md#s05-light-validation-repair)。
+
+
+<a id="s06-adjacent-routes-cache-2026-10-12"></a>
+## S06：路线查询收敛到当前相邻地点（2026-10-12）
+
+- 问题与取舍：旧路线服务还会追加离开端点、后台查询全量地点对。删除矩阵服务及正式启动接线，只查已核实住处起点和当前邻边。缓存属于地点查询事实，继续由生成与编辑共享；不随备用矩阵一同释放。公共交通参考时刻独立于活动，所选耗时和路径使用同一方案。
+- 代码/测试：current_route_service.py负责邻边与方式选择，planning_v4_pipeline.py保留缓存并交付not_required；test_simplified_routes.py检查实际工具调用集合、缓存有效期和方案来源，编辑API与前端mapper补充无返程及参考时刻回归。
+- 验证结论、实施证据与剩余范围统一见[CHG-003 S06](changes/CHG-003-planning-performance-observability.md#s06-adjacent-routes-cache)。
+
+
+<a id="s07-place-first-pipeline-2026-10-12"></a>
+## S07：地点先交付，交通独立查询（2026-10-12）
+
+- 问题与取舍：生成与按日修订原来都等待交通，路线故障会参与地点修订判定。现在修订只校验地点；地点快照与独立路线任务同事务登记，先让地点可读，再复用相邻交通worker。生成成功只表示地点快照已交付，交通有独立终态；既有双版本校验继续拒绝旧结果覆盖编辑。
+- 代码/测试：planning_v4_pipeline.py负责地点与修订；preview_repository.py原子登记并校验终态，preview_task_service.py在落盘后调度；planning_v4_preview_edit_service.py复用worker并保留恢复提示。test_simplified_pipeline.py通过阻塞交通和注入故障验证实际状态、编辑、当前快照保存与技术额度；前端跟踪初版交通任务。
+- 验证结论、未核实项与剩余阶段统一见[CHG-003 S07](changes/CHG-003-planning-performance-observability.md#s07-place-first-pipeline)。
+
+
+<a id="s08-edit-persistence-2026-10-12"></a>
+## S08：编辑只查询新邻边，新草稿可保存还原（2026-10-12）
+
+- 问题与取舍：编辑原来把目标日整天路线重新标为待查，方式切换也清除当前方案；超时还可能清除同一天其他有效选择。现在复用条件未变的邻边，只提交新边和原有待查边；有效方式选择直接绑定已有方案。保存和恢复先核对完整快照，损坏记录不转译、不循环调度，也不自动重跑规划。
+- 代码/测试：planning_v4_edit_service.py保留邻边及精确选择，current_route_service.py接受具体路段范围，planning_v4_preview_edit_service.py保护未查询内容；preview_repository.py及preview_task_service.py处理保存/还原与损坏数据。test_simplified_edit_persistence.py记录实际查询集合，并注入等待、超时、晚到结果、重开数据库和存储失败；前端导出及错误提示补充回归。
+- 验证结论、未核实项与剩余阶段统一见[CHG-003 S08](changes/CHG-003-planning-performance-observability.md#s08-edit-persistence)。
+
+
+<a id="s09-live-browser-acceptance-2026-10-12"></a>
+## S09：同一真实草稿贯通编辑、地图、导出与还原（2026-10-12）
+
+- 问题与取舍：离线接线通过后，仍需证明实际模型、地图和浏览器使用同一份新契约草稿。保留上次日期/酒店/预算，只提交一次规划；成功保存后改动草稿，在浏览器定向模拟保存503，再真实还原。故障模拟只覆盖最终保存响应，避免破坏原记录；模型成功与时段齐备不代替餐饮适配和顺路质量接受。
+- 发现与修正：地图把指定酒店标为“推荐住宿”，首页仍称返程交通会纳入安排。PreviewMap.vue和TripPlan.vue各纠正一处文案；README移除过期的时间推算、备用矩阵及历史快照兼容说明。规划规则与查询流程不变。
+- 验证结论、真实耗时、浏览器证据及未核实项统一见[CHG-003 S09](changes/CHG-003-planning-performance-observability.md#s09-live-browser-acceptance)。

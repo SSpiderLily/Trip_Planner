@@ -827,12 +827,9 @@ class MasterDeciderTests(unittest.TestCase):
         }
         decider, _ = self.make_decider([json.dumps(payload, ensure_ascii=False)])
 
-        result = decider.run(make_context(planning_input=planning_input))
-
-        task = result.decision.tasks[0].subtask
-        self.assertEqual(task.scope.area_hint_ids, ())
-        self.assertEqual(task.objective, "核实并使用用户填写的住处原文，不得替换为其他住宿。")
-        self.assertIn("：" + query, task.constraints[-1])
+        with self.assertRaises(PlanningError) as raised:
+            decider.run(make_context(planning_input=planning_input))
+        self.assertEqual(raised.exception.code, "MASTER_LODGING_SPECIFIED")
 
     def test_user_lodging_query_rejects_recommendation_area(self):
         planning_input = make_planning_input(lodging_query="外滩华尔道夫")
@@ -853,7 +850,7 @@ class MasterDeciderTests(unittest.TestCase):
         with self.assertRaises(PlanningError) as raised:
             decider.run(make_context(planning_input=planning_input, facts=facts, areas=(area,)))
 
-        self.assertEqual(raised.exception.code, "MASTER_LODGING_SCOPE_INVALID")
+        self.assertEqual(raised.exception.code, "MASTER_LODGING_SPECIFIED")
         self.assertEqual(len(llm.calls), 1)
 
     def test_blank_lodging_query_is_treated_as_unset(self):
@@ -1259,7 +1256,7 @@ class MasterDeciderTests(unittest.TestCase):
         self.assertEqual(schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"], ["attractions", "dining", "lodging"])
         specified = context.model_copy(update={"planning_input": make_planning_input(lodging_query="上海某酒店")})
         schema = json.loads(decider._messages(specified, decider._validate_context_data(specified))[1]["content"])["decision_json_schema"]
-        self.assertEqual(schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"], ["attractions", "lodging"])
+        self.assertEqual(schema["$defs"]["TaskSpec"]["properties"]["role"]["enum"], ["attractions"])
 
     def test_timeout_and_provider_errors_are_sanitized(self):
         decider, llm = self.make_decider([TimeoutError("raw timeout body")], timeout=0.1)

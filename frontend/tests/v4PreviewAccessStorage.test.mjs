@@ -54,3 +54,33 @@ assert.deepEqual(service.getLatestPreviewAccess(), {
 })
 
 console.log('v4PreviewAccessStorage: in-memory continuation and persistence-only retry passed')
+
+assert.equal(service.getPreviewAccessForTask('task-first')?.taskId, 'task-first',
+  'generating another task must retain the earlier task credential')
+assert.equal(service.getPreviewAccessForTask('task-missing'), null,
+  'an explicit missing task must never fall back to the latest task')
+rejectWrites = true
+assert.throws(() => service.savePreviewAccess('task-pending', 'synthetic-token-3', 'plan-pending'))
+assert.equal(service.getPreviewAccessForTask('task-pending')?.taskId, 'task-pending')
+assert.equal(service.getPreviewAccessForTask('task-first')?.taskId, 'task-first',
+  'a pending newer task must not replace the explicitly selected task')
+console.log('v4PreviewAccessStorage: explicit task selection and retained credentials passed')
+
+assert.equal(service.v4PreviewErrorMessage({
+  isAxiosError: true,
+  response: { status: 409, data: { detail: { code: 'PREVIEW_CONTRACT_UNSUPPORTED' } } },
+}), '这份行程数据已损坏或不支持当前版本，请返回首页重新创建行程。')
+
+const unsupported = {
+  isAxiosError: true,
+  response: { status: 409, data: { detail: { code: 'PREVIEW_CONTRACT_UNSUPPORTED' } } },
+}
+assert.equal(service.isV4EditConflict(unsupported), false,
+  'unsupported records must not enter version-conflict rebase and retry')
+assert.match(service.v4EditErrorMessage(unsupported), /已损坏或不支持当前版本/)
+assert.match(service.v4DestinationSelectErrorMessage(unsupported), /已损坏或不支持当前版本/)
+assert.match(service.v4FinalErrorMessage(unsupported, 'restore'), /无法还原.*当前行程内容保持不变/)
+assert.match(service.v4FinalErrorMessage(unsupported, 'save'), /保存未完成.*图片仍可使用/)
+assert.equal(service.isV4EditConflict({
+  isAxiosError: true, response: { status: 409, data: { detail: { code: 'PREVIEW_VERSION_CONFLICT' } } },
+}), true)

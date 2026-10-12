@@ -137,6 +137,21 @@ class MetricsTest(unittest.TestCase):
         create.assert_called_once()
         self.assertEqual(create.call_args.kwargs['max_tokens'], 12)
 
+    def test_project_adapter_omits_implicit_output_limits(self):
+        llm = UsageAwareLLM.__new__(UsageAwareLLM)
+        llm.model, llm.temperature, llm.max_tokens = 'fixture', 0.7, 2048
+        create = Mock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='answer'), finish_reason='stop')],
+            usage=None))
+        llm._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        for invoke in (llm.invoke, llm.invoke_with_usage, llm.invoke_with_metadata):
+            for kwargs in ({}, {'max_tokens': None}):
+                invoke([{'role': 'user', 'content': 'hello'}], **kwargs)
+                sent = create.call_args.kwargs
+                self.assertTrue(
+                    {'max_tokens', 'max_completion_tokens', 'max_output_tokens'}.isdisjoint(sent))
+                self.assertEqual(sent['model'], 'fixture')
+
     def test_metrics_endpoint_respects_task_lifecycle(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = TaskRepository(Path(directory) / 'metrics.sqlite3')

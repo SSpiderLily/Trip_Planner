@@ -1,6 +1,7 @@
 """独立的旅行需求整理入口；不查询地点或生成行程。"""
 from __future__ import annotations
 
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 import json
 import math
 import time
@@ -12,11 +13,13 @@ from pydantic import ValidationError, model_validator
 from ..models.planning_v4.base import ContractModel
 from ..models.planning_v4.input import (
     HardRequirement,
+    LodgingChange,
     RequirementSummary,
     TripRequest,
     validate_requirement_sources,
 )
 from ..services.llm_service import get_llm
+from ..services.planning_diagnostics import safe_path
 from ..services.observation_service import span, token_usage
 from .execution import PlanningError
 
@@ -24,12 +27,12 @@ from .execution import PlanningError
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 120.0
 MAX_FORMAT_REPAIRS = 1
-MAX_MODEL_TOKENS = 2048
 
 
 class RequirementDraft(ContractModel):
     """仅包含模型可整理的字段；ID 和原始请求由后端保留。"""
     core_goals: tuple[str, ...]
+    lodging_changes: tuple[LodgingChange, ...] = ()
     hard_requirements: tuple[HardRequirement, ...]
     preferences: tuple[str, ...]
     unknowns: tuple[str, ...]
@@ -44,14 +47,16 @@ class RequirementDraft(ContractModel):
 
 
 SYSTEM_PROMPT = """你是旅行规划的主智能体，当前只整理用户需求，不查询地图、不生成行程。
-只返回符合给定 JSON Schema 的 JSON 对象。只输出 core_goals、hard_requirements、preferences、unknowns、assumptions。
+只返回符合给定 JSON Schema 的 JSON 对象。只输出 core_goals、hard_requirements、lodging_changes、preferences、unknowns、assumptions。
 
 分类规则：
 - 只有用户明确要求必须做或明确禁止的内容，才放进 hard_requirements；must_visit 对应明确必去，must_avoid 对应明确不去，must_include 对应明确必须包含的其他条件。
 - 每条 hard requirement 必须提供 source.field 和 source.quote。quote 必须逐字来自对应原始字段；不得根据常识补写引用。requirement_id 在本次摘要中使用唯一的 M1、M2 等编号。
 - 可调整的倾向放进 preferences，不要提升成硬性条件。例如“以公共交通结合步行为主”不表示禁止骑行；“节奏适中”不表示每天最多安排固定数量的活动；“安排午餐和晚餐”不表示排除早餐。
 - core_goals 只概括用户明确表达的旅行体验。unknowns 记录对后续规划有影响但未提供的信息。assumptions 只记录确实需要且明确标出的工作假设；没有依据时留空。
-- 不得捏造人数、机场/车站、酒店、预算金额或硬性要求。预算是全程预算；人数未指定时必须保持未指定。
+- 不得捏造人数、机场/车站、酒店、预算金额或硬性要求。预算scope是全程，amount_basis=per_person表示全程人均预算，whole_party表示旧版全程总预算；人数未指定时必须保持未指定。
+- lodging_query是后端直接核实的指定住处，不要重复生成酒店hard_requirements；不得把住处归入餐饮条件。
+- 只有用户明确在某日期跨城或换住处，才填写lodging_changes。start_date是生效日期，city仅在明确跨城时填，lodging_query仅在明确指定新住处时填。source.quote逐字引用原文，并包含城市/住处名称；相对日期可按到达日期转换。未明确变更时必须为空，不因路线、普通偏好或常识拆分住宿。换住处但未指定新住处时lodging_query为空，后端才推荐。不要将这些变更再复制到hard_requirements。
 - TripRequest 是只读原始记录。不要输出或改写城市、到离时间、预算和备注；后端会原样保留这些字段，并绑定 request_id 与 requirements_id。
 - explicit_return_buffer_s 是用户表单中的秒数约束；不要推测、改写或转换它。后端原样保留，并将显式值（包括0）交给 F02；未填写时才使用规则默认值。
 
@@ -101,7 +106,7 @@ class RequirementInterpreter:
         self._reset_usage()
         if not isinstance(request, TripRequest):
             raise TypeError("request 必须是 planning_v4.TripRequest")
-        local_deadline = time.monotonic() + self.timeout_seconds
+        local_deadline = deadline_after(time.monotonic(), self.timeout_seconds)
         if deadline_monotonic is not None:
             if (isinstance(deadline_monotonic, bool)
                     or not isinstance(deadline_monotonic, (int, float))
@@ -123,7 +128,7 @@ class RequirementInterpreter:
         safe_context = {
             "request_id": request.request_id,
             "model": getattr(llm, "model", None),
-            "timeout_seconds": self.timeout_seconds,
+            "timeout_seconds": wait_timeout(self.timeout_seconds),
         }
 
         with span("agent.requirement_interpretation", "agent", safe_context) as agent_record:
@@ -149,6 +154,8 @@ class RequirementInterpreter:
                 with span("validation.requirement_sources", "validation") as validation_record:
                     try:
                         validate_requirement_sources(request, draft.hard_requirements)
+                        from app.services.planning_lodging_policy import validate_lodging_changes
+                        validate_lodging_changes(request, draft.lodging_changes)
                         validation_record.output = {"valid": True}
                     except ValueError:
                         validation_record.output = {"valid": False, "code": "REQUIREMENT_SOURCE_INVALID"}
@@ -158,6 +165,15 @@ class RequirementInterpreter:
                             step="requirement_source_validation",
                         ) from None
 
+                # 指定酒店已有结构化输入，不再转换成通用must_include交给派发。
+                hotel_requirements = tuple(item for item in draft.hard_requirements
+                                           if item.source.field == "lodging_query")
+                if hotel_requirements:
+                    with span("requirements.structured_lodging", "validation", {}) as record:
+                        record.output = {"outcome": "use_structured_hotel", "removed_duplicate_count": len(hotel_requirements)}
+                draft = draft.model_copy(update={"hard_requirements": tuple(
+                    item for item in draft.hard_requirements if item.source.field != "lodging_query"
+                )})
                 summary = RequirementSummary(
                     requirements_id=f"requirements_{uuid4().hex}",
                     request_id=request.request_id,
@@ -181,7 +197,7 @@ class RequirementInterpreter:
 
     def _invoke_and_validate(self, llm, messages, attempt: int, *, request_timeout: float):
         model_name = getattr(llm, "model", None)
-        safe_context = {"model": model_name, "attempt": attempt, "timeout_seconds": request_timeout}
+        safe_context = {"model": model_name, "attempt": attempt, "timeout_seconds": wait_timeout(request_timeout)}
         with span("llm.requirement_interpretation", "llm", safe_context) as llm_record:
             try:
                 response, usage = self._invoke(llm, messages, request_timeout=request_timeout)
@@ -200,7 +216,12 @@ class RequirementInterpreter:
                     raise ValueError("model response must be text")
                 draft = RequirementDraft.model_validate(parse_json(response))
             except (AttributeError, ValueError, TypeError, ValidationError):
-                llm_record.output = {"status": "invalid", "code": "REQUIREMENT_OUTPUT_INVALID"}
+                issues = self._validation_locations(response)
+                llm_record.output = {"status": "invalid", "code": "REQUIREMENT_OUTPUT_INVALID",
+                                     "issue_count": len(issues), "diagnostics": [
+                                         {"code": item["type"], "path": safe_path(item["loc"])}
+                                         for item in issues[:8]],
+                                     "diagnostics_truncated": len(issues) > 8}
                 if attempt <= MAX_FORMAT_REPAIRS:
                     issues = self._validation_locations(response)
                     repair_messages = [
@@ -230,7 +251,6 @@ class RequirementInterpreter:
         return invoke_with_usage(
             messages,
             temperature=0,
-            max_tokens=MAX_MODEL_TOKENS,
             request_timeout=request_timeout,
             max_retries=0,
         )

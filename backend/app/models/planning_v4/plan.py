@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal, Union
 
-from pydantic import AwareDatetime, Field, PositiveInt, model_validator
+from pydantic import AwareDatetime, ConfigDict, Field, PositiveInt, model_validator
 
 from .base import ContractModel
 from .facts import FactStore, MapCoordinate
@@ -13,12 +13,21 @@ from .tasks import CandidateRef
 
 
 class ProposalActivity(ContractModel):
+    # 将运行时的跨字段规则也交给模型；仅靠 nullable/default 的字段 Schema
+    # 会错误暗示 sightseeing/meal 可以省略 candidate_ref。
+    model_config = ConfigDict(json_schema_extra={"oneOf": [
+        {"properties": {"kind": {"enum": ["sightseeing", "meal"]},
+                        "candidate_ref": {"type": "string"}},
+         "required": ["kind", "candidate_ref"]},
+        {"properties": {"kind": {"const": "free_time"}, "candidate_ref": {"type": "null"}},
+         "required": ["kind"]},
+    ]})
+
     proposal_ref: str = Field(min_length=1)
     existing_activity_id: str | None = None
     candidate_ref: str | None = None
     slot_id: str = Field(min_length=1)
     kind: Literal["sightseeing", "meal", "free_time"]
-    duration_s: int | None = Field(default=None, ge=0)
     requirement_ids: tuple[str, ...] = ()
     recommendation_reason: str = ""
 
@@ -83,9 +92,6 @@ class DraftActivity(ContractModel):
     kind: Literal["sightseeing", "meal", "free_time"]
     poi_id: str | None = None
     place_fact_id: str | None = None
-    duration_s: int = Field(ge=0)
-    duration_source: Literal["model", "default", "user"]
-    duration_reason: str | None = None
     activity_source: Literal["model", "user"] = "model"
     requirement_ids: tuple[str, ...] = ()
     recommendation_reason: str = ""
@@ -305,10 +311,8 @@ class DayRevision(ContractModel):
 
 class DaySummary(ContractModel):
     day_id: str = Field(min_length=1)
-    known_stay_s: int = Field(ge=0)
-    known_travel_s: int = Field(ge=0)
+    known_travel_s: float = Field(ge=0)
     unknown_leg_ids: tuple[str, ...] = ()
-    feasibility: Literal["verified", "conflict", "unverified"]
     cost_status: Literal["available", "missing", "aggregation_pending"] = "aggregation_pending"
     known_cost_subtotal: str | None = None
 
@@ -348,7 +352,7 @@ class PreviewCalculation(ContractModel):
     based_on_revision: PositiveInt
     calculation_id: str = Field(min_length=1)
     current_routes: Literal["pending", "completed", "failed"]
-    alternative_backfill: Literal["pending", "running", "completed", "failed"]
+    alternative_backfill: Literal["not_required", "pending", "running", "completed", "failed"]
     pending_leg_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")

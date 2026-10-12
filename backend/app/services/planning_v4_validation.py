@@ -1,7 +1,8 @@
-"""planning_v4 每日完整性、已知冲突与未核实信息报告。"""
+"""planning_v4 地点覆盖与附带信息报告，不校验精确时间或交通可行性。"""
 from __future__ import annotations
 
 from hashlib import sha256
+from math import isfinite
 from typing import Iterable, Literal
 
 from app.models.planning_v4.facts import FactStore
@@ -24,7 +25,6 @@ from app.models.planning_v4.plan import (
     ValidationReport,
 )
 from app.models.planning_v4.tasks import CandidateRef
-from app.services.planning_v4_timing import PlanTimingResult
 from app.services.planning_v4_validator import (
     ContractValidationError,
     ReferenceIssue,
@@ -43,17 +43,27 @@ _EXPECTED_KIND_BY_PERIOD = {
 }
 
 
+def is_required_place_gap(planning_input: PlanningInput, issue: ValidationIssue) -> bool:
+    """业务修订只接受必需时段缺真实地点，其他提示不启动补查。"""
+    if not issue.triggers_repair or issue.category != "missing_arrangement" or issue.scope != "slot":
+        return False
+    day = next((day for day in planning_input.days if day.day_id == issue.day_id), None)
+    slot = next((slot for slot in day.slots if slot.slot_id == issue.target_id), None) if day else None
+    if slot is None or slot.eligibility != "required":
+        return False
+    return issue.code == ("missing_meal" if _EXPECTED_KIND_BY_PERIOD[slot.period] == "meal" else "missing_sightseeing")
+
+
 def validate_daily_plan(
     planning_input: PlanningInput,
     draft: PlanDraft,
     facts: FactStore,
     candidates: tuple[CandidateRef, ...],
-    timing: PlanTimingResult | None = None,
     *,
     repair_states: tuple[RepairState, ...] = (),
 ) -> ValidationReport:
-    """只报告每日覆盖、硬性需求、时间冲突及未知信息，不修改草稿或轮次。"""
-    _validate_timing_binding(planning_input, draft, timing)
+    """只报告每日地点覆盖、硬性需求及附带信息，不计算活动时间。"""
+    _validate_draft_context(planning_input, draft)
     _validate_repair_states(planning_input, repair_states)
 
     candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
@@ -87,7 +97,6 @@ def validate_daily_plan(
 
     issues: list[ValidationIssue] = []
     issues_by_day: dict[str, list[str]] = {day_id: [] for day_id in day_constraints}
-    timing_by_day = {day.day_id: day for day in timing.days} if timing else {}
 
     def add_issue(
         *,
@@ -150,7 +159,7 @@ def validate_daily_plan(
                 target_id=requirement.requirement_id,
                 message=f"必去要求“{requirement.text}”没有绑定到已核实并实际安排的地点活动。",
                 evidence_refs=(*result.activity_ids, *result.place_fact_ids),
-                triggers_repair=True,
+                triggers_repair=False,
             )
         elif result.status == "unverified":
             add_issue(
@@ -162,14 +171,33 @@ def validate_daily_plan(
                 message=f"无法仅根据当前结构化信息核实要求“{requirement.text}”是否落实。",
             )
 
+    # 重复是模型安排质量反馈，不是额外搜索或删除活动的依据。
+    sightseeing_by_poi: dict[str, list[tuple[DraftDay, DraftActivity]]] = {}
+    for day in draft.days:
+        for activity in day.activities:
+            if activity.kind == "sightseeing" and activity.poi_id:
+                sightseeing_by_poi.setdefault(activity.poi_id, []).append((day, activity))
+    for occurrences in sightseeing_by_poi.values():
+        if len({day.day_id for day, _ in occurrences}) < 2:
+            continue
+        first_day_id = occurrences[0][0].day_id
+        for day, activity in occurrences:
+            if day.day_id == first_day_id or (activity.recommendation_reason or "").strip():
+                continue
+            add_issue(
+                code="cross_day_sightseeing_repeat",
+                category="unknown_info",
+                severity="warning",
+                scope="activity",
+                day_id=day.day_id,
+                target_id=activity.activity_id,
+                message="同一景点已在其他日期安排，本次跨天重复没有说明理由，请核对需求。",
+                evidence_refs=tuple(item.activity_id for _, item in occurrences),
+            )
+
     day_results: list[DayValidation] = []
     for constraint in planning_input.days:
         day = draft_days[constraint.day_id]
-        day_timing = timing_by_day.get(day.day_id)
-        short_day = bool(
-            day_timing
-            and day_timing.scheduling_decision == "not_scheduled_insufficient_time"
-        )
         activities_by_slot: dict[str, list[DraftActivity]] = {}
         for activity in day.activities:
             activities_by_slot.setdefault(activity.slot_id, []).append(activity)
@@ -190,7 +218,7 @@ def validate_daily_plan(
 
             if slot.eligibility == "required":
                 required_count += 1
-                if not covered and not short_day:
+                if not covered:
                     required_missing = True
                     add_issue(
                         code="missing_meal" if expected_kind == "meal" else "missing_sightseeing",
@@ -206,7 +234,7 @@ def validate_daily_plan(
                         evidence_refs=(slot.slot_id,),
                         triggers_repair=True,
                     )
-            elif not covered and not short_day:
+            elif not covered:
                 conditional_missing = True
                 add_issue(
                     code="conditional_slot_unresolved",
@@ -219,47 +247,6 @@ def validate_daily_plan(
                     evidence_refs=(slot.slot_id,),
                 )
 
-        if short_day and day.activities:
-            activity_ids = tuple(activity.activity_id for activity in day.activities)
-            add_issue(
-                code="departure_day_below_minimum_with_activities",
-                category="known_conflict",
-                severity="error",
-                scope="day",
-                day_id=day.day_id,
-                message="F07 已证实离开日可用时间不足3小时；现有活动仍保留，但需要调整。",
-                evidence_refs=activity_ids,
-                triggers_repair=True,
-            )
-        if short_day:
-            add_issue(
-                code="departure_day_not_required",
-                category="unknown_info",
-                severity="info",
-                scope="day",
-                day_id=day.day_id,
-                message="F07 已证实离开日可用时间不足3小时，因此该日不要求覆盖全部餐次和游览时段。",
-                evidence_refs=tuple(activity.activity_id for activity in day.activities),
-            )
-
-        if day_timing is not None:
-            _add_timing_issues(
-                day=day,
-                constraint=constraint,
-                day_timing=day_timing,
-                draft_activity_ids={activity.activity_id for activity in day.activities},
-                add_issue=add_issue,
-            )
-        else:
-            add_issue(
-                code="timing_not_provided",
-                category="unknown_info",
-                severity="warning",
-                scope="day",
-                day_id=day.day_id,
-                message="尚未提供当前草稿版本的F07时间与返程计算，日程可行性未核实。",
-            )
-
         _add_place_unknowns(
             day=day,
             place_by_id=place_by_id,
@@ -271,9 +258,7 @@ def validate_daily_plan(
             add_issue=add_issue,
         )
 
-        if short_day:
-            completeness = "not_required"
-        elif required_missing:
+        if required_missing:
             completeness = "incomplete"
         elif conditional_missing:
             completeness = "conditional"
@@ -282,20 +267,10 @@ def validate_daily_plan(
         else:
             completeness = "complete"
 
-        if day_timing is None:
-            feasibility = "unverified"
-        elif day_timing.summary.feasibility == "conflict":
-            feasibility = "conflict"
-        elif day_timing.summary.feasibility == "verified":
-            feasibility = "verified"
-        else:
-            feasibility = "unverified"
-        if any(issue.category == "known_conflict" and issue.day_id == day.day_id for issue in issues):
-            feasibility = "conflict"
         day_results.append(DayValidation(
             day_id=day.day_id,
             completeness=completeness,
-            feasibility=feasibility,
+            feasibility="unverified",
             issue_ids=tuple(issues_by_day[day.day_id]),
         ))
 
@@ -320,33 +295,32 @@ def validate_daily_plan(
 def build_day_summaries(
     planning_input: PlanningInput,
     draft: PlanDraft,
-    timing: PlanTimingResult | None = None,
+    facts: FactStore,
 ) -> tuple[DaySummary, ...]:
-    """生成不含消费汇总的每日时间摘要；没有F07结果时明确保留未知路段。"""
+    """只汇总已查询交通耗时；不推算活动时刻或停留时长。"""
     _validate_draft_context(planning_input, draft)
-    _validate_timing_binding(planning_input, draft, timing)
-    timing_by_day = {day.day_id: day for day in timing.days} if timing else {}
-    legs_by_day: dict[str, list[str]] = {day.day_id: [] for day in draft.days}
-    for leg in draft.legs:
-        if leg.selection_source != "same_place":
-            legs_by_day[leg.day_id].append(leg.leg_id)
-
-    summaries: list[DaySummary] = []
+    routes = {route.fact_id: route for route in facts.routes}
+    summaries = []
     for day in draft.days:
-        day_timing = timing_by_day.get(day.day_id)
-        if day_timing is not None:
-            summaries.append(day_timing.summary.model_copy(update={
-                "cost_status": "aggregation_pending",
-                "known_cost_subtotal": None,
-            }))
-            continue
+        known_travel_s = 0.0
+        unknown_leg_ids = []
+        for leg in draft.legs:
+            if leg.day_id != day.day_id or leg.selection_source == "same_place":
+                continue
+            selected = next((result for result in leg.mode_results
+                             if result.mode == leg.selected_mode and result.status == "available"), None)
+            route = routes.get(selected.route_fact_id) if selected else None
+            option = next((option for option in route.options
+                           if option.option_id == leg.selected_option_id), None) if route else None
+            duration = option.duration_s if option else None
+            if duration is None or not isfinite(duration) or duration < 0:
+                unknown_leg_ids.append(leg.leg_id)
+            else:
+                known_travel_s += duration
         summaries.append(DaySummary(
             day_id=day.day_id,
-            known_stay_s=sum(activity.duration_s for activity in day.activities),
-            known_travel_s=0,
-            unknown_leg_ids=tuple(sorted(legs_by_day[day.day_id])),
-            feasibility="unverified",
-            cost_status="aggregation_pending",
+            known_travel_s=known_travel_s,
+            unknown_leg_ids=tuple(unknown_leg_ids),
         ))
     return tuple(summaries)
 
@@ -538,103 +512,6 @@ def _requirement_results(*, planning_input, draft, candidates, place_by_id):
     return tuple(results)
 
 
-def _add_timing_issues(*, day, constraint, day_timing, draft_activity_ids, add_issue) -> None:
-    timings_by_activity = {item.activity_id: item for item in day_timing.activities}
-    if (
-        day_timing.scheduling_decision == "not_scheduled_insufficient_time"
-        and not day.activities
-    ):
-        return
-
-    for activity in day.activities:
-        activity_timing = timings_by_activity.get(activity.activity_id)
-        if activity_timing is None:
-            continue
-        if (
-            activity_timing.status == "unverified"
-            and activity_timing.unknown_reason != "departure_day_under_minimum_usable_time"
-        ):
-            add_issue(
-                code="activity_timing_unverified",
-                category="unknown_info",
-                severity="warning",
-                scope="activity",
-                day_id=day.day_id,
-                target_id=activity.activity_id,
-                message=f"活动时间尚未核实：{activity_timing.unknown_reason or '缺少时间依据'}。",
-                evidence_refs=(activity.activity_id,),
-            )
-        if (
-            constraint.available_end is not None
-            and activity_timing.end_at is not None
-            and activity_timing.end_at > constraint.available_end
-        ):
-            add_issue(
-                code="activity_exceeds_available_end",
-                category="known_conflict",
-                severity="error",
-                scope="activity",
-                day_id=day.day_id,
-                target_id=activity.activity_id,
-                message="F07已证实活动结束时间超过该日已核实的可用终点。",
-                evidence_refs=(activity.activity_id,),
-                triggers_repair=True,
-            )
-
-    for transition in day_timing.unknown_transitions:
-        leg_id = transition.leg_id
-        target_activity_id = (
-            transition.to_reference_id
-            if transition.to_reference_id in draft_activity_ids
-            else None
-        )
-        add_issue(
-            code="route_unverified",
-            category="unknown_info",
-            severity="warning",
-            scope="leg" if leg_id else "activity" if target_activity_id else "day",
-            day_id=day.day_id,
-            target_id=leg_id or target_activity_id,
-            message=f"路段耗时尚未核实：{transition.reason}。",
-            evidence_refs=(leg_id or target_activity_id,) if leg_id or target_activity_id else (),
-        )
-
-    return_timing = day_timing.return_timing
-    if return_timing.status == "conflict" and day.activities:
-        leg_id = return_timing.route_leg_id
-        if return_timing.overrun_is_lower_bound:
-            detail = f"已证实返程至少超出截止时间 {return_timing.overrun_s or 0} 秒；该数值是下界。"
-        else:
-            detail = f"已证实返程超出截止时间 {return_timing.overrun_s or 0} 秒。"
-        add_issue(
-            code="return_deadline_conflict",
-            category="known_conflict",
-            severity="error",
-            scope="leg" if leg_id else "day",
-            day_id=day.day_id,
-            target_id=leg_id,
-            message=detail,
-            evidence_refs=(leg_id,) if leg_id else tuple(
-                activity.activity_id for activity in day.activities[-1:]
-            ),
-            triggers_repair=True,
-        )
-    elif (
-        return_timing.status == "unverified"
-        and return_timing.departure_at is not None
-        and day.activities
-    ):
-        add_issue(
-            code="return_timing_unverified",
-            category="unknown_info",
-            severity="warning",
-            scope="day",
-            day_id=day.day_id,
-            message="返程地点或路线尚未得到足够核实，不能据此断言安排冲突。",
-            evidence_refs=(return_timing.route_leg_id,) if return_timing.route_leg_id else (),
-        )
-
-
 def _add_place_unknowns(*, day, place_by_id, add_issue) -> None:
     for activity in day.activities:
         if activity.kind == "free_time":
@@ -651,28 +528,6 @@ def _add_place_unknowns(*, day, place_by_id, add_issue) -> None:
                 day_id=day.day_id,
                 target_id=activity.activity_id,
                 message="该地点没有可用的人均消费数据；不会据此估算价格或触发补查修正。",
-                evidence_refs=(activity.activity_id, place.fact_id),
-            )
-        if place.opening_hours_raw is None:
-            add_issue(
-                code="opening_hours_unavailable",
-                category="unknown_info",
-                severity="warning",
-                scope="activity",
-                day_id=day.day_id,
-                target_id=activity.activity_id,
-                message="地点未提供原始营业时间；当前无法核实开放状态。",
-                evidence_refs=(activity.activity_id, place.fact_id),
-            )
-        else:
-            add_issue(
-                code="opening_hours_unverified",
-                category="unknown_info",
-                severity="warning",
-                scope="activity",
-                day_id=day.day_id,
-                target_id=activity.activity_id,
-                message="地点提供了原始营业时间，但当前没有可靠解析结果，不能据此断言开放冲突。",
                 evidence_refs=(activity.activity_id, place.fact_id),
             )
 
@@ -745,7 +600,7 @@ def _validate_preview_graph(*, planning_input, draft, facts, candidates, report)
             based_on_revision=draft.revision,
             calculation_id="validation-only",
             current_routes="completed",
-            alternative_backfill="pending",
+            alternative_backfill="not_required",
         ),
     )
     validate_preview(preview)
@@ -771,53 +626,6 @@ def _activity_covers_slot(activity, slots, candidates, places) -> bool:
         return False
     expected_kind = _EXPECTED_KIND_BY_PERIOD[slot.period]
     return activity.kind == expected_kind and _activity_has_verified_place(activity, candidates, places)
-
-
-def _validate_timing_binding(planning_input, draft, timing) -> None:
-    _validate_draft_context(planning_input, draft)
-    if timing is None:
-        return
-    if timing.plan_id != draft.plan_id or timing.based_on_revision != draft.revision:
-        raise ValueError("F07 timing 必须绑定当前 PlanDraft plan_id 和 revision")
-    expected_days = {day.day_id for day in planning_input.days}
-    timing_days = [day.day_id for day in timing.days]
-    if len(timing_days) != len(set(timing_days)) or set(timing_days) != expected_days:
-        raise ValueError("F07 timing 必须与 PlanningInput 日期一一对应")
-    legs_by_day: dict[str, set[str]] = {day_id: set() for day_id in expected_days}
-    activities_by_day: dict[str, dict[str, DraftActivity]] = {
-        day.day_id: {activity.activity_id: activity for activity in day.activities}
-        for day in draft.days
-    }
-    for leg in draft.legs:
-        legs_by_day[leg.day_id].add(leg.leg_id)
-    for day_timing in timing.days:
-        if day_timing.summary.day_id != day_timing.day_id:
-            raise ValueError("F07 每日摘要必须引用所属日期")
-        actual = [item.activity_id for item in day_timing.activities]
-        expected = set(activities_by_day[day_timing.day_id])
-        if len(actual) != len(set(actual)) or set(actual) != expected:
-            raise ValueError(f"F07 timing 的活动集合必须与草稿日期 {day_timing.day_id} 一致")
-        for activity_timing in day_timing.activities:
-            activity = activities_by_day[day_timing.day_id][activity_timing.activity_id]
-            if activity_timing.day_id != day_timing.day_id:
-                raise ValueError("F07 活动时间必须引用所属日期")
-            if (
-                activity_timing.duration_s != activity.duration_s
-                or activity_timing.duration_source != activity.duration_source
-            ):
-                raise ValueError("F07 活动时长必须与当前草稿一致")
-            if activity_timing.incoming_leg_id is not None and activity_timing.incoming_leg_id not in legs_by_day[day_timing.day_id]:
-                raise ValueError("F07 活动时间引用了不存在的同日路段")
-        for transition in day_timing.unknown_transitions:
-            if transition.to_reference_id not in expected:
-                raise ValueError("F07 未知转移必须定位到当前日期的活动")
-            if transition.leg_id is not None and transition.leg_id not in legs_by_day[day_timing.day_id]:
-                raise ValueError("F07 未知转移引用了不存在的同日路段")
-        if any(leg_id not in legs_by_day[day_timing.day_id] for leg_id in day_timing.summary.unknown_leg_ids):
-            raise ValueError("F07 每日摘要引用了不存在的同日路段")
-        return_leg_id = day_timing.return_timing.route_leg_id
-        if return_leg_id is not None and return_leg_id not in legs_by_day[day_timing.day_id]:
-            raise ValueError("F07 返程结果引用了不存在的同日路段")
 
 
 def _validate_draft_context(planning_input, draft) -> None:

@@ -1,7 +1,8 @@
 """旅行规划API路由"""
 
 import asyncio
-from fastapi import APIRouter, HTTPException, Request, Query, Header
+from fastapi import APIRouter, HTTPException, Request, Response, Query, Header
+from urllib.parse import urlsplit
 from ...services.task_service import TaskError
 from ...models.planning_v4 import TripRequest as PlanningV4TripRequest
 from ...models.planning_v4_preview import (
@@ -67,6 +68,33 @@ async def create_v4_preview(body: PlanningV4TripRequest, request: Request):
         return await request.app.state.preview_task_service.submit(body)
     except TaskError as exc:
         raise task_http(exc)
+
+
+@router.post("/v4/tasks/{task_id}/recover-local-access")
+async def recover_v4_local_access(task_id: str, request: Request, response: Response):
+    # Host + 客户端地址阻止远程/代理访问；自定义头及 Origin 阻止跨站表单和 DNS rebinding。
+    loopback = {"127.0.0.1", "::1", "localhost"}
+    origin = request.headers.get("origin")
+    parsed = urlsplit(origin) if origin else None
+    allowed_origin = origin is None or (
+        parsed.scheme == "http" and parsed.hostname in loopback
+        and parsed.netloc in {f"{host}:{port}" for host in ("localhost", "127.0.0.1", "[::1]") for port in (5173, 3000, 8000)}
+        and not parsed.path and not parsed.query and not parsed.fragment
+    )
+    if (request.client is None or request.client.host not in loopback
+        or request.url.hostname not in loopback or not allowed_origin
+        or request.headers.get("x-trip-local-recovery") != "1"):
+        raise HTTPException(status_code=403, detail={"code": "LOCAL_RECOVERY_ONLY", "message": "仅允许本机恢复预览访问"})
+    try:
+        recovered = await asyncio.to_thread(
+            request.app.state.preview_task_service.repository.recover_local_access, task_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"code": "PREVIEW_STORAGE_UNAVAILABLE", "message": "暂时无法恢复预览访问"}) from exc
+    if recovered is None:
+        raise HTTPException(status_code=409, detail={"code": "PREVIEW_NOT_RECOVERABLE", "message": "任务没有已完成的预览，或仍在更新，请稍后重试"})
+    response.headers["Cache-Control"] = "no-store"
+    return recovered
 
 
 @router.get("/v4/tasks/{task_id}", response_model=PreviewTaskStatus)

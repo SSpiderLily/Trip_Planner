@@ -82,6 +82,7 @@ def build_context(anchor_file: str | Path) -> tuple[Subtask, LodgingExecutionCon
         objective="为上海三日行程在已来源化的整趟活动区域中推荐一家酒店和对应区域。",
         scope=TaskScope(
             city=request.city,
+            day_ids=tuple(day.day_id for day in planning.days),
             area_hint_ids=tuple(item.area_hint_id for item in usable_hints),
         ),
         dependencies=tuple(dependencies),

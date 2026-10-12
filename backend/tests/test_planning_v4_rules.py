@@ -24,9 +24,8 @@ class PlanningV4RulesTests(unittest.TestCase):
                 ("evening", 1140, 1320),
             ),
         )
-        self.assertEqual(rules.meal_default_s, 3600)
-        self.assertEqual(rules.sightseeing_default_s, 10800)
-        self.assertTrue(rules.sightseeing_duration_adjustable)
+        self.assertEqual(rules.meal_minimum_available_s, 3600)
+        self.assertEqual(rules.sightseeing_minimum_available_s, 10800)
         self.assertEqual(rules.max_repair_rounds_per_day, 3)
         self.assertEqual(rules.full_day_start_minute, 480)
         self.assertEqual(rules.return_buffer_default_s, 3600)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
@@ -18,11 +19,10 @@ from pydantic import ValidationError
 
 from app.api.routes.trip import router
 from app.models.planning_v4_preview import PreviewSnapshot
-from app.services.planning_v4_timing import DayTimingResult, PlanTimingResult, ReturnTiming
 from app.services.preview_repository import PreviewRepository
 from app.services.preview_task_service import (
     BackfillProgress, BackfillSuperseded, PreviewPipelineResult, PreviewProgress,
-    PreviewTaskService, make_route_backfill_runner,
+    PreviewTaskService,
 )
 from app.services.reference_cost import aggregate_reference_costs
 from app.services.task_repository import TaskRepository
@@ -42,22 +42,8 @@ def snapshot_for(plan_id: str) -> PreviewSnapshot:
     preview_value["draft"]["plan_id"] = plan_id
     preview_value["validation"]["plan_id"] = plan_id
     preview = type(original).model_validate(preview_value)
-    summaries = {summary.day_id: summary for summary in preview.day_summaries}
-    timing = PlanTimingResult(
-        plan_id=plan_id,
-        based_on_revision=preview.draft.revision,
-        days=tuple(
-            DayTimingResult(
-                day_id=day.day_id,
-                summary=summaries[day.day_id],
-                scheduling_decision="conditional",
-                return_timing=ReturnTiming(status="not_applicable", buffer_s=0),
-            )
-            for day in preview.draft.days
-        ),
-    )
     cost = aggregate_reference_costs(planning_input, preview.draft, facts)
-    return PreviewSnapshot(preview=preview, timing=timing, cost=cost)
+    return PreviewSnapshot(preview=preview, cost=cost)
 
 
 class FakePipeline:
@@ -135,6 +121,38 @@ class PreviewTaskApiTest(unittest.TestCase):
         self.assertEqual(status["status"], "ready")
         self.assertTrue(status["preview_ready"])
         return accepted
+
+    def test_old_snapshot_read_and_restore_are_explicitly_rejected_without_conversion(self):
+        _, client = self.make_client(FakePipeline())
+        with client:
+            accepted = self.submit_ready_preview(client)
+            token, task_id = accepted["access_token"], accepted["task_id"]
+            headers = {"Authorization": f"Bearer {token}"}
+            self.previews.save_final(token, save_id="old-save", source_store_version=1)
+            with sqlite3.connect(self.preview_db) as connection:
+                raw = connection.execute("SELECT preview_json FROM preview_drafts").fetchone()[0]
+                value = json.loads(raw)
+                value["draft"]["days"][0]["activities"][0]["duration_s"] = 3600
+                old_json = json.dumps(value)
+                connection.execute("UPDATE preview_drafts SET preview_json=?", (old_json,))
+                connection.execute("UPDATE preview_finals SET preview_json=?", (old_json,))
+            base = f"/api/trip/v4/tasks/{task_id}"
+            responses = [
+                client.get(f"{base}/preview", headers=headers),
+                client.get(f"{base}/final", headers=headers),
+                client.post(f"{base}/final/restore", headers=headers, json={
+                    "restore_id": "reject-old", "expected_store_version": 1,
+                    "expected_plan_revision": 1, "expected_save_id": "old-save",
+                }),
+            ]
+            for response in responses:
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["detail"]["code"], "PREVIEW_CONTRACT_UNSUPPORTED")
+                self.assertIn("历史数据不支持当前版本", response.text)
+                self.assertNotIn("duration_s", response.text)
+            with sqlite3.connect(self.preview_db) as connection:
+                row = connection.execute("SELECT preview_json,plan_revision,store_version FROM preview_drafts").fetchone()
+                self.assertEqual(row, (old_json, 1, 1))
 
     def test_final_save_read_and_restore_api_are_bearer_bound_and_idempotent(self):
         _, client = self.make_client(FakePipeline())
@@ -267,7 +285,7 @@ class PreviewTaskApiTest(unittest.TestCase):
             self.previews.save_final(token, save_id="legacy-final", source_store_version=1)
             with sqlite3.connect(self.preview_db) as conn:
                 conn.execute(
-                    "UPDATE preview_finals SET timing_json=NULL,cost_json=NULL WHERE save_id='legacy-final'"
+                    "UPDATE preview_finals SET cost_json=NULL WHERE save_id='legacy-final'"
                 )
 
             state = client.get(f"/api/trip/v4/tasks/{task_id}/final", headers=headers)
@@ -320,7 +338,7 @@ class PreviewTaskApiTest(unittest.TestCase):
             self.assertEqual(payload["plan_id"], plan_id)
             self.assertEqual(payload["store_version"], 1)
             self.assertIn("preview", payload)
-            self.assertIn("timing", payload)
+            self.assertNotIn("timing", payload)
             self.assertIn("cost", payload)
             self.assertIsNone(self.tasks.result(task_id))
 
@@ -328,11 +346,9 @@ class PreviewTaskApiTest(unittest.TestCase):
         reopened.initialize()
         stored = reopened.get_preview(token)
         self.assertEqual(stored.snapshot.preview.draft.plan_id, plan_id)
-        self.assertEqual(stored.timing.plan_id, plan_id)
         saved = reopened.save_final(token, save_id="save-1", source_store_version=1)
         final = reopened.read_final(token)
         self.assertEqual(saved.status, "saved")
-        self.assertEqual(final.timing, stored.timing)
         self.assertEqual(final.cost, stored.cost)
 
         connection = sqlite3.connect(self.preview_db)
@@ -391,13 +407,8 @@ class PreviewTaskApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["code"], "PREVIEW_STORAGE_UNAVAILABLE")
 
-    def test_snapshot_requires_timing_and_cost_day_sets_to_match_preview(self):
+    def test_snapshot_requires_cost_day_sets_to_match_preview(self):
         snapshot = snapshot_for("plan-set-check")
-        value = snapshot.model_dump(mode="json")
-        value["timing"]["days"].pop()
-        with self.assertRaises(ValidationError):
-            PreviewSnapshot.model_validate(value)
-
         value = snapshot.model_dump(mode="json")
         value["cost"]["days"].pop()
         with self.assertRaises(ValidationError):
@@ -914,33 +925,6 @@ class PreviewTaskApiTest(unittest.TestCase):
 
 
 class RouteBackfillAdapterTest(unittest.IsolatedAsyncioTestCase):
-    async def test_stale_revision_uses_coordinator_cancel_and_never_returns_facts(self):
-        from app.services.current_route_service import PlanRouteContext
-        from app.services.route_backfill_service import RouteBackfillService
-
-        planning_input, facts, _, _, preview = make_full_baseline_preview()
-        queries = []
-
-        async def unexpected_query(key, origin, destination):
-            queries.append(key)
-            raise AssertionError("old revision must cancel before any lookup")
-
-        context = PlanRouteContext(planning_input, preview.draft.plan_id, unexpected_query)
-        runner = make_route_backfill_runner(
-            RouteBackfillService(), planning_input, preview.draft, facts, context,
-            current_revision=lambda: preview.draft.revision + 1,
-        )
-        updates = []
-
-        async def collect(update):
-            updates.append(update)
-
-        with self.assertRaises(BackfillSuperseded):
-            await runner(collect)
-        self.assertTrue(updates)
-        self.assertEqual(queries, [])
-        await context.aclose()
-
     async def test_background_progress_storage_failure_does_not_undo_ready_preview(self):
         with tempfile.TemporaryDirectory() as temp:
             database = Path(temp) / "tasks.sqlite3"

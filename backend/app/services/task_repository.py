@@ -195,7 +195,14 @@ class TaskRepository:
             return value
 
     def size(self):
-        return sum(p.stat().st_size for p in [self.path, Path(str(self.path)+'-wal'), Path(str(self.path)+'-shm')] if p.exists())
+        total = 0
+        for path in (self.path, Path(str(self.path) + '-wal'), Path(str(self.path) + '-shm')):
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                # SQLite 最后一个连接关闭时可删除 WAL/SHM；不把瞬时消失当作记录失败。
+                continue
+        return total
 
     def cleanup(self):
         cutoff = (datetime.now(timezone.utc)-timedelta(days=self.retention_days)).isoformat(timespec='microseconds')

@@ -1,4 +1,4 @@
-"""按 PlanDraft 当前顺序查询相邻路线，并用 F07 逐段推进时间。"""
+"""按 PlanDraft 当前顺序查询住处起点与相邻地点路线，公交使用每日参考时刻。"""
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +28,6 @@ from app.models.planning_v4.base import ContractModel
 from app.services.amap_contract_adapter import AmapContractAdapter
 from app.services.endpoint_verification_service import EndpointVerificationExecution
 from app.services.mcp_tool_executor import MCPToolExecutor, get_mcp_tool_executor
-from app.services.planning_v4_timing import PlanTimingResult, calculate_plan_timing
 from app.services.route_fact_cache import (
     LoadedRouteFact,
     RouteFactCache,
@@ -103,7 +102,6 @@ class CurrentRouteExecution(ContractModel):
     status: Literal["complete", "partial"]
     draft: PlanDraft
     fact_store: FactStore
-    timing: PlanTimingResult
     leg_results: tuple[CurrentRouteLegOutcome, ...] = ()
 
 
@@ -143,7 +141,6 @@ class PlanRouteContext:
         self._lock = Lock()
         self._places: dict[tuple[str, str, float, float], PlaceFact] = {}
         self._alternative_sources: dict[tuple[str, str, float, float], set[str]] = {}
-        self.backfill_lock = asyncio.Lock()
         self.route_cache = RouteFactCache(plan_id, self._load)
 
     @property
@@ -544,29 +541,6 @@ def _build_edges(
             previous_place = destination
             previous_reference = activity.activity_id
 
-        local_departure_date = planning_input.request.departure_at.astimezone(
-            ZoneInfo(planning_input.request.timezone),
-        ).date()
-        if day.day_date == local_departure_date and departure_fact_id is not None:
-            terminal = facts_by_id.get(departure_fact_id)
-            terminal_endpoint = (
-                LegEndpoint(kind="departure", reference_id=departure_fact_id, poi_id=terminal.poi_id)
-                if terminal is not None else None
-            )
-            if terminal_endpoint is not None:
-                if previous_endpoint is None:
-                    # 离开日没有 POI 活动时，F07 允许以酒店作为返程起点。
-                    day_edges.append(_Edge(
-                        day.day_id, previous_reference, departure_fact_id, None,
-                        previous_place, terminal, "return_origin_endpoint_missing",
-                    ))
-                else:
-                    day_edges.append(_make_edge(
-                        draft=draft, day=day, from_reference_id=previous_reference,
-                        origin=previous_place, origin_endpoint=previous_endpoint,
-                        destination_endpoint=terminal_endpoint, destination=terminal,
-                        existing=existing,
-                    ))
         by_day[day.day_id] = day_edges
 
     legs = [edge.leg for edges in by_day.values() for edge in edges if edge.leg is not None]
@@ -598,7 +572,6 @@ def build_pending_route_legs_for_day(
         verified_departure_fact_id = next(iter(departure_ids), None)
     elif not any(place.fact_id == verified_departure_fact_id for place in facts.places):
         raise CurrentRouteError("verified_departure_fact_missing_or_incomplete")
-
     by_day, _ = _build_edges(
         planning_input, draft, facts, verified_departure_fact_id,
     )
@@ -742,13 +715,20 @@ def _select_leg(
     current_leg: RouteLeg,
     mode_facts: dict[RouteMode, RouteFact],
 ) -> RouteLeg:
+    transit_fact = mode_facts.get("transit")
+    # 明示的是公共交通查询依据，选择步行/骑行也不抹去其参考时刻。
+    time_basis: TimeBasis = (
+        "reference" if transit_fact is not None
+        and transit_fact.time_verification in {"sent_not_echoed", "provider_echoed"}
+        else "unspecified"
+    )
     candidates = _duration_candidates(mode_facts)
     if not candidates:
         return current_leg.model_copy(update={
             "selected_mode": None,
             "selected_option_id": None,
             "selection_source": None,
-            "time_basis": "unspecified",
+            "time_basis": time_basis,
         })
     chosen = None
     preferred_mode = original_leg.preferred_mode
@@ -763,12 +743,6 @@ def _select_leg(
         chosen = min(candidates, key=lambda item: (item[0], item[1], item[2]))
         selection_source = "backend_fastest_available"
     _, _, _, mode, option_id = chosen
-    fact = mode_facts[mode]
-    time_basis: TimeBasis = "unspecified"
-    if mode == "transit":
-        if fact.time_verification in {"sent_not_echoed", "provider_echoed"}:
-            requested = current_leg.requested_departure_at
-            time_basis = "computed" if requested is not None and current_leg.time_basis == "computed" else "reference"
     return current_leg.model_copy(update={
         "selected_mode": mode,
         "selected_option_id": option_id,
@@ -842,7 +816,7 @@ class CurrentRouteService:
     def create_route_context(
         self, planning_input: PlanningInput, plan_id: str,
     ) -> PlanRouteContext:
-        """创建可由F08当前查询与F11b后台查询共同持有的plan上下文。"""
+        """创建由生成与编辑共享的相邻路线查询缓存。"""
         cancel_event = Event()
 
         async def load(key: RouteQueryKey, origin: PlaceFact, destination: PlaceFact) -> LoadedRouteFact:
@@ -879,6 +853,7 @@ class CurrentRouteService:
         only_edge: tuple[str, str, str] | None = None,
         route_context: PlanRouteContext | None = None,
         only_day_id: str | None = None,
+        only_leg_ids: tuple[str, ...] | None = None,
     ) -> CurrentRouteExecution:
         _validate_plan_binding(planning_input, draft)
         if only_day_id is not None and only_day_id not in {day.day_id for day in draft.days}:
@@ -887,17 +862,19 @@ class CurrentRouteService:
             planning_input, draft, facts, endpoint_execution,
             verified_departure_fact_id, current_context_revision,
         )
-        try:
-            calculate_plan_timing(
-                planning_input, draft, merged_facts,
-                verified_departure_fact_id=departure_fact_id,
-            )
-        except (TypeError, ValueError) as exc:
-            raise CurrentRouteError("input_contract_invalid") from exc
-
         edges_by_day, generated_legs = _build_edges(
             planning_input, draft, merged_facts, departure_fact_id,
         )
+        selected_leg_ids = set(only_leg_ids) if only_leg_ids is not None else None
+        if selected_leg_ids is not None:
+            scoped_ids = {
+                leg.leg_id for leg in generated_legs
+                if only_day_id is None or leg.day_id == only_day_id
+            }
+            if len(selected_leg_ids) != len(only_leg_ids) or selected_leg_ids - scoped_ids:
+                raise CurrentRouteError("requested_live_leg_scope_invalid")
+            if only_edge is not None:
+                raise CurrentRouteError("requested_live_scope_conflict")
         if only_edge is not None:
             if only_day_id is not None and only_edge[0] != only_day_id:
                 raise CurrentRouteError("requested_live_scope_conflict")
@@ -923,7 +900,7 @@ class CurrentRouteService:
         if cache.plan_id != draft.plan_id:
             raise CurrentRouteError("route_cache_plan_mismatch")
 
-        # 每日worker只更新自己的路段，避免影响其他日期的临时时间；共享执行器仍把MCP并发限制为4。
+        # 每日worker只更新自己的路段，避免影响其他日期的路线；共享执行器仍把MCP并发限制为4。
         skeleton = draft.model_copy(update={"legs": tuple(generated_legs)}, deep=True)
         original_legs = {leg.leg_id: leg for leg in draft.legs}
         day_results: list[tuple[list[RouteLeg], list[RouteFact], list[CurrentRouteLegOutcome]]] = []
@@ -933,6 +910,10 @@ class CurrentRouteService:
             local_facts: list[RouteFact] = []
             local_results: list[CurrentRouteLegOutcome] = []
             for edge in edges:
+                if selected_leg_ids is not None and (
+                    edge.leg is None or edge.leg.leg_id not in selected_leg_ids
+                ):
+                    continue
                 if only_edge is not None and (
                     edge.day_id, edge.from_reference_id, edge.to_reference_id
                 ) != only_edge:
@@ -962,16 +943,10 @@ class CurrentRouteService:
                     continue
                 assert edge.origin is not None and edge.destination is not None
                 original_leg = original_legs.get(edge.leg.leg_id, edge.leg)
-                timing = self._timing_for_day(
-                    planning_input, skeleton, local_legs,
-                    merged_facts, local_facts, departure_fact_id,
-                )
-                requested_departure = _departure_for_edge(timing, edge)
-                query_basis: TimeBasis = "computed" if requested_departure is not None else "reference"
-                if requested_departure is None:
-                    local_day = edge_day_date(skeleton, edge.day_id)
-                    local_zone = ZoneInfo(planning_input.request.timezone)
-                    requested_departure = datetime.combine(local_day, time(9, 0), tzinfo=local_zone)
+                local_day = edge_day_date(skeleton, edge.day_id)
+                local_zone = ZoneInfo(planning_input.request.timezone)
+                requested_departure = datetime.combine(local_day, time(9, 0), tzinfo=local_zone)
+                query_basis: TimeBasis = "reference"
                 provisional_leg = edge.leg.model_copy(update={
                     "requested_departure_at": requested_departure,
                     "time_basis": query_basis,
@@ -1043,7 +1018,10 @@ class CurrentRouteService:
             leg_outcomes.extend(local_results)
         final_leg_items = []
         for leg in generated_legs:
-            if only_day_id is not None and leg.day_id != only_day_id:
+            if (
+                only_day_id is not None and leg.day_id != only_day_id
+                or selected_leg_ids is not None and leg.leg_id not in selected_leg_ids
+            ):
                 # The target day may receive a new global revision. Keep every other
                 # day's route content and only move its revision binding forward.
                 previous = original_legs.get(leg.leg_id)
@@ -1059,13 +1037,6 @@ class CurrentRouteService:
             merged_facts,
             _route_store(added_routes),
         )
-        try:
-            timing = calculate_plan_timing(
-                planning_input, final_draft, final_facts,
-                verified_departure_fact_id=departure_fact_id,
-            )
-        except (TypeError, ValueError) as exc:
-            raise CurrentRouteError("route_result_contract_invalid") from exc
         partial = any(item.status in {"unknown", "not_queried"} for item in leg_outcomes) or any(
             mode.status in {"empty", "error", "unknown", "not_queried"}
             for item in leg_outcomes for mode in item.modes
@@ -1083,27 +1054,9 @@ class CurrentRouteService:
             status="partial" if partial else "complete",
             draft=final_draft,
             fact_store=final_facts,
-            timing=timing,
             leg_results=tuple(leg_outcomes),
         )
 
-    def _timing_for_day(
-        self,
-        planning_input: PlanningInput,
-        skeleton: PlanDraft,
-        local_legs: list[RouteLeg],
-        base_facts: FactStore,
-        local_facts: list[RouteFact],
-        departure_fact_id: str | None,
-    ) -> PlanTimingResult:
-        current_ids = {leg.leg_id for leg in local_legs}
-        legs = [leg for leg in skeleton.legs if leg.leg_id not in current_ids] + list(local_legs)
-        temp_draft = skeleton.model_copy(update={"legs": tuple(legs)}, deep=True)
-        temp_facts = _merge_fact_stores(base_facts, _route_store(local_facts))
-        return calculate_plan_timing(
-            planning_input, temp_draft, temp_facts,
-            verified_departure_fact_id=departure_fact_id,
-        )
 
     async def _query_mode(
         self,
@@ -1280,25 +1233,6 @@ def _replace_leg(legs: list[RouteLeg], updated: RouteLeg) -> None:
 
 def edge_day_date(draft: PlanDraft, day_id: str):
     return next(day.day_date for day in draft.days if day.day_id == day_id)
-
-
-def _departure_for_edge(
-    timing: PlanTimingResult,
-    edge: _Edge,
-) -> datetime | None:
-    day_timing = next((item for item in timing.days if item.day_id == edge.day_id), None)
-    if day_timing is None:
-        return None
-    if edge.leg is not None and edge.leg.to_endpoint.kind == "activity":
-        activity = next((item for item in day_timing.activities if item.activity_id == edge.to_reference_id), None)
-        return activity.depart_at if activity else None
-    if edge.leg is not None and edge.leg.to_endpoint.kind == "departure":
-        if day_timing.activities:
-            # 在当日最后一项活动结束时查询，包括末尾 free_time。
-            # latest_activity_end_at 是返程截止边界，不是实际出发时刻。
-            return day_timing.activities[-1].end_at
-        return day_timing.day_start_at
-    return None
 
 
 async def query_current_routes(

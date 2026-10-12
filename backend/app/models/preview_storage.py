@@ -4,10 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import ValidationError
+
 from .planning_v4.plan import ItineraryPreview
 from .planning_v4.cost import ReferenceCostSummary
 from .planning_v4_preview import PreviewSnapshot
-from ..services.planning_v4_timing import PlanTimingResult
+
+
+class PreviewSnapshotUnsupported(ValueError):
+    """持久化数据不符合现行契约；不转换或补造旧字段。"""
+
+    def __init__(self):
+        super().__init__("历史数据不支持当前版本，请重新创建行程。")
 
 
 @dataclass(frozen=True)
@@ -16,14 +24,16 @@ class StoredPreview:
     store_version: int
     plan_revision: int
     updated_at: str
-    timing: PlanTimingResult | None = None
     cost: ReferenceCostSummary | None = None
 
     @property
     def snapshot(self) -> PreviewSnapshot | None:
-        if self.timing is None or self.cost is None:
+        if self.cost is None:
             return None
-        return PreviewSnapshot(preview=self.preview, timing=self.timing, cost=self.cost)
+        try:
+            return PreviewSnapshot(preview=self.preview, cost=self.cost)
+        except ValidationError as exc:
+            raise PreviewSnapshotUnsupported() from exc
 
 
 @dataclass(frozen=True)
@@ -78,14 +88,16 @@ class SavedPreview:
     source_store_version: int
     save_id: str
     saved_at: str
-    timing: PlanTimingResult | None = None
     cost: ReferenceCostSummary | None = None
 
     @property
     def snapshot(self) -> PreviewSnapshot | None:
-        if self.timing is None or self.cost is None:
+        if self.cost is None:
             return None
-        return PreviewSnapshot(preview=self.preview, timing=self.timing, cost=self.cost)
+        try:
+            return PreviewSnapshot(preview=self.preview, cost=self.cost)
+        except ValidationError as exc:
+            raise PreviewSnapshotUnsupported() from exc
 
 
 @dataclass(frozen=True)

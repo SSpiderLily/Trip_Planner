@@ -96,7 +96,7 @@ def build_context(*, lodging_query=None, area_count=1, candidate_refs=()):
     task = Subtask(
         task_id="f04b-task", run_id="f04b-run", context_revision=1, base_revision=None,
         role="lodging", objective="核实指定住处或在来源化住宿区域推荐一家酒店",
-        scope=TaskScope(city=request.city, area_hint_ids=scoped_hints),
+        scope=TaskScope(city=request.city, day_ids=tuple(day.day_id for day in planning.days), area_hint_ids=scoped_hints),
         dependencies=() if specified else tuple(dependencies),
         known_fact_ids=() if specified else tuple(place.fact_id for place in places),
         candidate_target=1, required_fields=("poi_id", "name", "location"),

@@ -34,7 +34,6 @@ export interface V4PreviewEnvelope {
   store_version: number
   plan_revision: number
   preview: ItineraryPreview
-  timing: PlanTimingResult
   cost: ReferenceCostSummary
 }
 
@@ -206,12 +205,17 @@ export interface ItineraryPreview {
         amount: string | number | null
         currency: string
         scope: 'whole_trip'
+        amount_basis?: 'per_person' | 'whole_party'
         party_basis: string
         party_size: number | null
       }
       arrival_place_query?: string | null
       departure_place_query?: string | null
       lodging_query?: string | null
+      lodging_poi_id?: string | null
+    }
+    requirements?: {
+      lodging_changes?: Array<{ start_date: string; city?: string | null; lodging_query?: string | null }>
     }
     days: DayConstraint[]
   }
@@ -233,11 +237,18 @@ export interface ItineraryPreview {
     issues: ValidationIssue[]
     days: ValidationDay[]
   }
+  day_summaries: Array<{
+    day_id: string
+    known_travel_s: number
+    unknown_leg_ids: string[]
+    cost_status: 'available' | 'missing' | 'aggregation_pending'
+    known_cost_subtotal: string | null
+  }>
   calculation: {
     based_on_revision: number
     calculation_id: string
     current_routes: 'pending' | 'completed' | 'failed' | string
-    alternative_backfill: 'pending' | 'running' | 'completed' | 'failed' | string
+    alternative_backfill: 'not_required' | 'pending' | 'running' | 'completed' | 'failed' | string
     pending_leg_ids: string[]
   }
 }
@@ -274,9 +285,6 @@ export interface DraftActivity {
   kind: 'sightseeing' | 'meal' | 'free_time'
   poi_id: string | null
   place_fact_id: string | null
-  duration_s: number
-  duration_source: 'model' | 'default' | 'user'
-  duration_reason?: string | null
   requirement_ids: string[]
   recommendation_reason: string
 }
@@ -301,6 +309,7 @@ export interface CandidateRef {
   poi_id: string
   place_fact_id: string
   area_hint_id?: string | null
+  lodging_day_ids?: string[]
   slot_ids: string[]
   requirement_ids: string[]
   recommendation_reason: string
@@ -421,57 +430,6 @@ export interface RouteSegment {
     mode: 'bus' | 'subway' | 'railway'
     polyline: MapCoordinate[]
   }>
-}
-
-export interface PlanTimingResult {
-  plan_id: string
-  based_on_revision: number
-  days: DayTimingResult[]
-}
-
-export interface DayTimingResult {
-  day_id: string
-  activities: ActivityTiming[]
-  summary: {
-    day_id: string
-    known_stay_s: number
-    known_travel_s: number
-    unknown_leg_ids: string[]
-    feasibility: 'verified' | 'conflict' | 'unverified'
-  }
-  scheduling_decision: 'scheduled' | 'conditional' | 'not_scheduled_insufficient_time'
-  elapsed_s: number | null
-  unknown_transitions: Array<{ leg_id: string | null; reason: string }>
-  return_timing: ReturnTiming
-}
-
-export interface ReturnTiming {
-  status: 'not_applicable' | 'verified' | 'conflict' | 'unverified' | string
-  departure_poi_id: string | null
-  departure_at: string | null
-  deadline_at: string | null
-  latest_activity_end_at: string | null
-  estimated_arrival_at: string | null
-  earliest_possible_arrival_at: string | null
-  route_leg_id: string | null
-  travel_s: number | null
-  buffer_s: number
-  usable_s: number | null
-  optimistic_usable_s: number | null
-  overrun_s: number | null
-  overrun_is_lower_bound: boolean
-  unknown_reasons: string[]
-  notes: string[]
-}
-
-export interface ActivityTiming {
-  activity_id: string
-  start_at: string | null
-  end_at: string | null
-  duration_s: number
-  status: 'estimated' | 'unverified'
-  unknown_reason: string | null
-  note: string | null
 }
 
 export interface ReferenceCostSummary {

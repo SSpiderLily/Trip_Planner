@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 import { mixedSyntheticEnvelope, shortDepartureSyntheticEnvelope } from './v4PreviewFixtures.mjs'
 
@@ -19,21 +19,34 @@ assert.equal(day.activities[1].cost.amount, null, 'unknown cost must remain unkn
 assert.match(day.activities[1].cost.text, /未查询到/)
 assert.match(day.activities[0].cost.evidenceLabel, /高德地图.*查询于/)
 assert.equal(mixed.planIssues.length, 1, 'global must-visit issue stays visible')
-assert.ok(day.activities[0].issues.some(issue => issue.issue_id === 'issue-activity-conflict'), 'activity issues stay beside their activity')
+assert.ok(!day.issues.some(issue => issue.issue_id === 'issue-activity-conflict'), 'opening-time conclusions are hidden in all notice areas')
 assert.ok(day.legs[0].issues.some(issue => issue.issue_id === 'issue-leg-unknown'), 'route issues stay beside their leg')
 assert.ok(day.unboundIssues.some(issue => issue.issue_id === 'issue-unbound-activity'), 'unbound issues fall back to the day notice area')
 assert.deepEqual(day.missingSlots.map(slot => [slot.period, slot.kind]), [['breakfast', 'conditional'], ['evening', 'missing']])
 assert.match(day.missingSlots[0].prompt, /待确认/)
 assert.match(day.missingSlots[1].prompt, /尚未安排景点/)
-assert.equal(day.returnTiming.status, 'unverified')
+assert.ok(!('returnTiming' in day), 'the shared preview/export view has no return feasibility result')
 assert.equal(day.returnLeg.id, 'leg-return', 'departure route stays available as a separate return leg')
 assert.equal(day.returnLeg.modes.length, 3, 'return route displays unified public transport, cycling, and walking')
-assert.ok(day.returnLeg.issues.some(issue => issue.issue_id === 'issue-return-conflict'))
-assert.equal(day.returnTiming.bufferLabel, '返程预留 1小时0分钟')
-assert.match(day.returnTiming.detail, /未提供离开地点/)
+assert.ok(!day.returnLeg.issues.some(issue => issue.issue_id === 'issue-return-conflict'), 'return transport stays visible without feasibility conclusions')
+assert.ok(day.activities.every(activity => !('timingLabel' in activity) && !('durationLabel' in activity) && !('timing' in activity)))
+assert.deepEqual(Object.keys(day.transport).sort(), ['knownTravelSeconds', 'unknownLegCount'])
+assert.equal(day.transport.knownTravelSeconds, 1800, 'transport durations are retained')
+assert.equal(day.area.label, '外滩与南京东路一带', 'unspecified lodging retains its recommendation area')
+assert.ok(day.locations.some(location => location.kind === 'area'))
 assert.equal(day.legs[0].modes.find(mode => mode.mode === 'bicycling').durationSeconds, 420, 'non-selected modes use their shortest valid option')
 assert.equal(day.legs[0].paths.length, 1, 'draw only geometry from the selected route option')
 assert.match(day.legs[0].timeBasisLabel, /公共交通按.*09:00 参考时刻查询/)
+
+const walkingEnvelope = mixedSyntheticEnvelope()
+walkingEnvelope.preview.calculation.alternative_backfill = 'not_required'
+const walkingLeg = walkingEnvelope.preview.draft.legs[0]
+walkingLeg.selected_mode = 'walking'
+walkingLeg.selected_option_id = 'walk-long'
+const walkingView = mapV4Preview(walkingEnvelope).days[0].legs[0]
+assert.equal(walkingView.selectedDurationLabel, '0小时40分钟')
+assert.equal(walkingView.paths.length, 0, 'missing walking geometry cannot borrow a transit path')
+assert.match(walkingView.timeBasisLabel, /公共交通按.*09:00 参考时刻查询/, 'the transit reference remains explicit when walking is selected')
 assert.equal(day.recommendations.filter(candidate => candidate.kind === 'sightseeing').length, 2)
 assert.equal(day.recommendations.filter(candidate => candidate.kind === 'meal').length, 1)
 assert.ok(!day.recommendations.some(candidate => candidate.id === 'candidate-selected-sight'))
@@ -73,12 +86,9 @@ const rawRouteMessage = rawRouteIssue.message
 const readable = mapV4Preview(readableEnvelope)
 const readableDay = readable.days[0]
 assert.equal(readableDay.legs[0].issues.find(issue => issue.issue_id === 'issue-leg-unknown').message,
-  '尚未查到该路段耗时，安排时间待核实。')
+  '尚未查到该路段耗时。')
 assert.ok(!readableDay.legs[0].issues.some(issue => /missing_route_leg|F07/.test(issue.message)))
-assert.match(readableDay.issues.find(issue => issue.issue_id === 'issue-short-day').message,
-  /不足 3 小时；现有活动仍保留，但需要调整/)
-assert.match(readableDay.activities[0].issues.find(issue => issue.issue_id === 'issue-activity-overrun').message,
-  /超过已核实的当日可用终点/)
+assert.ok(!readableDay.issues.some(issue => issue.issue_id === 'issue-short-day' || issue.issue_id === 'issue-activity-overrun'))
 assert.ok(!readableDay.issues.some(issue => /\bF07\b|missing_route_leg/.test(issue.message)))
 assert.equal(rawRouteIssue.message, rawRouteMessage, 'mapping must not rewrite the original envelope')
 assert.match(formatPreviewEvidenceTime('2026-11-01T04:20:00Z'), /\d{1,2}(月|\/)\d{1,2}/)
@@ -97,8 +107,6 @@ const freeTime = {
   kind: 'free_time',
   poi_id: null,
   place_fact_id: null,
-  duration_s: 1800,
-  duration_source: 'default',
   requirement_ids: [],
   recommendation_reason: '附近自由活动。',
 }
@@ -146,32 +154,57 @@ assert.match(pageSource, /已知人均景点与餐饮消费参考/)
 
 const short = mapV4Preview(shortDepartureSyntheticEnvelope())
 assert.equal(short.days[0].missingSlots.length, 0, 'F07 short departure days remain exempt even when input slots are required')
-assert.equal(short.days[0].returnTiming.status, 'conflict')
+assert.ok(!('returnTiming' in short.days[0]))
 
 const transitionsEnvelope = mixedSyntheticEnvelope()
-transitionsEnvelope.timing.days[0].unknown_transitions = [
-  { leg_id: null, reason: 'missing_route_leg' },
-  { leg_id: null, reason: 'missing_route_leg' },
-  { leg_id: 'leg-known', reason: 'missing_route_leg' },
-  { leg_id: 'leg-known', reason: 'missing_route_leg' },
-]
-transitionsEnvelope.timing.days[0].summary.unknown_leg_ids = ['leg-known', 'leg-summary-only']
-assert.equal(mapV4Preview(transitionsEnvelope).days[0].timing.unknownLegCount, 4, 'count id-less transitions, deduplicate named transition ids, then add only summary ids not covered by a named transition')
-
-const partialPath = '/private/tmp/trip-remaining-review/f10b-partial-envelope.json'
-try {
-  await access(partialPath)
-  const partialEnvelope = JSON.parse(await readFile(partialPath, 'utf8'))
-  const partial = mapV4Preview(partialEnvelope)
-  assert.equal(partial.city, '上海')
-  assert.equal(partial.days[0].timing.unknownLegCount, 2, 'id-less unknown transitions must not disappear when summary ids are empty')
-  assert.ok(partial.cost.knownSubtotal === null || partial.cost.knownSubtotal === '0')
-  assert.ok(partial.days[0].activities.length <= 2, 'the supplied fact sample remains visibly partial')
-  assert.ok(partial.days[0].activities.every(activity => activity.cost.amount === null), 'the supplied all-unknown cost sample must not invent amounts')
-  console.log('v4PreviewMapper: actual partial envelope boundary checks passed')
-} catch (error) {
-  if (error?.code !== 'ENOENT') throw error
-  console.log('v4PreviewMapper: external partial envelope not present; skipped environment-only sample')
-}
+transitionsEnvelope.preview.day_summaries[0].unknown_leg_ids = ['leg-known', 'leg-summary-only']
+assert.equal(mapV4Preview(transitionsEnvelope).days[0].transport.unknownLegCount, 2, 'unknown transport count comes from route summary without timing')
+assert.ok(!('timing' in transitionsEnvelope), 'new snapshots contain no activity time snapshot')
 
 console.log('v4PreviewMapper: mixed synthetic and short-departure assertions passed')
+
+for (const lodgingInput of [{ lodging_poi_id: 'poi-hotel' }, { lodging_query: '用户已订酒店' }, {}]) {
+  const specifiedEnvelope = mixedSyntheticEnvelope()
+  Object.assign(specifiedEnvelope.preview.planning_input.request, lodgingInput)
+  if (!Object.keys(lodgingInput).length) specifiedEnvelope.preview.draft.days[0].lodging.selection_source = 'user'
+  const original = JSON.stringify(specifiedEnvelope)
+  const specifiedDay = mapV4Preview(specifiedEnvelope).days[0]
+  assert.equal(specifiedDay.area, null, 'selected POI, typed lodging, and user-selected lodging all hide the recommendation area')
+  assert.ok(!specifiedDay.locations.some(location => location.kind === 'area'), 'hidden areas cannot leak into map pins or legend')
+  assert.ok(specifiedDay.locations.some(location => location.kind === 'hotel'), 'the real hotel map marker is retained')
+  assert.equal(specifiedDay.hotel.name, day.hotel.name)
+  assert.equal(specifiedDay.hotel.label, '已指定住处')
+  assert.equal(JSON.stringify(specifiedEnvelope), original, 'display mapping never modifies the API snapshot')
+}
+
+const hiddenEnvelope = mixedSyntheticEnvelope()
+for (const [index, code] of ['timing_not_provided', 'activity_timing_unverified', 'activity_exceeds_available_end',
+  'return_deadline_conflict', 'return_timing_unverified', 'return_route_unverified',
+  'opening_hours_unavailable', 'opening_hours_unverified'].entries()) {
+  hiddenEnvelope.preview.validation.issues.push({
+    issue_id: `hidden-${index}`, code, category: 'known_conflict', severity: 'warning',
+    scope: index % 2 ? 'activity' : 'plan', day_id: index % 2 ? day.id : null,
+    target_id: index % 2 ? day.activities[0].id : null, message: '活动时间或返程结论不应展示。',
+  })
+}
+const hiddenView = mapV4Preview(hiddenEnvelope)
+assert.doesNotMatch(JSON.stringify(hiddenView), /hidden-\d|活动时间或返程结论不应展示/)
+assert.ok(hiddenView.planIssues.some(issue => issue.code === 'must_visit_unplanned'), 'real missing destination notices remain')
+for (const template of [pageSource, exportSource]) {
+  assert.doesNotMatch(template, /activity\.(durationLabel|timingLabel)|returnTiming|knownStaySeconds|elapsedSeconds|openingHoursLabel/)
+}
+console.log('v4PreviewMapper: S01 display, specified-lodging map, and source-preservation checks passed')
+
+const changedLodging = mixedSyntheticEnvelope()
+changedLodging.preview.planning_input.request.lodging_query = '前几天指定住处'
+changedLodging.preview.planning_input.requirements = {
+  lodging_changes: [{ start_date: changedLodging.preview.draft.days[0].day_date, city: '苏州', lodging_query: null }],
+}
+const changedLodgingView = mapV4Preview(changedLodging).days[0]
+assert.equal(changedLodgingView.hotel.label, '推荐酒店', 'explicit change without new residence permits recommendation on changed dates')
+assert.equal(changedLodgingView.area.label, day.area.label)
+changedLodging.preview.planning_input.requirements.lodging_changes[0].lodging_query = '新的指定住处'
+changedLodging.preview.draft.days[0].lodging.selection_source = 'user'
+const newSpecifiedLodgingView = mapV4Preview(changedLodging).days[0]
+assert.equal(newSpecifiedLodgingView.hotel.label, '已指定住处')
+assert.equal(newSpecifiedLodgingView.area, null, 'newly specified residence hides accommodation recommendations')

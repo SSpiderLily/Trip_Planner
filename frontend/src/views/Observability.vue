@@ -55,6 +55,7 @@ import ObservationTimeline from '@/components/ObservationTimeline.vue'
 import ObservationDetails from '@/components/ObservationDetails.vue'
 import ObservationAnalysis from '@/components/ObservationAnalysis.vue'
 import { listTasks, getTask, getSpans, getSpan, getTaskResult, getTaskMetrics, errorText, stepName, stateName } from '@/services/api'
+import { getPreviewAccessForTask, recoverLocalPreviewAccess } from '@/services/v4Preview'
 import { anomalyCounts, defaultSelection, durationMs, isActive, milliseconds, normalizeSpan, time, tokenText } from '@/services/observationView'
 import type { TaskStatus, SpanSummary, SpanDetail, TaskMetrics } from '@/types'
 type View = 'trace' | 'tokens' | 'tools' | 'errors'
@@ -135,7 +136,20 @@ async function showResult() {
   const id = selectedId.value, version = taskVersion
   resultError.value = ''
   try { const response = await getTaskResult(id); if (disposed || id !== selectedId.value || version !== taskVersion) return; sessionStorage.setItem('tripPlan', JSON.stringify(response.data)); sessionStorage.setItem('tripTaskId', id); await router.push('/result') }
-  catch (e) { if (!disposed && id === selectedId.value && version === taskVersion) resultError.value = errorText(e) }
+  catch (e) {
+    if (disposed || id !== selectedId.value || version !== taskVersion) return
+    const code = (e as { response?: { data?: { detail?: { code?: string } } } }).response?.data?.detail?.code
+    if (code === 'PREVIEW_RESULT_USE_PREVIEW_API') {
+      if (!getPreviewAccessForTask(id)) {
+        try { await recoverLocalPreviewAccess(id) }
+        catch (recoveryError) { if (!disposed && id === selectedId.value && version === taskVersion) resultError.value = errorText(recoveryError); return }
+        if (disposed || id !== selectedId.value || version !== taskVersion) return
+      }
+      await router.push({ path: '/preview', query: { task: id } })
+      return
+    }
+    resultError.value = errorText(e)
+  }
 }
 watch(() => [route.query.task, route.query.view], () => {
   const id = typeof route.query.task === 'string' ? route.query.task : ''

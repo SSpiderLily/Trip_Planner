@@ -44,7 +44,6 @@ from app.services.daily_plan_adapter import DailyPlanGeneratorAdapter
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from app.services.planning_v4_pipeline import PlanningV4Pipeline, PlanningV4PipelineError
 from app.services.planning_v4_rules import default_planning_v4_rules
-from app.services.preview_task_service import BackfillSuperseded
 
 
 def request_fixture(*, departure_query="上海虹桥站"):
@@ -236,27 +235,11 @@ class FakeRouteService:
             "current_context_revision": current_context_revision,
             "only_day_id": only_day_id,
         }
-        from app.services.planning_v4_timing import calculate_plan_timing
 
         return SimpleNamespace(
             draft=draft,
             fact_store=facts,
-            timing=calculate_plan_timing(
-                planning_input, draft, facts,
-                verified_departure_fact_id=verified_departure_fact_id,
-            ),
         )
-
-
-class FakeBackfill:
-    def __init__(self, tracker):
-        self.tracker = tracker
-
-    async def run_async(self, *args, current_revision, **kwargs):
-        revision = current_revision()
-        self.tracker.setdefault("backfill_revisions", []).append(revision)
-        draft = args[1]
-        return SimpleNamespace(status="complete" if revision == draft.revision else "cancelled")
 
 
 class ManualClock:
@@ -275,7 +258,7 @@ class FakeRepair:
 
     async def run_async(
         self, planning_input, draft, facts, candidates, area_hints, task_results,
-        timing, report, *, global_deadline_monotonic,
+        report, *, global_deadline_monotonic,
     ):
         day = planning_input.days[0]
         slot = next(item for item in day.slots if item.period == "morning")
@@ -325,7 +308,6 @@ class FakeRepair:
             candidates=result.candidates,
             area_hints=result.area_hints,
             task_results=result.task_results,
-            timing=timing,
             report=final_report,
             repair_states=final_report.repair_states,
         )
@@ -376,7 +358,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: PartialDispatch(),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
         )
 
@@ -435,7 +416,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: BrokenPartialDispatch(),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
         )
 
         with self.assertRaises(PlanningV4PipelineError) as raised:
@@ -525,7 +505,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: ActualF06Adapter(),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
         )
 
@@ -608,8 +587,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
                     kind="sightseeing",
                     poi_id=fact.poi_id,
                     place_fact_id=fact.fact_id,
-                    duration_s=10800,
-                    duration_source="default",
                 ),) if day.day_id == second_day.day_id else ()),
             ) for day in planning_input.days),
             area_hints=(area,),
@@ -655,16 +632,13 @@ class PlanningV4PipelineTests(unittest.TestCase):
         request = request_fixture()
         facts, endpoint = endpoint_fixture(request)
         tracker = {}
-        current_revision = {"plan-preallocated": 1}
 
         pipeline = PlanningV4Pipeline(
             requirement_interpreter_factory=lambda _timeout: FakeInterpreter(tracker),
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
-            current_revision_lookup=lambda plan_id: current_revision.get(plan_id),
         )
 
         async def run():
@@ -681,9 +655,8 @@ class PlanningV4PipelineTests(unittest.TestCase):
         self.assertEqual(tracker["proposal_request"], request)
         self.assertEqual(result.snapshot.preview.planning_input.request, request)
         self.assertEqual(result.snapshot.preview.planning_input.boundary_facts.effective_return_buffer_s, 0)
-        self.assertEqual(tracker["route_call"]["endpoint_execution"], endpoint)
-        self.assertEqual(tracker["route_call"]["verified_departure_fact_id"], "departure-fact")
-        self.assertEqual(tracker["route_call"]["current_context_revision"], 1)
+        self.assertNotIn("route_call", tracker)
+        self.assertIn("departure-fact", {fact.fact_id for fact in result.snapshot.preview.facts.places})
         self.assertIsNone(tracker["dispatch_contexts"][0].dispatch_scope)
         targeted = tracker["dispatch_contexts"][1]
         self.assertEqual((targeted.context_revision, targeted.base_revision), (2, 1))
@@ -692,16 +665,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
         self.assertEqual(targeted.dispatch_scope.targets[0].day_id, targeted.planning_input.days[0].day_id)
         self.assertEqual(tracker["repair_collection"].stop_reason, "no_progress")
         self.assertIsNotNone(result.route_context)
-        self.assertIsNotNone(result.backfill)
-
-        async def run_backfill():
-            await result.backfill(lambda _progress: None)
-
-        asyncio.run(run_backfill())
-        current_revision["plan-preallocated"] = 2
-        with self.assertRaises(BackfillSuperseded):
-            asyncio.run(run_backfill())
-        self.assertEqual(tracker["backfill_revisions"], [1, 2])
+        self.assertIsNone(result.backfill)
 
     def test_pipeline_repair_calls_adapter_with_day_revision_request_day_id(self):
         request = request_fixture()
@@ -738,7 +702,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: TrackingDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=DayRepairService,
         )
 
@@ -752,7 +715,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
         self.assertTrue(tracker.get("revision_day_ids"), "真实 DayRepairService 必须触发 F06 单日修订回调")
         self.assertTrue(set(tracker["revision_day_ids"]).issubset({day.day_id for day in result.snapshot.preview.draft.days}))
 
-    def test_route_repair_timeout_keeps_revision_and_continues_to_later_day(self):
+    def test_place_repair_continues_without_calling_failing_route_service(self):
         request = request_fixture()
         facts, endpoint = endpoint_fixture(request, run_id="pipeline-route-repair-task")
         tracker = {}
@@ -837,7 +800,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
                     candidate_ref=activity.candidate_ref,
                     slot_id=activity.slot_id,
                     kind=activity.kind,
-                    duration_s=activity.duration_s,
                     requirement_ids=activity.requirement_ids,
                     recommendation_reason=activity.recommendation_reason,
                 ) for activity in current_day.activities if activity.kind != "free_time"]
@@ -857,7 +819,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
                             candidate_ref=candidate.candidate_id,
                             slot_id=added_slot,
                             kind="meal" if candidate.category == "meal" else "sightseeing",
-                            duration_s=3600,
                         ))
                     if matching_candidates:
                         self.tracker["activity_added"] = True
@@ -895,7 +856,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: RepairDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: RevisingDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FailingRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
         )
 
         result = asyncio.run(pipeline.run(
@@ -912,9 +872,8 @@ class PlanningV4PipelineTests(unittest.TestCase):
         later_day_id = day_constraints[first_index + 1].day_id
         first_day = next(day for day in draft.days if day.day_id == first_day_id)
         self.assertEqual(len(first_day.activities), 2)
-        self.assertEqual(tracker["route_day_ids"][0], None)
-        self.assertEqual(tracker["route_day_ids"][1], first_day_id)
-        self.assertEqual(result.snapshot.preview.calculation.current_routes, "failed")
+        self.assertNotIn("route_day_ids", tracker)
+        self.assertEqual(result.snapshot.preview.calculation.current_routes, "pending")
         self.assertIn(later_day_id, tracker["revision_day_ids"])
         for day in tracker["generated_draft"].days:
             if day.day_id != first_day_id:
@@ -922,14 +881,13 @@ class PlanningV4PipelineTests(unittest.TestCase):
                     day.model_dump(mode="json"),
                     next(item for item in draft.days if item.day_id == day.day_id).model_dump(mode="json"),
                 )
-        self.assertGreaterEqual(len(tracker["route_contexts"]), 3)
-        self.assertTrue(tracker["route_contexts"][0].closed)
-        self.assertTrue(tracker["route_contexts"][1].closed)
+        self.assertEqual(len(tracker["route_contexts"]), 1)
+        self.assertFalse(tracker["route_contexts"][0].closed)
         self.assertIs(result.route_context, tracker["route_contexts"][-1])
         target_legs = [leg for leg in draft.legs if leg.day_id == first_day_id]
         self.assertTrue(target_legs)
         self.assertTrue(all(
-            mode.status == "error" and mode.error_category == "timeout"
+            mode.status == "pending" and mode.error_category is None
             for leg in target_legs for mode in leg.mode_results
         ))
 
@@ -1016,7 +974,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             ),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
         )
 
         result = asyncio.run(pipeline.run(
@@ -1029,7 +986,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
         self.assertEqual(result.snapshot.preview.draft.plan_id, "plan-partial-failure")
         self.assertIn(extra_fact, result.snapshot.preview.facts.places)
 
-    def test_route_timeout_replaces_cancelled_context_for_repair_and_backfill(self):
+    def test_no_route_work_is_needed_for_empty_repaired_draft(self):
         request = request_fixture()
         facts, endpoint = endpoint_fixture(request, run_id="pipeline-route-timeout-task")
         tracker = {}
@@ -1043,7 +1000,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: TimeoutRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
         )
 
@@ -1054,12 +1010,13 @@ class PlanningV4PipelineTests(unittest.TestCase):
             progress=lambda _update: None,
         ))
 
-        self.assertEqual(result.snapshot.preview.calculation.current_routes, "failed")
-        self.assertEqual(result.snapshot.preview.calculation.alternative_backfill, "pending")
+        self.assertEqual(result.snapshot.preview.calculation.current_routes, "completed")
+        self.assertEqual(result.initial_route_day_ids, ())
+        self.assertEqual(result.snapshot.preview.calculation.alternative_backfill, "not_required")
         self.assertIsNotNone(result.route_context)
-        self.assertIsNotNone(result.backfill)
-        self.assertGreaterEqual(len(tracker["route_contexts"]), 2)
-        self.assertTrue(tracker["route_contexts"][0].closed)
+        self.assertIsNone(result.backfill)
+        self.assertEqual(len(tracker["route_contexts"]), 1)
+        self.assertFalse(tracker["route_contexts"][0].closed)
         self.assertIs(result.route_context, tracker["route_contexts"][-1])
         self.assertFalse(result.route_context.cancel_event.is_set())
 
@@ -1119,13 +1076,11 @@ class PlanningV4PipelineTests(unittest.TestCase):
                 activity_id="route-activity-a", candidate_ref="candidate-a",
                 slot_id=slots["morning"].slot_id, kind="sightseeing",
                 poi_id=place_a.poi_id, place_fact_id=place_a.fact_id,
-                duration_s=3600, duration_source="default",
             ),
             DraftActivity(
                 activity_id="route-activity-b", candidate_ref="candidate-b",
                 slot_id=slots["afternoon"].slot_id, kind="sightseeing",
                 poi_id=place_b.poi_id, place_fact_id=place_b.fact_id,
-                duration_s=3600, duration_source="default",
             ),
         )
         draft = PlanDraft(
@@ -1140,7 +1095,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
                 activities=activities if day.day_id == first_day.day_id else (),
             ) for day in planning_input.days),
         )
-        failed, _ = PlanningV4Pipeline._pending_routes(
+        failed = PlanningV4Pipeline._pending_routes(
             planning_input,
             draft,
             FactStore(sources=(source_a, source_b), places=(place_a, place_b)),
@@ -1218,7 +1173,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
         )
         self.assertEqual(scope.targets[0].area_hint_ids, (area.area_hint_id,))
 
-    def test_route_context_closes_if_ready_progress_callback_fails(self):
+    def test_route_context_closes_if_final_progress_callback_fails(self):
         request = request_fixture()
         facts, endpoint = endpoint_fixture(request)
         tracker = {}
@@ -1227,18 +1182,17 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
         )
 
         async def progress(update):
-            if update.stage == "ready":
+            if update.stage == "cost" and update.completed == 1:
                 raise RuntimeError("progress sink unavailable")
 
         with self.assertRaises(PlanningV4PipelineError):
             asyncio.run(pipeline.run(
                 request,
-                task_id="pipeline-progress-failure-task",
+                task_id="pipeline-task",
                 plan_id="plan-progress-failure",
                 progress=progress,
             ))
@@ -1256,9 +1210,7 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=lambda _timeout: FakeDispatch(tracker, facts, endpoint),
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker, clock),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
-            current_revision_lookup=lambda _plan_id: 1,
             clock=clock,
         )
 
@@ -1305,7 +1257,6 @@ class PlanningV4PipelineTests(unittest.TestCase):
             dispatch_service_factory=dispatch_factory,
             daily_plan_adapter_factory=lambda _timeout: FakeDailyPlanAdapter(tracker),
             current_route_service_factory=lambda: FakeRouteService(tracker),
-            route_backfill_service_factory=lambda: FakeBackfill(tracker),
             day_repair_service_factory=lambda **callbacks: FakeRepair(tracker, **callbacks),
         )
 

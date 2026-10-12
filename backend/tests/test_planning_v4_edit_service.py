@@ -18,7 +18,6 @@ from app.models.planning_v4.plan import (
 )
 from app.services.current_route_service import _select_leg
 from app.services.planning_v4_edit_service import PlanningV4EditError, PlanningV4EditService
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import validate_preview
 from app.services.current_route_service import build_pending_route_legs_for_day
@@ -62,17 +61,8 @@ def _prepare_preview(preview, *, availability_fact_id=None):
 def _with_recalculated_report(preview, *, draft=None, facts=None):
     draft = draft or preview.draft
     facts = facts or preview.facts
-    timing = calculate_plan_timing(
-        preview.planning_input, draft, facts,
-        verified_departure_fact_id=next((
-            endpoint.reference_id
-            for leg in draft.legs
-            for endpoint in (leg.from_endpoint, leg.to_endpoint)
-            if endpoint.kind == "departure"
-        ), None),
-    )
     report = validate_daily_plan(
-        preview.planning_input, draft, facts, preview.candidates, timing,
+        preview.planning_input, draft, facts, preview.candidates,
         repair_states=preview.validation.repair_states,
     )
     pending_ids = tuple(
@@ -90,7 +80,7 @@ def _with_recalculated_report(preview, *, draft=None, facts=None):
         "draft": draft,
         "facts": facts,
         "validation": report,
-        "day_summaries": build_day_summaries(preview.planning_input, draft, timing),
+        "day_summaries": build_day_summaries(preview.planning_input, draft, facts),
         "calculation": calculation,
     })
     validate_preview(prepared)
@@ -158,8 +148,8 @@ class PlanningV4EditServiceTests(unittest.TestCase):
         self.assertEqual(len({item.activity_id for item in repeated}), 2)
         added = next(item for item in repeated if item.activity_source == "user")
         self.assertEqual(added.slot_id, "synthetic-2-afternoon")
-        self.assertEqual(added.duration_s, preview.planning_input.rules.sightseeing_default_s)
-        self.assertEqual(added.duration_source, "default")
+        self.assertNotIn("duration_s", added.model_dump())
+        self.assertNotIn("duration_source", added.model_dump())
         self.assertLess(
             next(index for index, item in enumerate(day.activities) if item.slot_id == "synthetic-2-afternoon"),
             next(index for index, item in enumerate(day.activities) if item.slot_id == "synthetic-2-dinner"),
@@ -236,7 +226,7 @@ class PlanningV4EditServiceTests(unittest.TestCase):
         )
         validate_preview(updated)
 
-    def test_selected_mode_becomes_preference_until_target_day_recalculation(self):
+    def test_selected_mode_uses_existing_option_without_marking_that_leg_pending(self):
         planning_input, facts, candidates, _, preview = make_full_baseline_preview()
         day = next(item for item in preview.draft.days if item.day_id == "synthetic-day-2")
         # 该固定夹具的可用路线是 hotel -> morning；去掉更早的早餐活动，使其成为当前拓扑边。
@@ -265,11 +255,11 @@ class PlanningV4EditServiceTests(unittest.TestCase):
         self.assertEqual(execution.changed_activity_ids, ())
         pending = next(item for item in updated.draft.legs if item.day_id == leg.day_id)
 
-        self.assertIsNone(pending.selected_mode)
-        self.assertIsNone(pending.selected_option_id)
+        self.assertEqual(pending.selected_mode, "transit")
+        self.assertEqual(pending.selected_option_id, "synthetic-route-option")
         self.assertEqual(pending.preferred_mode, "transit")
         self.assertEqual(pending.selection_source, "user")
-        self.assertIn(pending.leg_id, updated.calculation.pending_leg_ids)
+        self.assertNotIn(pending.leg_id, updated.calculation.pending_leg_ids)
 
         source = FactSource(
             tool_call_id="test-walking-route", tool_name="maps_direction_walking_integrated_by_coordinates",

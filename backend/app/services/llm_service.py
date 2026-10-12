@@ -1,10 +1,13 @@
 """LLM服务模块"""
 
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 from dataclasses import dataclass
 
 from hello_agents import HelloAgentsLLM
 from hello_agents.core.exceptions import HelloAgentsException
 from ..config import get_settings
+from .observation_service import record_model_diagnostics
+from .model_diagnostics import completion_diagnostics, provider_error_diagnostics
 
 
 @dataclass(frozen=True)
@@ -26,20 +29,23 @@ class UsageAwareLLM(HelloAgentsLLM):
         try:
             client = self._client
             client_options = {}
-            if request_timeout is not None:
+            if not timeouts_enabled():
+                client_options['timeout'] = None  # 显式关闭SDK默认HTTP超时
+            elif request_timeout is not None:
                 client_options['timeout'] = request_timeout
             if max_retries is not None:
                 client_options['max_retries'] = max_retries
             if client_options:
                 client = client.with_options(**client_options)
 
+            # 不注入项目或 SDK 默认输出上限；未指定的参数直接省略。
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=kwargs.get('temperature', self.temperature),
-                max_tokens=kwargs.get('max_tokens', self.max_tokens),
-                **{key: value for key, value in kwargs.items() if key not in ('temperature', 'max_tokens')}
+                **{key: value for key, value in kwargs.items() if key != 'temperature' and value is not None}
             )
+            record_model_diagnostics(completion_diagnostics(response))
             choice = response.choices[0]
             return LLMCompletion(
                 text=choice.message.content,
@@ -47,7 +53,8 @@ class UsageAwareLLM(HelloAgentsLLM):
                 finish_reason=getattr(choice, 'finish_reason', None),
             )
         except Exception as exc:
-            raise HelloAgentsException(f"LLM调用失败: {str(exc)}")
+            record_model_diagnostics(provider_error_diagnostics(exc))
+            raise HelloAgentsException("LLM调用失败") from exc
 
     def invoke_with_metadata(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
         """返回文本、token用量和供应商结束原因，不暴露完整 SDK 响应对象。"""

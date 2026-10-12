@@ -20,8 +20,12 @@ except ValueError:
     AMAP_HTTP_TIMEOUT_SECONDS = 25.0
 
 
+if os.getenv("AMAP_HTTP_TIMEOUT_ENABLED", "true").lower() == "false":
+    AMAP_HTTP_TIMEOUT_SECONDS = None
+
+
 def _http_get(url: str, **kwargs):
-    """Make every upstream HTTP request bounded by the configured tool timeout."""
+    """Apply the configured upstream HTTP timeout policy."""
     kwargs.setdefault("timeout", AMAP_HTTP_TIMEOUT_SECONDS)
     try:
         return requests.get(url, **kwargs)

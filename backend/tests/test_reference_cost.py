@@ -126,8 +126,6 @@ def activity(activity_id: str, kind: str, poi_id: str, fact_id: str, slot_id: st
         kind=kind,
         poi_id=poi_id,
         place_fact_id=f"fact-{fact_id}",
-        duration_s=3600,
-        duration_source="model",
     )
 
 

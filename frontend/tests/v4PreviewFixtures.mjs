@@ -25,9 +25,9 @@ function costEntry({ kind, activityId, poiId, name, amount, status = 'known' }) 
 
 export function mixedSyntheticEnvelope() {
   const activities = [
-    { activity_id: 'activity-sight-1', candidate_ref: 'candidate-selected-sight', slot_id: slotId('morning'), kind: 'sightseeing', poi_id: 'poi-sight-1', place_fact_id: 'fact-poi-sight-1', duration_s: 5400, duration_source: 'default', requirement_ids: [], recommendation_reason: '步行游览街区。' },
-    { activity_id: 'activity-meal-1', candidate_ref: null, slot_id: slotId('lunch'), kind: 'meal', poi_id: 'poi-meal-1', place_fact_id: 'fact-poi-meal-1', duration_s: 3600, duration_source: 'default', requirement_ids: [], recommendation_reason: '午餐安排。' },
-    { activity_id: 'activity-sight-2', candidate_ref: null, slot_id: slotId('afternoon'), kind: 'sightseeing', poi_id: 'poi-sight-2', place_fact_id: 'fact-poi-sight-2', duration_s: 7200, duration_source: 'model', requirement_ids: [], recommendation_reason: '下午游览。' },
+    { activity_id: 'activity-sight-1', candidate_ref: 'candidate-selected-sight', slot_id: slotId('morning'), kind: 'sightseeing', poi_id: 'poi-sight-1', place_fact_id: 'fact-poi-sight-1', requirement_ids: [], recommendation_reason: '步行游览街区。' },
+    { activity_id: 'activity-meal-1', candidate_ref: null, slot_id: slotId('lunch'), kind: 'meal', poi_id: 'poi-meal-1', place_fact_id: 'fact-poi-meal-1', requirement_ids: [], recommendation_reason: '午餐安排。' },
+    { activity_id: 'activity-sight-2', candidate_ref: null, slot_id: slotId('afternoon'), kind: 'sightseeing', poi_id: 'poi-sight-2', place_fact_id: 'fact-poi-sight-2', requirement_ids: [], recommendation_reason: '下午游览。' },
   ]
   const places = [
     { fact_id: 'fact-poi-sight-1', poi_id: 'poi-sight-1', name: '外滩', location: point(121.49, 31.24), address: '中山东一路', business_area: '外滩', source_refs: ['source-1'], field_sources: { cost: 'source-1' }, cost: { value: '50', unit: 'per_person_reference' } },
@@ -99,7 +99,6 @@ export function mixedSyntheticEnvelope() {
     { issue_id: 'issue-must-visit', code: 'must_visit_unplanned', category: 'missing_arrangement', severity: 'error', scope: 'plan', day_id: null, target_id: 'must-visit-1', message: '必去要求“外滩夜景”尚未核实。' },
   ]
   const daySlots = requiredSlots.map(period => ({ slot_id: slotId(period), day_id: dayId, period, eligibility: period === 'breakfast' ? 'conditional' : 'required', condition_reason: period === 'breakfast' ? '实际抵达时刻未核实' : null }))
-  const returnTiming = { status: 'unverified', departure_poi_id: null, departure_at: '2026-11-05T19:00:00+08:00', deadline_at: '2026-11-05T18:00:00+08:00', latest_activity_end_at: null, estimated_arrival_at: null, earliest_possible_arrival_at: null, route_leg_id: 'leg-return', travel_s: null, buffer_s: 3600, usable_s: null, optimistic_usable_s: 7200, overrun_s: 1800, overrun_is_lower_bound: true, unknown_reasons: ['departure_endpoint_not_provided', 'return_route_missing'], notes: ['离开地点和返程路线尚未核实。'] }
   const entries = [
     costEntry({ kind: 'sightseeing', activityId: 'activity-sight-1', poiId: 'poi-sight-1', name: '外滩', amount: '50' }),
     costEntry({ kind: 'meal', activityId: 'activity-meal-1', poiId: 'poi-meal-1', name: '午市小馆', amount: null, status: 'unknown' }),
@@ -137,9 +136,9 @@ export function mixedSyntheticEnvelope() {
       },
       candidates,
       validation: { issues, days: [{ day_id: dayId, completeness: 'incomplete', feasibility: 'unverified', issue_ids: issues.filter(issue => issue.day_id === dayId).map(issue => issue.issue_id) }] },
+      day_summaries: [{ day_id: dayId, known_travel_s: 1800, unknown_leg_ids: [], cost_status: "available", known_cost_subtotal: "90" }],
       calculation: { based_on_revision: 1, calculation_id: 'synthetic-calc', current_routes: 'completed', alternative_backfill: 'completed', pending_leg_ids: [] },
     },
-    timing: { plan_id: 'synthetic-mixed-plan', based_on_revision: 1, days: [{ day_id: dayId, activities: activities.map((activity, index) => ({ activity_id: activity.activity_id, start_at: `2026-11-05T${String(9 + index * 2).padStart(2, '0')}:00:00+08:00`, end_at: `2026-11-05T${String(10 + index * 2).padStart(2, '0')}:30:00+08:00`, duration_s: activity.duration_s, status: 'estimated', unknown_reason: null, note: null })), summary: { day_id: dayId, known_stay_s: 16200, known_travel_s: 1800, unknown_leg_ids: [], feasibility: 'verified' }, scheduling_decision: 'scheduled', elapsed_s: 19800, unknown_transitions: [], return_timing: returnTiming }] },
     cost: { request_id: 'synthetic-request', plan_id: 'synthetic-mixed-plan', based_on_revision: 1, status: 'known_partial', known_sightseeing_meal_per_person_subtotal: '90', days: [{ day_id: dayId, day_date: '2026-11-05', status: 'known_partial', known_sightseeing_meal_per_person_subtotal: '90', entries, lodging: costEntry({ kind: 'lodging', poiId: 'poi-hotel', name: '滨江酒店', amount: '360' }) }], unit: 'per_person_reference', scope: 'sightseeing_and_meals_only' },
   }
   return envelope
@@ -148,14 +147,10 @@ export function mixedSyntheticEnvelope() {
 export function shortDepartureSyntheticEnvelope() {
   const envelope = mixedSyntheticEnvelope()
   const day = envelope.preview.draft.days[0]
-  const dayTiming = envelope.timing.days[0]
   const dayValidation = envelope.preview.validation.days[0]
   const required = envelope.preview.planning_input.days[0].slots.find(slot => slot.period === 'evening')
   required.eligibility = 'required'
   day.unfilled_slot_ids = [required.slot_id]
   dayValidation.completeness = 'not_required'
-  dayTiming.scheduling_decision = 'not_scheduled_insufficient_time'
-  dayTiming.return_timing.status = 'conflict'
-  dayTiming.return_timing.unknown_reasons = ['insufficient_departure_day_time', 'departure_endpoint_not_provided']
   return envelope
 }

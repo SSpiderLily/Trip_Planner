@@ -17,14 +17,8 @@ from fastapi.testclient import TestClient
 from app.api.routes.trip import router
 from app.models.planning_v4 import (
     FactSource,
-    FactStore,
     MapCoordinate,
     PlaceFact,
-    RouteFact,
-    RouteLeg,
-    RouteModeResult,
-    RouteOption,
-    LegEndpoint,
 )
 from app.models.planning_v4.plan import AddActivity, EditCommand
 from app.models.planning_v4_preview import DestinationSelectionRequest
@@ -36,7 +30,6 @@ from app.services.current_route_service import (
 from app.services.destination_candidate_repository import DestinationCandidateRepository
 from app.services.destination_search_service import DestinationSearchService
 from app.services.planning_v4_preview_edit_service import PlanningV4PreviewEditService
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import validate_preview
 from app.services.preview_repository import PreviewRepository
@@ -136,89 +129,13 @@ class DepartureEditPipeline(EditPipeline):
                 "city": departure_source.tool_call_id,
             },
         )
-        last_day = preview.draft.days[-1]
-        last_activity = next(
-            activity for activity in reversed(last_day.activities)
-            if activity.kind != "free_time"
-        )
-        origin = next(place for place in preview.facts.places if place.fact_id == last_activity.place_fact_id)
-        walking_source = FactSource(
-            tool_call_id="edit-test-walking-return-source",
-            tool_name="maps_direction_walking",
-            api_version="v4",
-            queried_at=datetime.fromisoformat("2026-10-10T08:00:00+08:00"),
-            effective_params={},
-        )
-        bicycle_source = FactSource(
-            tool_call_id="edit-test-bicycle-return-source",
-            tool_name="maps_bicycling_by_coordinates",
-            api_version="v4",
-            queried_at=datetime.fromisoformat("2026-10-10T08:00:00+08:00"),
-            effective_params={},
-        )
-        walking_fact = RouteFact(
-            fact_id="edit-test-walking-return-fact",
-            origin_poi_id=origin.poi_id,
-            destination_poi_id=departure_fact.poi_id,
-            origin=origin.location,
-            destination=departure_fact.location,
-            mode="walking",
-            status="available",
-            options=(RouteOption(
-                option_id="edit-test-walking-return-option",
-                duration_s=1800,
-                geometry_status="missing",
-            ),),
-            source=walking_source,
-        )
-        bicycle_fact = walking_fact.model_copy(update={
-            "fact_id": "edit-test-bicycle-return-fact",
-            "mode": "bicycling",
-            "options": (RouteOption(
-                option_id="edit-test-bicycle-return-option",
-                duration_s=1200,
-                geometry_status="missing",
-            ),),
-            "source": bicycle_source,
-        }, deep=True)
-        return_leg = RouteLeg(
-            leg_id="edit-test-return-leg",
-            plan_revision=preview.draft.revision,
-            day_id=last_day.day_id,
-            from_endpoint=LegEndpoint(
-                kind="activity", reference_id=last_activity.activity_id, poi_id=origin.poi_id,
-            ),
-            to_endpoint=LegEndpoint(
-                kind="departure", reference_id=departure_fact.fact_id, poi_id=departure_fact.poi_id,
-            ),
-            mode_results=(
-                RouteModeResult(
-                    mode="walking", status="available", route_fact_id=walking_fact.fact_id,
-                    option_ids=("edit-test-walking-return-option",),
-                ),
-                RouteModeResult(
-                    mode="bicycling", status="available", route_fact_id=bicycle_fact.fact_id,
-                    option_ids=("edit-test-bicycle-return-option",),
-                ),
-            ),
-            selected_mode="walking",
-            selected_option_id="edit-test-walking-return-option",
-            selection_source="backend_fastest_available",
-        )
         facts = preview.facts.model_copy(update={
-            "sources": (*preview.facts.sources, departure_source, walking_source, bicycle_source),
+            "sources": (*preview.facts.sources, departure_source),
             "places": (*preview.facts.places, departure_fact),
-            "routes": (*preview.facts.routes, walking_fact, bicycle_fact),
         }, deep=True)
-        draft = preview.draft.model_copy(update={
-            "legs": (*preview.draft.legs, return_leg),
-        }, deep=True)
-        timing = calculate_plan_timing(
-            planning_input, draft, facts,
-            verified_departure_fact_id=departure_fact.fact_id,
-        )
+        draft = preview.draft
         report = validate_daily_plan(
-            planning_input, draft, facts, preview.candidates, timing,
+            planning_input, draft, facts, preview.candidates,
             repair_states=preview.validation.repair_states,
         )
         updated = preview.model_copy(update={
@@ -226,11 +143,11 @@ class DepartureEditPipeline(EditPipeline):
             "draft": draft,
             "facts": facts,
             "validation": report,
-            "day_summaries": build_day_summaries(planning_input, draft, timing),
+            "day_summaries": build_day_summaries(planning_input, draft, facts),
         }, deep=True)
         validate_preview(updated)
         return PreviewPipelineResult(
-            snapshot=result.snapshot.model_copy(update={"preview": updated, "timing": timing}, deep=True),
+            snapshot=result.snapshot.model_copy(update={"preview": updated}, deep=True),
             route_context=result.route_context,
             backfill=result.backfill,
         )
@@ -244,7 +161,7 @@ class FakeRouteService:
 
     async def run_async(
         self, planning_input, draft, facts, *, verified_departure_fact_id=None,
-        route_context=None, only_day_id=None,
+        route_context=None, only_day_id=None, only_leg_ids=None,
     ):
         self.calls.append(only_day_id)
         if self.gate is not None and len(self.calls) == 1:
@@ -254,7 +171,7 @@ class FakeRouteService:
         legs = []
         leg_results = []
         for leg in draft.legs:
-            if leg.day_id != only_day_id:
+            if leg.day_id != only_day_id or (only_leg_ids is not None and leg.leg_id not in only_leg_ids):
                 legs.append(leg)
                 continue
             modes = tuple(
@@ -283,7 +200,6 @@ class FakeRouteService:
                     ) for mode in pending_modes),
                 ))
         updated_draft = draft.model_copy(update={"legs": tuple(legs)}, deep=True)
-        timing = calculate_plan_timing(planning_input, updated_draft, facts)
         return CurrentRouteExecution(
             plan_id=draft.plan_id,
             request_id=draft.request_id,
@@ -291,7 +207,6 @@ class FakeRouteService:
             status="complete",
             draft=updated_draft,
             fact_store=facts,
-            timing=timing,
             leg_results=tuple(leg_results),
         )
 
@@ -318,7 +233,7 @@ class CancellingRouteService(FakeRouteService):
         return context
 
     async def run_async(self, planning_input, draft, facts, *, route_context=None,
-                        verified_departure_fact_id=None, only_day_id=None):
+                        verified_departure_fact_id=None, only_day_id=None, only_leg_ids=None):
         self.contexts_seen.append(route_context)
         if only_day_id == "synthetic-day-1" and len(self.calls) == 0:
             self.calls.append(only_day_id)
@@ -330,7 +245,7 @@ class CancellingRouteService(FakeRouteService):
             facts,
             route_context=route_context,
             verified_departure_fact_id=verified_departure_fact_id,
-            only_day_id=only_day_id,
+            only_day_id=only_day_id, only_leg_ids=only_leg_ids,
         )
 
 
@@ -341,7 +256,7 @@ class FailingContextFactoryRouteService(FakeRouteService):
 
 class ObservedMcpRouteService(FakeRouteService):
     async def run_async(self, planning_input, draft, facts, *, verified_departure_fact_id=None,
-                        route_context=None, only_day_id=None):
+                        route_context=None, only_day_id=None, only_leg_ids=None):
         with span("tool.mcp_fixture_route", "tool", {
             "tool_name": "maps_direction_walking",
             "day_id": only_day_id,
@@ -353,7 +268,7 @@ class ObservedMcpRouteService(FakeRouteService):
                 facts,
                 verified_departure_fact_id=verified_departure_fact_id,
                 route_context=route_context,
-                only_day_id=only_day_id,
+                only_day_id=only_day_id, only_leg_ids=only_leg_ids,
             )
 
 
@@ -364,93 +279,20 @@ class DepartureAwareRouteService(FakeRouteService):
 
     async def run_async(
         self, planning_input, draft, facts, *, verified_departure_fact_id=None,
-        route_context=None, only_day_id=None,
+        route_context=None, only_day_id=None, only_leg_ids=None,
     ):
-        self.calls.append(only_day_id)
         self.verified_departure_ids.append(verified_departure_fact_id)
-        places_by_poi = {place.poi_id: place for place in facts.places}
         target_legs = [leg for leg in draft.legs if leg.day_id == only_day_id]
-        routes = list(facts.routes)
-        sources = list(facts.sources)
-        updated_legs = []
-        for leg in draft.legs:
-            if leg.day_id != only_day_id:
-                updated_legs.append(leg)
-                continue
-            if leg.to_endpoint.kind == "departure":
-                origin = places_by_poi[leg.from_endpoint.poi_id]
-                destination = places_by_poi[leg.to_endpoint.poi_id]
-                source = FactSource(
-                    tool_call_id="edit-test-requeried-return-source",
-                    tool_name="maps_bicycling_by_coordinates",
-                    api_version="v4",
-                    queried_at=datetime.fromisoformat("2026-10-10T08:00:00+08:00"),
-                    effective_params={},
-                )
-                route = RouteFact(
-                    fact_id="edit-test-requeried-return-fact",
-                    origin_poi_id=origin.poi_id,
-                    destination_poi_id=destination.poi_id,
-                    origin=origin.location,
-                    destination=destination.location,
-                    mode="bicycling",
-                    status="available",
-                    options=(RouteOption(
-                        option_id="edit-test-requeried-return-option",
-                        duration_s=1200,
-                        geometry_status="missing",
-                    ),),
-                    source=source,
-                )
-                sources.append(source)
-                routes.append(route)
-                mode_results = tuple(
-                    RouteModeResult(
-                        mode=mode.mode,
-                        status="available" if mode.mode == "bicycling" else "error",
-                        route_fact_id=route.fact_id if mode.mode == "bicycling" else None,
-                        option_ids=("edit-test-requeried-return-option",) if mode.mode == "bicycling" else (),
-                        error_category=None if mode.mode == "bicycling" else "provider_error",
-                    ) if mode.status == "pending" else mode
-                    for mode in leg.mode_results
-                )
-                updated_legs.append(leg.model_copy(update={
-                    "mode_results": mode_results,
-                    "selected_mode": "bicycling",
-                    "selected_option_id": "edit-test-requeried-return-option",
-                    "selection_source": "user",
-                }, deep=True))
-            else:
-                updated_legs.append(leg.model_copy(update={
-                    "mode_results": tuple(
-                        mode.model_copy(update={
-                            "status": "error", "route_fact_id": None,
-                            "option_ids": (), "error_category": "provider_error",
-                        }) if mode.status == "pending" else mode
-                        for mode in leg.mode_results
-                    ),
-                }, deep=True))
-        self.assert_only_target_day_queried(target_legs, only_day_id)
-        updated_draft = draft.model_copy(update={"legs": tuple(updated_legs)}, deep=True)
-        updated_facts = facts.model_copy(update={"sources": tuple(sources), "routes": tuple(routes)}, deep=True)
-        timing = calculate_plan_timing(
-            planning_input, updated_draft, updated_facts,
+        if not target_legs or any(
+            endpoint.kind == "departure"
+            for leg in target_legs for endpoint in (leg.from_endpoint, leg.to_endpoint)
+        ):
+            raise AssertionError("编辑只能查询目标日住处起点及当前相邻活动")
+        return await super().run_async(
+            planning_input, draft, facts,
             verified_departure_fact_id=verified_departure_fact_id,
+            route_context=route_context, only_day_id=only_day_id, only_leg_ids=only_leg_ids,
         )
-        return CurrentRouteExecution(
-            plan_id=draft.plan_id,
-            request_id=draft.request_id,
-            based_on_revision=draft.revision,
-            status="complete",
-            draft=updated_draft,
-            fact_store=updated_facts,
-            timing=timing,
-        )
-
-    @staticmethod
-    def assert_only_target_day_queried(target_legs, day_id):
-        if not target_legs or any(leg.day_id != day_id for leg in target_legs):
-            raise AssertionError("F08 test double received an invalid day scope")
 
 
 class PlanningV4PreviewEditApiTest(unittest.TestCase):
@@ -733,7 +575,7 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
             self.assertEqual(accepted_edit["envelope"]["plan_revision"], 2)
             self.assertEqual(accepted_edit["job"]["affected_day_ids"], ["synthetic-day-2"])
             self.assertEqual(
-                accepted_edit["envelope"]["timing"]["based_on_revision"], 2,
+                accepted_edit["envelope"]["cost"]["based_on_revision"], 2,
             )
             self.assertEqual(
                 accepted_edit["envelope"]["cost"]["based_on_revision"], 2,
@@ -776,7 +618,7 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
             )
             self.assertEqual(wrong_bearer.status_code, 404)
 
-    def test_departure_day_edit_retains_verified_return_endpoint_and_buffer(self):
+    def test_departure_day_edit_queries_neighbors_without_return_and_retains_input_buffer(self):
         routes = DepartureAwareRouteService()
         _, client = self.make_client(routes, pipeline=DepartureEditPipeline())
         with client:
@@ -785,52 +627,41 @@ class PlanningV4PreviewEditApiTest(unittest.TestCase):
             }, deep=True)
             accepted, headers, original = self.submit_ready(client, departure_request)
             task_id = accepted["task_id"]
-            initial_return = next(
-                item for item in original["timing"]["days"]
-                if item["day_id"] == "synthetic-day-3"
-            )["return_timing"]
-            self.assertEqual(initial_return["buffer_s"], 3600)
-            self.assertEqual(initial_return["travel_s"], 1800)
+            self.assertNotIn("timing", original)
+            self.assertEqual(original["preview"]["planning_input"]["rules"]["return_buffer_default_s"], 3600)
 
             response = client.post(
                 f"/api/trip/v4/tasks/{task_id}/edits",
                 json={
-                    "command": EditCommand.model_validate({
-                        "plan_id": original["plan_id"],
-                        "day_id": "synthetic-day-3",
-                        "base_revision": original["plan_revision"],
-                        "command_id": "change-departure-return-mode",
-                        "operations": [{
-                            "type": "select_leg_mode",
-                            "day_id": "synthetic-day-3",
-                            "leg_id": "edit-test-return-leg",
-                            "mode": "bicycling",
-                            "option_id": "edit-test-bicycle-return-option",
-                        }],
-                    }).model_dump(mode="json"),
+                    "command": self.add_command(
+                        original, day_id="synthetic-day-3", slot_id="synthetic-3-afternoon",
+                        command_id="add-departure-day-neighbor",
+                    ).model_dump(mode="json"),
                     "expected_store_version": original["store_version"],
                 },
                 headers=headers,
             )
             self.assertEqual(response.status_code, 202, response.text)
-            pending_return = next(
-                item for item in response.json()["envelope"]["timing"]["days"]
-                if item["day_id"] == "synthetic-day-3"
-            )["return_timing"]
-            self.assertEqual(pending_return["buffer_s"], 3600)
+            self.assertNotIn("timing", response.json()["envelope"])
 
             result = self.wait_job(
                 client, task_id, headers, response.json()["job"]["calculation_id"],
             )
             self.assertEqual(result["job"]["status"], "failed")
-            self.assertEqual(routes.verified_departure_ids, ["edit-test-departure-fact"])
-            final_return = next(
-                item for item in result["envelope"]["timing"]["days"]
-                if item["day_id"] == "synthetic-day-3"
-            )["return_timing"]
-            self.assertEqual(final_return["buffer_s"], 3600)
-            self.assertEqual(final_return["travel_s"], 1200)
-            self.assertEqual(final_return["departure_poi_id"], "edit-test-departure-poi")
+            self.assertEqual(routes.verified_departure_ids, [None])
+            final_preview = result["envelope"]["preview"]
+            self.assertNotIn("timing", result["envelope"])
+            self.assertTrue(any(
+                place["fact_id"] == "edit-test-departure-fact"
+                for place in final_preview["facts"]["places"]
+            ))
+            self.assertTrue(final_preview["draft"]["legs"])
+            self.assertFalse(any(
+                endpoint["kind"] == "departure"
+                for leg in final_preview["draft"]["legs"]
+                for endpoint in (leg["from_endpoint"], leg["to_endpoint"])
+            ))
+            self.assertEqual(final_preview["planning_input"]["rules"]["return_buffer_default_s"], 3600)
 
     def test_edit_route_mcp_spans_are_bound_to_originating_task(self):
         _, client = self.make_client(ObservedMcpRouteService())

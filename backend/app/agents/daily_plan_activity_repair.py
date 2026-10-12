@@ -23,7 +23,6 @@ class ActivityReplacement(ContractModel):
 
     candidate_ref: str = Field(min_length=1)
     kind: Literal["sightseeing", "meal"]
-    duration_s: int | None = Field(default=None, ge=0)
     requirement_ids: tuple[str, ...] = ()
 
 
@@ -113,7 +112,6 @@ _ACTIVITY_STRUCTURE_CODE_BY_FIELD = {
     "candidate_ref": "candidate_reference_invalid",
     "slot_id": "invalid_activity_structure",
     "kind": "invalid_activity_kind",
-    "duration_s": "invalid_duration",
     "requirement_ids": "requirement_reference_invalid",
     "recommendation_reason": "invalid_activity_structure",
 }
@@ -135,7 +133,6 @@ _REFERENCE_CODE_MAP = {
 _REFERENCE_ERROR_GROUPS = {
     "missing_candidate_for_place": "地点活动必须引用一个当前有效候选；没有合适候选时将该项标记为缺项",
     "free_time_with_candidate": "free_time 不得引用POI候选；地点活动必须使用required_kind指定的类型",
-    "invalid_duration": "duration_s 必须是非负整数秒；不能确认时省略该字段",
     "invalid_activity_kind": "kind 必须与时段匹配；具体类型见required_kind",
     "unknown_candidate": "candidate_ref 不在当前已核实候选中；只能从本目标列出的候选中选择",
     "candidate_wrong_category": "候选类别与required_kind不一致；只能从本目标列出的候选中选择",
@@ -436,12 +433,11 @@ def _structural_reasons(raw_activity: dict, exc: ValidationError) -> tuple[str, 
                 reasons.add("missing_candidate_for_place")
                 continue
         reason = _ACTIVITY_STRUCTURE_CODE_BY_FIELD.get(field)
-        if field == "candidate_ref" and raw_activity.get("kind") in {"sightseeing", "meal"}:
+        if (field == "candidate_ref" and raw_activity.get("kind") in {"sightseeing", "meal"}
+                and raw_activity.get("candidate_ref") is None):
             reason = "missing_candidate_for_place"
         if field == "candidate_ref" and raw_activity.get("kind") == "free_time":
             reason = "free_time_with_candidate"
-        if field == "duration_s" and error.get("type") in {"greater_than_equal", "int_type", "int_from_float"}:
-            reason = "invalid_duration"
         if field == "kind":
             reason = "invalid_activity_kind"
         if reason is None and error.get("type") == "extra_forbidden":

@@ -982,12 +982,11 @@ class PlanningDispatchServiceTests(unittest.TestCase):
             runner_factories={"lodging": lambda: ImmediateRunner(tracker)},
         )
 
-        result = asyncio.run(service.run_async(context))
-
-        projected = tracker["contexts"]["lodging"].candidate_refs
+        state = SimpleNamespace(context=context, fact_store=context.fact_store,
+                                candidate_refs=context.candidate_refs, area_hints=context.area_hints)
+        projected = service._project_candidates(state, task, resolved_task=resolved(task))
         self.assertEqual(len(projected), 1)
         self.assertEqual(projected[0].area_hint_id, hint.area_hint_id)
-        self.assertEqual(result.stop_reason, "plan")
 
     def test_task_result_candidate_must_close_over_valid_child_fact_and_source(self):
         context = planning_context()

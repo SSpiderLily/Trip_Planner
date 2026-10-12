@@ -24,6 +24,7 @@ from app.agents.attraction_subtask import (
     _place_fields,
     _requirement_matches_name,
 )
+from app.services.planning_lodging_policy import city_for_days
 from app.agents.candidate_identity import version_candidate_ref
 from app.agents.execution import PlanningError
 from app.models.planning_v4 import (
@@ -43,6 +44,7 @@ from app.models.planning_v4 import (
 from app.models.planning_v4.plan import AreaHint
 from app.models.planning_v4.tasks import TaskScope
 from app.models.planning_v4.base import ContractModel
+from app.services.observation_service import span
 
 
 DINING_TYPES = "050000"
@@ -196,12 +198,14 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._output_rejections: list[dict[str, Any]] = []
         self._searched_radius_by_slot: dict[str, int] = {}
         self._last_search_context: dict[str, Any] = {}
         self._no_progress_slot_continuations: set[str] = set()
         self._attempted_verification_ids: set[str] = set()
 
     def _run_locked(self, subtask: Subtask, context: AttractionExecutionContext, cancel_event):
+        self._output_rejections = []
         self._searched_radius_by_slot = {}
         self._last_search_context = {}
         self._no_progress_slot_continuations = set()
@@ -274,13 +278,22 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
 
     def _action_allowed(self, action: Any, subtask: Subtask, context: AttractionExecutionContext) -> bool:
         if not isinstance(context, DiningExecutionContext):
+            self._record_output_rejection("dining_context_required", "$")
             return False
         if isinstance(action, DiningSearchAction):
-            return action.slot_id in self._target_slot_ids(subtask, context) and any(
-                binding.slot_id == action.slot_id for binding in context.meal_areas
-            )
+            if action.slot_id not in self._target_slot_ids(subtask, context):
+                self._record_output_rejection("search_slot_outside_task", "slot_id")
+                return False
+            if not any(binding.slot_id == action.slot_id for binding in context.meal_areas):
+                self._record_output_rejection("search_slot_area_missing", "slot_id")
+                return False
+            return True
         if isinstance(action, VerifyRestaurantAction):
-            return any(item.requirement_id == action.requirement_id for item in context.must_eat_restaurants)
+            allowed = any(item.requirement_id == action.requirement_id for item in context.must_eat_restaurants)
+            if not allowed:
+                self._record_output_rejection("named_restaurant_requirement_missing", "requirement_id")
+            return allowed
+        self._record_output_rejection("action_unsupported", "action")
         return False
 
     def _empty_result_is_terminal(self, action, subtask, context, store) -> bool:
@@ -401,7 +414,9 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
         radius = radius_m if radius_m is not None else self._searched_radius_by_slot.get(slot_id, SEARCH_RADIUS_METERS[0])
         return slot_id in eligible_dining_slot_ids(
             place,
-            city=context.planning_input.request.city,
+            city=city_for_days(context.planning_input, (next(
+                day.day_id for day in context.planning_input.days if any(slot.slot_id == slot_id for slot in day.slots)
+            ),)),
             fact_store=context.fact_store,
             area_hints=context.area_hints,
             meal_areas=context.meal_areas,
@@ -412,16 +427,44 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
         )
 
     def _eligible_slot_ids(self, place: PlaceFact, context: DiningExecutionContext) -> set[str]:
-        return eligible_dining_slot_ids(
-            place,
-            city=context.planning_input.request.city,
-            fact_store=context.fact_store,
-            area_hints=context.area_hints,
-            meal_areas=context.meal_areas,
-            allowed_slot_ids=(item.slot_id for item in context.meal_areas),
-            excluded_poi_ids=self._current_excluded_ids,
-            blocked_requirements=self._blocked_requirements,
-        )
+        # 每餐次独立记录扩大的半径，不能将一餐的搜索范围应用到其他餐次。
+        return {binding.slot_id for binding in context.meal_areas
+                if self._place_meets_slot(place, binding.slot_id, context)}
+
+    def _record_output_rejection(self, condition: str, path: str, **details) -> None:
+        diagnostic = {"condition": condition, "path": path, **details}
+        self._output_rejections.append(diagnostic)
+        with span("validation.dining_output", "validation") as record:
+            record.output = diagnostic
+
+    def _record_action_format_error(self, exc: Exception, *, repair_exhausted: bool) -> None:
+        if isinstance(exc, ValidationError):
+            fields = {"action", "search", "verify_restaurant", "finish", "keywords", "slot_id",
+                      "requirement_id", "selections", "poi_id", "slot_ids", "requirement_ids",
+                      "recommendation_reason"}
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)[:8]:
+                path = ""
+                for part in error["loc"]:
+                    if isinstance(part, int):
+                        path += f"[{part}]"
+                    else:
+                        path += ("." if path else "") + (part if part in fields else "field")
+                # 自定义validator共用value_error，按固定消息映射，绝不输出异常原文。
+                condition = {
+                    "Value error, 同一候选的 slot_ids 必须唯一": "selection_duplicate_slots",
+                    "Value error, 同一候选的 requirement_ids 必须唯一": "selection_duplicate_requirements",
+                    "Value error, finish 不能重复选择同一个 poi_id": "finish_duplicate_pois",
+                }.get(error.get("msg"), "action_schema_invalid")
+                self._record_output_rejection(condition, path or "$",
+                                              schema_error_type=error["type"], repair_exhausted=repair_exhausted)
+        else:
+            self._record_output_rejection("action_json_invalid", "$", repair_exhausted=repair_exhausted)
+
+    def _safe_result_summary(self, result: TaskResult) -> dict[str, Any]:
+        return {**super()._safe_result_summary(result),
+                "diagnostics": self._output_rejections[-8:],
+                "diagnostic_count": len(self._output_rejections),
+                "searched_radius_by_slot": dict(self._searched_radius_by_slot)}
 
     def _matches_restaurant_binding(
         self, place: PlaceFact, requirement_id: str, context: DiningExecutionContext,
@@ -664,20 +707,30 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
         pool_by_poi = {place.poi_id: place for place in pool}
         requirement_ids = {item.requirement_id for item in context.must_eat_restaurants}
         chosen: list[tuple[CandidateSelection, PlaceFact]] = []
-        for selection in action.selections:
+        for index, selection in enumerate(action.selections):
+            path = f"selections[{index}]"
             place = pool_by_poi.get(selection.poi_id)
             if place is None:
+                self._record_output_rejection("selected_poi_not_available", path + ".poi_id",
+                                              available_candidate_count=len(pool))
                 return self._invalid_dining_result(subtask, context, status)
             eligible_slots = self._eligible_slot_ids(place, context)
-            if (not set(selection.slot_ids).issubset(allowed_slots)
-                    or not set(selection.slot_ids).issubset(eligible_slots)
-                    or not set(selection.requirement_ids).issubset(allowed_requirements)
-                    or not set(selection.requirement_ids).issubset(requirement_ids)):
-                return self._invalid_dining_result(subtask, context, status)
-            if bind_requirement_coverage and not selection.slot_ids and not selection.requirement_ids:
-                return self._invalid_dining_result(subtask, context, status)
-            if any(not self._matches_restaurant_binding(place, req_id, context)
-                   for req_id in selection.requirement_ids):
+            checks = (
+                (set(selection.slot_ids).issubset(allowed_slots), "selected_slot_outside_task", "slot_ids"),
+                (set(selection.slot_ids).issubset(eligible_slots), "selected_slot_not_eligible", "slot_ids"),
+                (set(selection.requirement_ids).issubset(allowed_requirements), "selected_requirement_outside_task", "requirement_ids"),
+                (set(selection.requirement_ids).issubset(requirement_ids), "selected_requirement_not_named_restaurant", "requirement_ids"),
+                (not (bind_requirement_coverage and not selection.slot_ids and not selection.requirement_ids),
+                 "selection_binding_missing", "slot_ids"),
+                (not any(not self._matches_restaurant_binding(place, req_id, context)
+                         for req_id in selection.requirement_ids), "restaurant_name_mismatch", "requirement_ids"),
+            )
+            invalid = False
+            for passed, condition, field in checks:
+                if not passed:
+                    self._record_output_rejection(condition, path + "." + field)
+                    invalid = True
+            if invalid:
                 return self._invalid_dining_result(subtask, context, status)
             chosen.append((selection, place))
 

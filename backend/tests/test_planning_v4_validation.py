@@ -24,14 +24,8 @@ from app.models.planning_v4.plan import (
     RepairState,
 )
 from app.services.current_route_service import CurrentRouteService
-from app.services.planning_v4_timing import (
-    ActivityTiming,
-    DayTimingResult,
-    PlanTimingResult,
-    ReturnTiming,
-)
+from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
 from app.models.planning_v4.tasks import CandidateRef
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_preview
 
@@ -47,7 +41,7 @@ WINDOWS = (
 PERIODS = tuple(window["period"] for window in WINDOWS)
 
 
-def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00"):
+def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00", derive_slots=False):
     request = TripRequest(
         request_id="validation-request",
         city="上海",
@@ -65,12 +59,14 @@ def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00"):
     rules = RuleSet(
         rule_version="validation-rules-v1",
         windows=WINDOWS,
-        meal_default_s=3600,
-        sightseeing_default_s=3600,
+        meal_minimum_available_s=3600,
+        sightseeing_minimum_available_s=3600,
         full_day_start_minute=8 * 60,
         return_buffer_default_s=3600,
         departure_day_minimum_usable_s=10800,
     )
+    if derive_slots:
+        return build_planning_input(PlanningInputBuildRequest(request=request, requirements=summary, rules=rules))
     days = []
     for offset in range(3):
         current = date(2026, 10, 10 + offset)
@@ -150,8 +146,6 @@ def make_filled_draft(planning_input, candidates, *, unfilled_by_day=None):
                 kind=kind,
                 poi_id=candidate.poi_id,
                 place_fact_id=candidate.place_fact_id,
-                duration_s=3600,
-                duration_source="model",
             ))
         days.append(DraftDay(
             day_id=constraint.day_id,
@@ -204,7 +198,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
         self.planning_input = make_input()
         self.facts, self.candidates = make_facts_and_candidates()
 
-    def test_full_three_day_coverage_is_complete_even_when_cost_weather_and_timing_are_unknown(self):
+    def test_full_three_day_coverage_needs_places_without_cost_weather_or_activity_times(self):
         draft = make_filled_draft(self.planning_input, self.candidates)
         before = (self.planning_input.model_dump_json(), draft.model_dump_json(), self.facts.model_dump_json())
 
@@ -227,8 +221,6 @@ class PlanningV4ValidationTests(unittest.TestCase):
             activity_id="free-morning",
             slot_id=morning.slot_id,
             kind="free_time",
-            duration_s=1800,
-            duration_source="model",
         )
         draft = make_draft_with_activities(self.planning_input, {constraint.day_id: (free_time,)})
 
@@ -424,7 +416,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
         self.assertEqual(report.requirements[0].status, "unsatisfied")
         issue = next(item for item in report.issues if item.code == "must_visit_unplanned")
         self.assertEqual(issue.category, "missing_arrangement")
-        self.assertTrue(issue.triggers_repair)
+        self.assertFalse(issue.triggers_repair)
 
     def test_must_avoid_and_generic_must_include_remain_unverified(self):
         requirements = (
@@ -442,13 +434,12 @@ class PlanningV4ValidationTests(unittest.TestCase):
         self.assertEqual(len(issues), 2)
         self.assertTrue(all(not item.triggers_repair for item in issues))
 
-    def test_verified_short_departure_day_is_not_required_without_activities(self):
-        planning_input = make_input(departure="2026-10-12T10:00:00+08:00")
+    def test_short_departure_day_is_not_required_from_input_without_activities(self):
+        planning_input = make_input(departure="2026-10-12T10:00:00+08:00", derive_slots=True)
         facts, candidates = make_facts_and_candidates()
         draft = make_draft_with_activities(planning_input, {})
-        timing = calculate_plan_timing(planning_input, draft, facts)
 
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(planning_input, draft, facts, candidates)
 
         last_day = report.days[-1]
         self.assertEqual(last_day.completeness, "not_required")
@@ -457,32 +448,20 @@ class PlanningV4ValidationTests(unittest.TestCase):
             for issue in report.issues
         ))
 
-    def test_verified_short_departure_day_with_activity_reports_conflict_without_deleting_it(self):
-        planning_input = make_input(departure="2026-10-12T10:00:00+08:00")
-        facts, candidates = make_facts_and_candidates()
+    def test_activity_in_a_skipped_departure_slot_is_rejected_without_mutating_draft(self):
+        planning_input = make_input(departure="2026-10-12T10:00:00+08:00", derive_slots=True)
         slot = next(slot for slot in planning_input.days[-1].slots if slot.period == "morning")
         activity = DraftActivity(
-            activity_id="departure-activity",
-            candidate_ref="candidate-sight",
-            slot_id=slot.slot_id,
-            kind="sightseeing",
-            poi_id="poi-sight",
+            activity_id="departure-activity", candidate_ref="candidate-sight",
+            slot_id=slot.slot_id, kind="sightseeing", poi_id="poi-sight",
             place_fact_id="fact-sight",
-            duration_s=3600,
-            duration_source="model",
         )
         draft = make_draft_with_activities(planning_input, {planning_input.days[-1].day_id: (activity,)})
         before = draft.model_dump_json()
-        timing = calculate_plan_timing(planning_input, draft, facts)
-
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
-
-        issue = next(item for item in report.issues if item.code == "departure_day_below_minimum_with_activities")
-        self.assertEqual(issue.category, "known_conflict")
-        self.assertTrue(issue.triggers_repair)
-        self.assertEqual(report.days[-1].completeness, "not_required")
+        with self.assertRaises(ContractValidationError):
+            validate_daily_plan(planning_input, draft, self.facts, self.candidates)
         self.assertEqual(draft.model_dump_json(), before)
-        self.assertEqual(len(draft.days[-1].activities), 1)
+
 
     def test_unknown_return_route_does_not_become_a_conflict(self):
         facts, candidates = self.facts, self.candidates
@@ -495,20 +474,13 @@ class PlanningV4ValidationTests(unittest.TestCase):
             kind="sightseeing",
             poi_id="poi-sight",
             place_fact_id="fact-sight",
-            duration_s=3600,
-            duration_source="model",
         )
         draft = make_draft_with_activities(self.planning_input, {last_day.day_id: (activity,)})
-        timing = calculate_plan_timing(self.planning_input, draft, facts)
 
-        report = validate_daily_plan(self.planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(self.planning_input, draft, facts, candidates)
 
-        self.assertEqual(timing.days[-1].return_timing.status, "unverified")
         self.assertFalse(any(issue.category == "known_conflict" for issue in report.issues))
-        self.assertTrue(any(
-            issue.code == "return_timing_unverified" and not issue.triggers_repair
-            for issue in report.issues
-        ))
+        self.assertFalse(any("timing" in issue.code or "return_deadline" in issue.code for issue in report.issues))
 
     def test_raw_opening_hours_are_not_treated_as_a_proven_conflict(self):
         facts, candidates = self.facts, self.candidates
@@ -527,97 +499,13 @@ class PlanningV4ValidationTests(unittest.TestCase):
             kind="sightseeing",
             poi_id="poi-sight",
             place_fact_id="fact-sight",
-            duration_s=3600,
-            duration_source="model",
         )
         draft = make_draft_with_activities(self.planning_input, {first_day.day_id: (activity,)})
 
         report = validate_daily_plan(self.planning_input, draft, facts, candidates)
 
-        opening = next(issue for issue in report.issues if issue.code == "opening_hours_unverified")
-        self.assertEqual(opening.category, "unknown_info")
-        self.assertFalse(opening.triggers_repair)
         self.assertFalse(any(issue.category == "known_conflict" for issue in report.issues))
-
-    def test_f07_return_lower_bound_is_reported_as_lower_bound(self):
-        last_day = self.planning_input.days[-1]
-        slot = next(slot for slot in last_day.slots if slot.period == "evening")
-        activity = DraftActivity(
-            activity_id="last-activity",
-            candidate_ref="candidate-sight",
-            slot_id=slot.slot_id,
-            kind="sightseeing",
-            poi_id="poi-sight",
-            place_fact_id="fact-sight",
-            duration_s=3600,
-            duration_source="model",
-        )
-        draft = make_draft_with_activities(self.planning_input, {last_day.day_id: (activity,)})
-        timing_days = []
-        for constraint in self.planning_input.days:
-            is_departure = constraint.day_id == last_day.day_id
-            return_timing = ReturnTiming(
-                status="conflict" if is_departure else "not_applicable",
-                departure_at=self.planning_input.request.departure_at if is_departure else None,
-                buffer_s=3600,
-                overrun_s=300 if is_departure else None,
-                overrun_is_lower_bound=is_departure,
-            )
-            activity_timings = (
-                ActivityTiming(
-                    day_id=constraint.day_id,
-                    activity_id=activity.activity_id,
-                    duration_s=activity.duration_s,
-                    duration_source=activity.duration_source,
-                    status="estimated",
-                ),
-            ) if is_departure else ()
-            timing_days.append(DayTimingResult(
-                day_id=constraint.day_id,
-                activities=activity_timings,
-                summary=DaySummary(
-                    day_id=constraint.day_id,
-                    known_stay_s=activity.duration_s if is_departure else 0,
-                    known_travel_s=0,
-                    feasibility="conflict" if is_departure else "verified",
-                ),
-                scheduling_decision="conditional" if is_departure else "scheduled",
-                return_timing=return_timing,
-            ))
-        timing = PlanTimingResult(
-            plan_id=draft.plan_id,
-            based_on_revision=draft.revision,
-            days=tuple(timing_days),
-        )
-
-        report = validate_daily_plan(self.planning_input, draft, self.facts, self.candidates, timing)
-
-        issue = next(item for item in report.issues if item.code == "return_deadline_conflict")
-        self.assertEqual(issue.category, "known_conflict")
-        self.assertTrue(issue.triggers_repair)
-        self.assertIn("下界", issue.message)
-        self.assertIn("至少超出", issue.message)
-        self.assertEqual(report.days[-1].feasibility, "conflict")
-
-    def test_timing_from_another_revision_is_rejected(self):
-        draft = make_filled_draft(self.planning_input, self.candidates)
-        timing = calculate_plan_timing(self.planning_input, draft, self.facts)
-        wrong_timing = timing.model_copy(update={"based_on_revision": draft.revision - 1})
-
-        with self.assertRaisesRegex(ValueError, "当前 PlanDraft"):
-            validate_daily_plan(self.planning_input, draft, self.facts, self.candidates, wrong_timing)
-
-    def test_timing_summary_must_reference_its_own_day(self):
-        draft = make_filled_draft(self.planning_input, self.candidates)
-        timing = calculate_plan_timing(self.planning_input, draft, self.facts)
-        first = timing.days[0]
-        bad_first = first.model_copy(update={
-            "summary": first.summary.model_copy(update={"day_id": "wrong-day"}),
-        })
-        timing = timing.model_copy(update={"days": (bad_first, *timing.days[1:])})
-
-        with self.assertRaisesRegex(ValueError, "每日摘要必须引用所属日期"):
-            validate_daily_plan(self.planning_input, draft, self.facts, self.candidates, timing)
+        self.assertFalse(any("opening_hours" in issue.code for issue in report.issues))
 
     def test_issue_ids_are_stable_for_the_same_plan_revision(self):
         draft = make_filled_draft(self.planning_input, self.candidates)
@@ -643,20 +531,19 @@ class PlanningV4ValidationTests(unittest.TestCase):
     def test_summary_without_timing_keeps_route_time_unknown_and_cost_pending(self):
         draft = make_filled_draft(self.planning_input, self.candidates)
 
-        summaries = build_day_summaries(self.planning_input, draft)
+        summaries = build_day_summaries(self.planning_input, draft, self.facts)
 
         self.assertEqual(len(summaries), 3)
-        self.assertTrue(all(item.feasibility == "unverified" for item in summaries))
+        self.assertTrue(all("known_stay_s" not in item.model_dump() for item in summaries))
         self.assertTrue(all(item.cost_status == "aggregation_pending" for item in summaries))
         self.assertTrue(all(item.known_travel_s == 0 for item in summaries))
 
     def test_not_required_day_preview_uses_day_level_evidence_without_fake_slot_issues(self):
-        planning_input = make_input(departure="2026-10-12T10:00:00+08:00")
+        planning_input = make_input(departure="2026-10-12T10:00:00+08:00", derive_slots=True)
         facts, candidates = make_facts_and_candidates()
         draft = make_draft_with_activities(planning_input, {})
-        timing = calculate_plan_timing(planning_input, draft, facts)
 
-        report = validate_daily_plan(planning_input, draft, facts, candidates, timing)
+        report = validate_daily_plan(planning_input, draft, facts, candidates)
 
         last = report.days[-1]
         self.assertEqual(last.completeness, "not_required")
@@ -664,12 +551,6 @@ class PlanningV4ValidationTests(unittest.TestCase):
             issue.scope == "slot" and issue.day_id == last.day_id
             for issue in report.issues
         ))
-        not_required_issue = next(
-            issue for issue in report.issues
-            if issue.day_id == last.day_id and issue.code == "departure_day_not_required"
-        )
-        self.assertEqual(not_required_issue.severity, "info")
-        self.assertFalse(not_required_issue.triggers_repair)
 
         preview_draft = self._with_derived_unfilled_slots(planning_input, draft)
         preview_report = self._with_open_repair_states(planning_input, report)
@@ -680,7 +561,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
             facts=facts,
             candidates=candidates,
             validation=preview_report,
-            day_summaries=build_day_summaries(planning_input, draft, timing),
+            day_summaries=build_day_summaries(planning_input, draft, facts),
             calculation=PreviewCalculation(
                 based_on_revision=draft.revision,
                 calculation_id="not-required-calculation",
@@ -691,7 +572,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
 
         validate_preview(preview)
 
-    def test_route_query_errors_flow_through_f07_f09_and_public_preview(self):
+    def test_route_query_errors_remain_unknown_transport_without_time_conflicts(self):
         planning_input = make_input()
         facts, candidates = make_facts_and_candidates()
         alternate_place = facts.places[1].model_copy(update={
@@ -717,8 +598,6 @@ class PlanningV4ValidationTests(unittest.TestCase):
             kind="sightseeing",
             poi_id="poi-sight",
             place_fact_id="fact-sight",
-            duration_s=3600,
-            duration_source="model",
         )
         second = DraftActivity(
             activity_id="route-destination",
@@ -727,8 +606,6 @@ class PlanningV4ValidationTests(unittest.TestCase):
             kind="sightseeing",
             poi_id=alternate_place.poi_id,
             place_fact_id=alternate_place.fact_id,
-            duration_s=3600,
-            duration_source="model",
         )
         draft = make_draft_with_activities(planning_input, {constraint.day_id: (first, second)})
 
@@ -754,14 +631,10 @@ class PlanningV4ValidationTests(unittest.TestCase):
             execution.draft,
             execution.fact_store,
             candidates,
-            execution.timing,
         )
-        self.assertTrue(any(
-            issue.code == "route_unverified"
-            and issue.category == "unknown_info"
-            and not issue.triggers_repair
-            for issue in report.issues
-        ))
+        summaries = build_day_summaries(planning_input, execution.draft, execution.fact_store)
+        summary = next(item for item in summaries if item.day_id == constraint.day_id)
+        self.assertIn(queried_leg.leg_id, summary.unknown_leg_ids)
         self.assertFalse(any(issue.category == "known_conflict" for issue in report.issues))
 
         preview_draft = self._with_derived_unfilled_slots(planning_input, execution.draft)
@@ -772,7 +645,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
             facts=execution.fact_store,
             candidates=candidates,
             validation=self._with_open_repair_states(planning_input, report),
-            day_summaries=build_day_summaries(planning_input, execution.draft, execution.timing),
+            day_summaries=build_day_summaries(planning_input, execution.draft, execution.fact_store),
             calculation=PreviewCalculation(
                 based_on_revision=draft.revision,
                 calculation_id="route-failure-calculation",

@@ -202,6 +202,7 @@ class RequirementInterpreterTests(unittest.TestCase):
         self.assertGreater(timeouts[1], 0)
         self.assertLessEqual(timeouts[1], timeouts[0])
         self.assertTrue(all(call["kwargs"]["max_retries"] == 0 for call in llm.calls))
+        self.assertTrue(all("max_tokens" not in call["kwargs"] for call in llm.calls))
         self.assertEqual(interpreter.model_calls, 2)
         self.assertEqual(interpreter.last_usage, {"input_tokens": 200, "output_tokens": 60, "total_tokens": 260})
         repair_user_message = llm.calls[1]["messages"][-1]["content"]

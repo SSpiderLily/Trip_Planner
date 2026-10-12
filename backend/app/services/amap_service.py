@@ -38,6 +38,7 @@ def get_amap_mcp_tool() -> MCPTool:
                 server_env = {
                     "AMAP_MAPS_API_KEY": settings.amap_api_key,
                     "AMAP_HTTP_TIMEOUT_SECONDS": str(settings.planner_tool_timeout_seconds),
+                    "AMAP_HTTP_TIMEOUT_ENABLED": "true" if settings.planner_enforce_timeouts else "false",
                 }
                 # uv 支持用环境变量选择缓存目录；透传显式设置以便沙箱和部署环境指定可写位置。
                 if os.environ.get("UV_CACHE_DIR"):

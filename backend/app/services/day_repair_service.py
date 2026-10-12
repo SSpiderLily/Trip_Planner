@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal
 from uuid import uuid4
 from pydantic import ValidationError, model_validator
+from app.agents.master_reference_repair import RECOVERABLE_REFERENCE_CODES
 
 from app.models.planning_v4 import (
     AreaHint,
@@ -27,11 +28,21 @@ from app.models.planning_v4 import (
     ValidationReport,
 )
 from app.models.planning_v4.base import ContractModel
-from app.services.planning_v4_timing import PlanTimingResult
+from app.services.planning_candidate_policy import candidate_allows_slot
+from app.services.planning_lodging_policy import city_for_days
+from app.services.planning_v4_validation import is_required_place_gap
+from app.agents.attraction_subtask import _category_status, _city_matches
+from app.agents.dining_subtask import _dining_category
+from app.services.planning_diagnostics import repair_stage, safe_error_code
+from app.services.observation_service import span
 from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
 
 
 MAX_REPAIR_ROUNDS_PER_DAY = 3
+MAX_TECHNICAL_FAILURES_PER_DAY = 3
+RECOVERABLE_COLLECTION_CODES = RECOVERABLE_REFERENCE_CODES | {
+    "MASTER_LLM_FAILED", "MODEL_CALL_FAILED", "REPAIR_COLLECTION_TIMEOUT",
+}
 RepairStop = Literal["complete", "round_limit", "deadline", "technical_error"]
 CollectionStop = Literal["target_met", "no_progress", "deadline", "technical_error"]
 
@@ -149,6 +160,7 @@ class DayRevisionRequest(ContractModel):
 
 
 class DayRepairRecalculationRequest(ContractModel):
+    round_number: int = 1
     planning_input: PlanningInput
     draft: PlanDraft
     facts: FactStore
@@ -162,11 +174,10 @@ class DayRepairRecalculationRequest(ContractModel):
 
 
 class DayRepairRecalculation(ContractModel):
-    """F08 目标日路线、F07 时间及 F09a 报告的重算结果。"""
+    """目标日交通摘要与地点覆盖报告的重算结果。"""
 
     draft: PlanDraft
     facts: FactStore
-    timing: PlanTimingResult
     report: ValidationReport
 
 
@@ -190,7 +201,6 @@ class DayRepairResult(ContractModel):
     candidates: tuple[CandidateRef, ...] = ()
     area_hints: tuple[AreaHint, ...] = ()
     task_results: tuple[TaskResult, ...] = ()
-    timing: PlanTimingResult | None = None
     report: ValidationReport
     repair_states: tuple[RepairState, ...] = ()
     assignments: tuple[IssueDayAssignment, ...] = ()
@@ -236,12 +246,11 @@ class DayRepairService:
         candidates: tuple[CandidateRef, ...],
         area_hints: tuple[AreaHint, ...],
         task_results: tuple[TaskResult, ...],
-        timing: PlanTimingResult,
         report: ValidationReport,
         *,
         global_deadline_monotonic: float | None = None,
     ) -> DayRepairResult:
-        self._validate_run_binding(planning_input, draft, timing, report)
+        self._validate_run_binding(planning_input, draft, report)
         if global_deadline_monotonic is not None and (
             isinstance(global_deadline_monotonic, bool)
             or not isinstance(global_deadline_monotonic, (int, float))
@@ -254,14 +263,13 @@ class DayRepairService:
         assignments_log: list[IssueDayAssignment] = []
         unassigned: set[str] = set()
 
-        # Active state means a previously started attempt was interrupted. Count it once,
-        # retain the stop reason and never silently reset its per-day budget.
+        # 中断属于技术失败；保留已完成的业务轮次，不扣未完成的尝试。
         interrupted_assignments = assign_repair_issues(planning_input, report, facts, candidates)
         assignments_log.extend(interrupted_assignments)
         for day_id, state in tuple(states.items()):
             if state.status != "active":
                 continue
-            completed = min(max_rounds, state.completed_rounds + 1)
+            completed = state.completed_rounds
             prior_attempt_id = state.active_round_id or self.id_factory()
             interrupted_issues = self._issues_for_day(report, interrupted_assignments, day_id)
             policy = derive_activity_policy(draft, day_id, tuple(item.issue for item in interrupted_issues))
@@ -288,7 +296,7 @@ class DayRepairService:
                 if _deadline_expired(global_deadline_monotonic):
                     return self._deadline_result(
                         planning_input, draft, facts, candidates, area_hints,
-                        task_results, timing, report, states, assignments_log,
+                        task_results, report, states, assignments_log,
                         attempts, unassigned,
                     )
                 day = self._day(draft, day_id)
@@ -321,6 +329,11 @@ class DayRepairService:
 
                 round_number = state.completed_rounds + 1
                 round_id = self.id_factory()
+                repair_metadata = {
+                    "plan_id": draft.plan_id, "day_id": day_id, "round_id": round_id,
+                    "round_number": round_number, "base_revision": draft.revision,
+                    "issue_count": len(issues),
+                }
                 active = RepairState(
                     day_id=day_id,
                     completed_rounds=state.completed_rounds,
@@ -340,30 +353,37 @@ class DayRepairService:
                         for issue_id in target.issue_ids
                     }
                     try:
-                        collected = await _await(self.collect(DayRepairCollectionRequest(
-                            planning_input=planning_input,
-                            draft=draft,
-                            day=day,
-                            issues=tuple(issue for issue in assigned_issues if issue.issue_id in collection_issue_ids),
-                            assignments=tuple(
-                                item.assignment for item in issues
-                                if item.issue.issue_id in collection_issue_ids
-                            ),
-                            round_id=round_id,
-                            round_number=round_number,
-                            remaining_seconds=_remaining_seconds(global_deadline_monotonic),
-                            targets=collection_targets,
-                            known_fact_ids=tuple(_known_fact_ids(facts)),
-                            fact_store=facts,
-                            candidates=candidates,
-                            area_hints=area_hints,
-                            task_results=task_results,
-                        )))
+                        with repair_stage("collect", repair_metadata) as collection_record:
+                            collected = await _await(self.collect(DayRepairCollectionRequest(
+                                planning_input=planning_input,
+                                draft=draft,
+                                day=day,
+                                issues=tuple(issue for issue in assigned_issues if issue.issue_id in collection_issue_ids),
+                                assignments=tuple(
+                                    item.assignment for item in issues
+                                    if item.issue.issue_id in collection_issue_ids
+                                ),
+                                round_id=round_id,
+                                round_number=round_number,
+                                remaining_seconds=_remaining_seconds(global_deadline_monotonic),
+                                targets=collection_targets,
+                                known_fact_ids=tuple(_known_fact_ids(facts)),
+                                fact_store=facts,
+                                candidates=candidates,
+                                area_hints=area_hints,
+                                task_results=task_results,
+                            )))
+                            collection_record.output = {
+                                "valid": collected.stop_reason != "technical_error",
+                                "stop_reason": collected.stop_reason,
+                                "error_code": safe_error_code(collected.error_code) if collected.error_code else None,
+                                "candidate_count": len(collected.candidates),
+                            }
                     except DayRepairError as exc:
                         if exc.global_deadline or _deadline_expired(global_deadline_monotonic):
                             return self._deadline_result(
                                 planning_input, draft, facts, candidates, area_hints,
-                                task_results, timing, report, states, assignments_log,
+                                task_results, report, states, assignments_log,
                                 attempts, unassigned,
                                 active=(day_id, round_id, round_number, issues, policy,
                                         state.completed_rounds + 1, exc.code),
@@ -371,15 +391,16 @@ class DayRepairService:
                         if exc.fatal:
                             return self._technical_failure(
                                 draft, facts, candidates, area_hints, task_results,
-                                timing, report, states, attempts, assignments_log,
+                                report, states, attempts, assignments_log,
                                 unassigned, day_id, round_id, round_number, issues,
                                 policy, state.completed_rounds + 1, exc.code,
                             )
                         if exc.deadline:
                             collected = DayRepairCollectionResult(
-                                stop_reason="deadline", fact_store=facts,
+                                stop_reason="technical_error", fact_store=facts,
                                 candidates=candidates, area_hints=area_hints,
                                 task_results=task_results,
+                                error_code="REPAIR_COLLECTION_TIMEOUT",
                             )
                         else:
                             if self._record_failed_round(
@@ -393,7 +414,7 @@ class DayRepairService:
                     except DayRepairInputError as exc:
                         return self._technical_failure(
                             draft, facts, candidates, area_hints, task_results,
-                            timing, report, states, attempts, assignments_log,
+                            report, states, attempts, assignments_log,
                             unassigned, day_id, round_id, round_number, issues,
                             policy, state.completed_rounds + 1,
                             _safe_revision_error(exc),
@@ -402,7 +423,7 @@ class DayRepairService:
                         if _deadline_expired(global_deadline_monotonic):
                             return self._deadline_result(
                                 planning_input, draft, facts, candidates, area_hints,
-                                task_results, timing, report, states, assignments_log,
+                                task_results, report, states, assignments_log,
                                 attempts, unassigned,
                                 active=(day_id, round_id, round_number, issues, policy,
                                         state.completed_rounds + 1, _safe_callback_error(exc)),
@@ -416,32 +437,51 @@ class DayRepairService:
                             break
                         continue
                     try:
-                        next_facts = _merge_facts(facts, collected.fact_store)
-                        next_candidates = _merge_by_id(candidates, collected.candidates, "candidate_id", "candidate")
-                        next_areas = _merge_by_id(area_hints, collected.area_hints, "area_hint_id", "area hint")
-                        next_tasks = _merge_by_id(task_results, collected.task_results, "task_id", "task result", replace=True)
+                        with repair_stage("merge_collection", repair_metadata):
+                            next_facts = _merge_facts(facts, collected.fact_store)
+                            next_candidates = _merge_by_id(candidates, collected.candidates, "candidate_id", "candidate")
+                            next_areas = _merge_by_id(area_hints, collected.area_hints, "area_hint_id", "area hint")
+                            next_tasks = _merge_by_id(task_results, collected.task_results, "task_id", "task result", replace=True)
                     except DayRepairInputError:
                         return self._technical_failure(
                             draft, facts, candidates, area_hints, task_results,
-                            timing, report, states, attempts, assignments_log,
+                            report, states, attempts, assignments_log,
                             unassigned, day_id, round_id, round_number, issues,
                             policy, state.completed_rounds + 1, "DAY_REPAIR_FACT_CONFLICT",
                         )
+                    if collected.stop_reason == "deadline":
+                        collected = collected.model_copy(update={
+                            "stop_reason": "technical_error",
+                            "error_code": "REPAIR_COLLECTION_TIMEOUT",
+                        })
                     if collected.stop_reason == "technical_error":
-                        # The collection service can report an ordinary model/provider
-                        # failure after it has already verified useful partial facts.
-                        # Merge that safe snapshot before consuming this round.
+                        # 保留通过合并校验的快照；接口或可恢复引用错误若新增有效覆盖，继续修订。
                         facts, candidates, area_hints, task_results = (
                             next_facts, next_candidates, next_areas, next_tasks,
                         )
-                        if self._record_failed_round(
-                            states, attempts, day_id, round_id, round_number,
-                            issues, policy, state.completed_rounds + 1,
-                            max_rounds, collected_stop="technical_error",
-                            error_code=collected.error_code or "DAY_REPAIR_COLLECT_FAILED",
-                        ):
-                            break
-                        continue
+                        can_revise = False
+                        if collected.error_code in RECOVERABLE_COLLECTION_CODES:
+                            _, remaining_targets = _collection_scope(
+                                planning_input, constraint, day, assigned_issues, facts, candidates,
+                            )
+                            can_revise = len(remaining_targets) < len(collection_targets)
+                            with span("repair.collection_recovery", "validation", repair_metadata) as recovery_record:
+                                recovery_record.output = {
+                                    "schema_version": 1, "stage": "repair.collect",
+                                    "outcome": "continue_revision" if can_revise else "skip_revision",
+                                    "error_code": collected.error_code,
+                                    "targets_with_new_usable_candidates": len(collection_targets) - len(remaining_targets),
+                                    "remaining_collection_targets": len(remaining_targets),
+                                }
+                        if not can_revise:
+                            if self._record_failed_round(
+                                states, attempts, day_id, round_id, round_number,
+                                issues, policy, state.completed_rounds + 1,
+                                max_rounds, collected_stop="technical_error",
+                                error_code=collected.error_code or "DAY_REPAIR_COLLECT_FAILED",
+                            ):
+                                break
+                            continue
                 else:
                     collected = DayRepairCollectionResult.empty(facts, candidates, area_hints, task_results)
                     next_facts, next_candidates, next_areas, next_tasks = facts, candidates, area_hints, task_results
@@ -449,7 +489,7 @@ class DayRepairService:
                 if _deadline_expired(global_deadline_monotonic):
                     return self._deadline_result(
                         planning_input, draft, next_facts, next_candidates,
-                        next_areas, next_tasks, timing, report, states, assignments_log,
+                        next_areas, next_tasks, report, states, assignments_log,
                         attempts, unassigned,
                         active=(day_id, round_id, round_number, issues, policy,
                                 state.completed_rounds + 1, "GLOBAL_TECHNICAL_DEADLINE"),
@@ -458,30 +498,31 @@ class DayRepairService:
                 # A per-call collection timeout can still contribute its verified partial
                 # facts to this date-only model call. Only fatal input corruption stops all work.
                 try:
-                    revision = await _await(self.revise(DayRevisionRequest(
-                        planning_input=planning_input,
-                        draft=draft,
-                        day=day,
-                        report=report,
-                        issues=assigned_issues,
-                        assignments=tuple(item.assignment for item in issues),
-                        round_id=round_id,
-                        round_number=round_number,
-                        remaining_seconds=_remaining_seconds(global_deadline_monotonic),
-                        preserve_activity_ids=policy.preserve_ids,
-                        modifiable_activity_ids=policy.modifiable_ids,
-                        removable_activity_ids=policy.removable_ids,
-                        collection_stop_reason=collected.stop_reason,
-                        fact_store=next_facts,
-                        candidates=next_candidates,
-                        area_hints=next_areas,
-                        task_results=next_tasks,
-                    )))
+                    with repair_stage("revise", repair_metadata):
+                        revision = await _await(self.revise(DayRevisionRequest(
+                            planning_input=planning_input,
+                            draft=draft,
+                            day=day,
+                            report=report,
+                            issues=assigned_issues,
+                            assignments=tuple(item.assignment for item in issues),
+                            round_id=round_id,
+                            round_number=round_number,
+                            remaining_seconds=_remaining_seconds(global_deadline_monotonic),
+                            preserve_activity_ids=policy.preserve_ids,
+                            modifiable_activity_ids=policy.modifiable_ids,
+                            removable_activity_ids=policy.removable_ids,
+                            collection_stop_reason=collected.stop_reason,
+                            fact_store=next_facts,
+                            candidates=next_candidates,
+                            area_hints=next_areas,
+                            task_results=next_tasks,
+                        )))
                 except DayRepairError as exc:
                     if exc.global_deadline or _deadline_expired(global_deadline_monotonic):
                         return self._deadline_result(
                             planning_input, draft, next_facts, next_candidates,
-                            next_areas, next_tasks, timing, report, states,
+                            next_areas, next_tasks, report, states,
                             assignments_log, attempts, unassigned,
                             active=(day_id, round_id, round_number, issues, policy,
                                     state.completed_rounds + 1, exc.code),
@@ -489,7 +530,7 @@ class DayRepairService:
                     if exc.fatal:
                         return self._technical_failure(
                             draft, facts, candidates, area_hints, task_results,
-                            timing, report, states, attempts, assignments_log,
+                            report, states, attempts, assignments_log,
                             unassigned, day_id, round_id, round_number, issues,
                             policy, state.completed_rounds + 1, exc.code,
                         )
@@ -507,7 +548,7 @@ class DayRepairService:
                     if _deadline_expired(global_deadline_monotonic):
                         return self._deadline_result(
                             planning_input, draft, next_facts, next_candidates,
-                            next_areas, next_tasks, timing, report, states,
+                            next_areas, next_tasks, report, states,
                             assignments_log, attempts, unassigned,
                             active=(day_id, round_id, round_number, issues, policy,
                                     state.completed_rounds + 1, _safe_callback_error(exc)),
@@ -525,19 +566,20 @@ class DayRepairService:
                     continue
 
                 try:
-                    revised_draft, changed = apply_day_revision(
-                        revision,
-                        draft,
-                        report,
-                        planning_input,
-                        next_candidates,
-                        next_facts,
-                        expected_day_id=day_id,
-                        expected_source_issue_ids=tuple(item.issue.issue_id for item in issues),
-                        preserve_activity_ids=policy.preserve_ids,
-                        allowed_change_activity_ids=policy.modifiable_ids,
-                        removable_activity_ids=policy.removable_ids,
-                    )
+                    with repair_stage("apply_revision", repair_metadata):
+                        revised_draft, changed = apply_day_revision(
+                            revision,
+                            draft,
+                            report,
+                            planning_input,
+                            next_candidates,
+                            next_facts,
+                            expected_day_id=day_id,
+                            expected_source_issue_ids=tuple(item.issue.issue_id for item in issues),
+                            preserve_activity_ids=policy.preserve_ids,
+                            allowed_change_activity_ids=policy.modifiable_ids,
+                            removable_activity_ids=policy.removable_ids,
+                        )
                 except (ContractValidationError, DayRepairInputError, ValueError) as exc:
                     count = state.completed_rounds + 1
                     attempts.append(self._attempt(
@@ -584,27 +626,30 @@ class DayRepairService:
                     status="active",
                 )
                 try:
-                    recalculated = await _await(self.recalculate(DayRepairRecalculationRequest(
-                        planning_input=planning_input,
-                        draft=revised_draft,
-                        facts=next_facts,
-                        candidates=next_candidates,
-                        area_hints=next_areas,
-                        task_results=next_tasks,
-                        repair_states=tuple(
-                            provisional_state if item.day_id == day_id else item
-                            for item in self._ordered_states(states, planning_input)
-                        ),
-                        day_id=day_id,
-                        round_id=round_id,
-                        remaining_seconds=_remaining_seconds(global_deadline_monotonic),
-                    )))
-                    self._validate_recalculation(draft, revised_draft, recalculated, day_id)
+                    with repair_stage("recalculate", repair_metadata):
+                        recalculated = await _await(self.recalculate(DayRepairRecalculationRequest(
+                            planning_input=planning_input,
+                            draft=revised_draft,
+                            facts=next_facts,
+                            candidates=next_candidates,
+                            area_hints=next_areas,
+                            task_results=next_tasks,
+                            repair_states=tuple(
+                                provisional_state if item.day_id == day_id else item
+                                for item in self._ordered_states(states, planning_input)
+                            ),
+                            day_id=day_id,
+                            round_id=round_id,
+                            round_number=round_number,
+                            remaining_seconds=_remaining_seconds(global_deadline_monotonic),
+                        )))
+                    with repair_stage("accept_recalculation", repair_metadata):
+                        self._validate_recalculation(draft, revised_draft, recalculated, day_id)
                 except DayRepairError as exc:
                     if exc.global_deadline or _deadline_expired(global_deadline_monotonic):
                         return self._deadline_result(
                             planning_input, draft, next_facts, next_candidates,
-                            next_areas, next_tasks, timing, report, states,
+                            next_areas, next_tasks, report, states,
                             assignments_log, attempts, unassigned,
                             active=(day_id, round_id, round_number, issues, policy,
                                     count, exc.code),
@@ -612,7 +657,7 @@ class DayRepairService:
                     if exc.fatal:
                         return self._technical_failure(
                             draft, facts, candidates, area_hints, task_results,
-                            timing, report, states, attempts, assignments_log,
+                            report, states, attempts, assignments_log,
                             unassigned, day_id, round_id, round_number, issues,
                             policy, count, exc.code,
                         )
@@ -630,7 +675,7 @@ class DayRepairService:
                     if _deadline_expired(global_deadline_monotonic):
                         return self._deadline_result(
                             planning_input, draft, next_facts, next_candidates,
-                            next_areas, next_tasks, timing, report, states,
+                            next_areas, next_tasks, report, states,
                             assignments_log, attempts, unassigned,
                             active=(day_id, round_id, round_number, issues, policy,
                                     count, _safe_callback_error(exc)),
@@ -648,23 +693,24 @@ class DayRepairService:
                         issues, policy, count, max_rounds,
                         collected_stop=collected.stop_reason,
                         error_code=error_code,
-                        outcome="invalid_revision" if isinstance(exc, DayRepairInputError) else "technical_error",
+                        outcome="technical_error",
                     ):
                         break
                     continue
 
                 try:
-                    next_total_facts = _merge_facts(next_facts, recalculated.facts)
+                    with repair_stage("merge_recalculated_facts", repair_metadata):
+                        next_total_facts = _merge_facts(next_facts, recalculated.facts)
                 except DayRepairInputError:
                     return self._technical_failure(
                         draft, facts, candidates, area_hints, task_results,
-                        timing, report, states, attempts, assignments_log,
+                        report, states, attempts, assignments_log,
                         unassigned, day_id, round_id, round_number, issues,
                         policy, count, "DAY_REPAIR_FACT_CONFLICT",
                     )
-                draft, facts, timing, report = (
+                draft, facts, report = (
                     recalculated.draft, next_total_facts,
-                    recalculated.timing, recalculated.report,
+                    recalculated.report,
                 )
                 candidates, area_hints, task_results = next_candidates, next_areas, next_tasks
                 remaining = self._issues_for_day(
@@ -702,25 +748,25 @@ class DayRepairService:
 
         final_states = self._ordered_states(states, planning_input)
         report = _replace_report_states(report, final_states)
-        unresolved = any(issue.triggers_repair and issue.category != "unknown_info" for issue in report.issues)
+        unresolved = any(is_required_place_gap(planning_input, issue) for issue in report.issues)
         partial = unresolved or bool(unassigned) or any(
-            state.status == "stopped" and state.stop_reason in {"round_limit", "deadline"}
+            state.status == "stopped" and state.stop_reason in {"round_limit", "deadline", "technical_error"}
             for state in final_states
         )
         stop_reason: RepairStop | None = None
         if partial:
             stop_reason = next((
                 state.stop_reason for state in final_states
-                if state.status == "stopped" and state.stop_reason in {"deadline", "round_limit"}
+                if state.status == "stopped" and state.stop_reason in {"deadline", "round_limit", "technical_error"}
             ), None)
         return self._finish(
             "partial" if partial else "complete",
-            draft, facts, candidates, area_hints, task_results, timing, report,
+            draft, facts, candidates, area_hints, task_results, report,
             states, assignments_log, attempts, unassigned, stop_reason,
         )
 
     def _technical_failure(
-        self, draft, facts, candidates, area_hints, task_results, timing, report,
+        self, draft, facts, candidates, area_hints, task_results, report,
         states, attempts, assignments, unassigned, day_id, round_id, round_number,
         issues, policy, completed_rounds, error_code,
     ):
@@ -728,16 +774,15 @@ class DayRepairService:
             day_id, round_id, round_number, issues, policy,
             "technical_error", "technical_error", error_code,
         ))
-        limit = MAX_REPAIR_ROUNDS_PER_DAY
         states[day_id] = RepairState(
             day_id=day_id,
-            completed_rounds=min(limit, completed_rounds),
+            completed_rounds=states[day_id].completed_rounds,
             status="stopped",
             stop_reason="technical_error",
         )
         return self._finish(
             "technical_error", draft, facts, candidates, area_hints, task_results,
-            timing, report, states, assignments, attempts, unassigned,
+            report, states, assignments, attempts, unassigned,
             "technical_error", error_code,
         )
 
@@ -746,24 +791,38 @@ class DayRepairService:
         completed_rounds, max_rounds, *, collected_stop, error_code,
         outcome="technical_error",
     ) -> bool:
-        """记录单日失败轮次；达到上限后停止当前日，调用方继续下一个日期。"""
-        count = min(max_rounds, completed_rounds)
+        """技术失败独立计数；业务无进展/非法修订仍消耗业务轮次。"""
+        technical = outcome == "technical_error"
+        count = states[day_id].completed_rounds if technical else min(max_rounds, completed_rounds)
         attempts.append(self._attempt(
             day_id, round_id, round_number, issues, policy,
             outcome, collected_stop, error_code,
         ))
-        stopped = count >= max_rounds
+        failures = sum(item.day_id == day_id and item.outcome == "technical_error" for item in attempts)
+        stopped = failures >= MAX_TECHNICAL_FAILURES_PER_DAY if technical else count >= max_rounds
+        reason = ("technical_error" if technical else "round_limit") if stopped else None
         states[day_id] = RepairState(
-            day_id=day_id,
-            completed_rounds=count,
-            status="stopped" if stopped else "open",
-            stop_reason="round_limit" if stopped else None,
+            day_id=day_id, completed_rounds=count,
+            status="stopped" if stopped else "open", stop_reason=reason,
         )
+        if technical:
+            with span("repair.technical_recovery", "validation", {
+                "day_id": day_id, "round_id": round_id, "round_number": round_number,
+            }) as record:
+                record.output = {
+                    "outcome": "exhausted" if stopped else "retry",
+                    "error_code": safe_error_code(error_code),
+                    "technical_failure_count": failures,
+                    "technical_failure_limit": MAX_TECHNICAL_FAILURES_PER_DAY,
+                    "completed_business_rounds": count,
+                    "business_round_consumed": False,
+                    "next_business_round": None if stopped else count + 1,
+                }
         return stopped
 
     def _deadline_result(
         self, planning_input, draft, facts, candidates, area_hints, task_results,
-        timing, report, states, assignments, attempts, unassigned, *, active=None,
+        report, states, assignments, attempts, unassigned, *, active=None,
     ):
         current_assignments = assign_repair_issues(planning_input, report, facts, candidates)
         assignments.extend(item for item in current_assignments if item not in assignments)
@@ -783,14 +842,14 @@ class DayRepairService:
                 if not current_issues:
                     states[day_id] = RepairState(
                         day_id=day_id,
-                        completed_rounds=min(MAX_REPAIR_ROUNDS_PER_DAY, completed_rounds),
+                        completed_rounds=state.completed_rounds,
                         status="complete",
                         stop_reason="complete",
                     )
                     continue
                 states[day_id] = RepairState(
                     day_id=day_id,
-                    completed_rounds=min(MAX_REPAIR_ROUNDS_PER_DAY, completed_rounds),
+                    completed_rounds=state.completed_rounds,
                     status="stopped",
                     stop_reason="deadline",
                 )
@@ -812,13 +871,13 @@ class DayRepairService:
                 )
         return self._finish(
             "partial", draft, facts, candidates, area_hints, task_results,
-            timing, report, states, assignments, attempts, unassigned, "deadline",
+             report, states, assignments, attempts, unassigned, "deadline",
         )
 
     @staticmethod
     def _attempt(day_id, round_id, round_number, issues, policy, outcome,
                  collection_stop_reason, error_code=None):
-        return DayRepairAttempt(
+        attempt = DayRepairAttempt(
             day_id=day_id,
             round_id=round_id,
             round_number=round_number,
@@ -833,9 +892,25 @@ class DayRepairService:
             removable_activity_ids=policy.removable_ids,
             error_code=error_code,
         )
+        # 每轮结束即持久化；不等 pipeline 返回后再保存内存中的 attempts。
+        with span("repair.round_result", "validation", {
+            "day_id": day_id, "round_id": round_id, "round_number": round_number,
+        }) as record:
+            record.output = {
+                "schema_version": 1, "stage": "repair.round_result",
+                "outcome": outcome, "accepted": outcome == "applied",
+                "business_round_consumed": outcome in {"applied", "no_progress", "invalid_revision"},
+                "collection_stop_reason": collection_stop_reason,
+                "error_code": safe_error_code(error_code) if error_code else None,
+                "issue_count": len(attempt.issue_ids),
+                "preserved_activity_count": len(policy.preserve_ids),
+                "modifiable_activity_count": len(policy.modifiable_ids),
+                "removable_activity_count": len(policy.removable_ids),
+            }
+        return attempt
 
     @staticmethod
-    def _finish(status, draft, facts, candidates, area_hints, task_results, timing,
+    def _finish(status, draft, facts, candidates, area_hints, task_results,
                 report, states, assignments, attempts, unassigned, stop_reason,
                 error_code=None):
         final_states = tuple(states.values())
@@ -846,7 +921,6 @@ class DayRepairService:
             candidates=tuple(candidates),
             area_hints=tuple(area_hints),
             task_results=tuple(task_results),
-            timing=timing,
             report=_replace_report_states(report, final_states),
             repair_states=final_states,
             assignments=tuple(assignments),
@@ -857,7 +931,7 @@ class DayRepairService:
         )
 
     @staticmethod
-    def _validate_run_binding(planning_input, draft, timing, report):
+    def _validate_run_binding(planning_input, draft, report):
         if draft.request_id != planning_input.request.request_id:
             raise DayRepairInputError("draft request_id does not match PlanningInput")
         if draft.rule_version != planning_input.rules.rule_version:
@@ -870,8 +944,6 @@ class DayRepairService:
             raise DayRepairInputError("PlanningInput and PlanDraft day IDs/dates must match")
         if report.plan_id != draft.plan_id or report.based_on_revision != draft.revision:
             raise DayRepairInputError("ValidationReport must bind the current PlanDraft revision")
-        if timing.plan_id != draft.plan_id or timing.based_on_revision != draft.revision:
-            raise DayRepairInputError("PlanTimingResult must bind the current PlanDraft revision")
 
     @staticmethod
     def _state_map(draft, report):
@@ -921,11 +993,6 @@ class DayRepairService:
             or result_draft.base_revision != proposed_draft.base_revision
         ):
             raise DayRepairInputError("recalculation returned the wrong plan revision")
-        if (
-            recalculated.timing.plan_id != result_draft.plan_id
-            or recalculated.timing.based_on_revision != result_draft.revision
-        ):
-            raise DayRepairInputError("recalculated timing does not bind the new revision")
         if recalculated.report.plan_id != result_draft.plan_id or recalculated.report.based_on_revision != result_draft.revision:
             raise DayRepairInputError("recalculated report does not bind the new revision")
         proposed_target = next((day for day in proposed_draft.days if day.day_id == day_id), None)
@@ -955,118 +1022,28 @@ def assign_repair_issues(
     facts: FactStore,
     candidates: tuple[CandidateRef, ...],
 ) -> tuple[IssueDayAssignment, ...]:
-    """给每个可修复 issue 分配且记录唯一日期；plan-level 必去不得丢弃。"""
-    days = planning_input.days
-    candidates_by_requirement: dict[str, list[CandidateRef]] = {}
-    for candidate in candidates:
-        for requirement_id in candidate.requirement_ids:
-            candidates_by_requirement.setdefault(requirement_id, []).append(candidate)
-    assignments: list[IssueDayAssignment] = []
-    for issue in report.issues:
-        if not issue.triggers_repair or issue.category not in {"missing_arrangement", "known_conflict"}:
-            continue
-        if issue.day_id is not None:
-            assignments.append(IssueDayAssignment(
-                issue_id=issue.issue_id,
-                assigned_day_id=issue.day_id,
-                reason="issue_day",
-            ))
-            continue
-        if issue.code != "must_visit_unplanned" or issue.target_id is None:
-            assignments.append(IssueDayAssignment(
-                issue_id=issue.issue_id,
-                assigned_day_id=None,
-                reason="no_eligible_sightseeing_day",
-            ))
-            continue
-        chosen_day = None
-        chosen_candidate = None
-        eligible_candidates = sorted(
-            candidates_by_requirement.get(issue.target_id, ()),
-            key=lambda candidate: candidate.candidate_id,
+    """只把必需时段的真实地点缺项分配给该日期。"""
+    return tuple(
+        IssueDayAssignment(
+            issue_id=issue.issue_id,
+            assigned_day_id=issue.day_id,
+            reason="issue_day",
         )
-        for candidate_day in days:
-            for candidate in eligible_candidates:
-                if candidate.category != "sightseeing" or not _candidate_has_verified_place(candidate, facts, planning_input.request.city):
-                    continue
-                if any(
-                    slot.eligibility != "skipped"
-                    and slot.period in {"morning", "afternoon", "evening"}
-                    and (not candidate.slot_ids or slot.slot_id in candidate.slot_ids)
-                    for slot in candidate_day.slots
-                ):
-                    chosen_day, chosen_candidate = candidate_day, candidate
-                    break
-            if chosen_day is not None:
-                break
-        if chosen_day is not None:
-            assignments.append(IssueDayAssignment(
-                issue_id=issue.issue_id,
-                assigned_day_id=chosen_day.day_id,
-                reason="candidate_applicable_day",
-                candidate_id=chosen_candidate.candidate_id,
-            ))
-            continue
-        fallback = next((day for day in days if any(
-            slot.eligibility != "skipped" and slot.period in {"morning", "afternoon", "evening"}
-            for slot in day.slots
-        )), None)
-        if fallback is None:
-            assignments.append(IssueDayAssignment(
-                issue_id=issue.issue_id,
-                assigned_day_id=None,
-                reason="no_eligible_sightseeing_day",
-            ))
-        else:
-            assignments.append(IssueDayAssignment(
-                issue_id=issue.issue_id,
-                assigned_day_id=fallback.day_id,
-                reason="first_schedulable_sightseeing_day",
-            ))
-    return tuple(assignments)
+        for issue in report.issues
+        if is_required_place_gap(planning_input, issue)
+    )
 
 
 def derive_activity_policy(draft: PlanDraft, day_id: str, issues: tuple[ValidationIssue, ...]) -> _Policy:
-    """保护无关活动；只开放被已知冲突波及的本日活动调整或删除。"""
+    """地点缺项只允许填空；已有真实活动及相对顺序全部保留。"""
     day = next((item for item in draft.days if item.day_id == day_id), None)
     if day is None:
         raise DayRepairInputError("repair day is absent from PlanDraft")
-    real_ids = tuple(activity.activity_id for activity in day.activities if activity.kind != "free_time")
-    placeholder_ids = tuple(activity.activity_id for activity in day.activities if activity.kind == "free_time")
-    conflict_issues = tuple(issue for issue in issues if issue.category == "known_conflict")
-    affected: set[str] = set()
-    legs = {leg.leg_id: leg for leg in draft.legs if leg.day_id == day_id}
-    for issue in conflict_issues:
-        if issue.scope == "activity" and issue.target_id in real_ids:
-            affected.add(issue.target_id)
-        elif issue.code == "return_deadline_conflict":
-            leg = legs.get(issue.target_id or "")
-            endpoint = leg.from_endpoint.reference_id if leg and leg.from_endpoint.kind == "activity" else None
-            ordered_ids = [activity.activity_id for activity in day.activities if activity.kind != "free_time"]
-            if endpoint in ordered_ids:
-                affected.update(ordered_ids[:ordered_ids.index(endpoint) + 1])
-            else:
-                affected.update(real_ids)
-        elif issue.scope == "day":
-            evidence = set(issue.evidence_refs)
-            affected.update(evidence.intersection(real_ids))
-            if not affected:
-                affected.update(real_ids)
-        elif issue.scope == "leg":
-            leg = legs.get(issue.target_id or "")
-            references = {
-                leg.from_endpoint.reference_id if leg else None,
-                leg.to_endpoint.reference_id if leg else None,
-            }
-            affected.update(references.intersection(real_ids))
-            if not affected:
-                affected.update(real_ids)
-    if not conflict_issues:
-        return _Policy(real_ids, (), placeholder_ids)
-    modifiable = tuple(activity_id for activity_id in real_ids if activity_id in affected)
-    preserved = tuple(activity_id for activity_id in real_ids if activity_id not in affected)
-    removable = tuple(dict.fromkeys((*modifiable, *placeholder_ids)))
-    return _Policy(preserved, modifiable, removable)
+    return _Policy(
+        tuple(activity.activity_id for activity in day.activities if activity.kind != "free_time"),
+        (),
+        tuple(activity.activity_id for activity in day.activities if activity.kind == "free_time"),
+    )
 
 
 def apply_day_revision(
@@ -1145,18 +1122,12 @@ def apply_day_revision(
                 continue
             can_change = old.activity_id in allowed_change_activity_ids
             if can_change:
-                activity_changed = (
-                    proposal.slot_id != old.slot_id
-                    or (proposal.duration_s is not None and proposal.duration_s != old.duration_s)
-                )
+                activity_changed = proposal.slot_id != old.slot_id
                 if old.activity_source == "user" and not activity_changed:
                     new_activities.append(old)
                 else:
                     new_activities.append(old.model_copy(update={
                         "slot_id": proposal.slot_id,
-                        "duration_s": proposal.duration_s if proposal.duration_s is not None else old.duration_s,
-                        "duration_source": "model" if proposal.duration_s is not None else old.duration_source,
-                        "duration_reason": None if proposal.duration_s is not None else old.duration_reason,
                         "activity_source": "model",
                     }))
             else:
@@ -1165,14 +1136,10 @@ def apply_day_revision(
                 new_activities.append(old)
             continue
         if proposal.kind == "free_time":
-            duration = proposal.duration_s if proposal.duration_s is not None else 0
             new_activities.append(DraftActivity(
                 activity_id=_new_activity_id(draft, revision, proposal),
                 slot_id=proposal.slot_id,
                 kind="free_time",
-                duration_s=duration,
-                duration_source="model" if proposal.duration_s is not None else "default",
-                duration_reason=None if proposal.duration_s is not None else "未提供建议时长，默认0秒；不表示该时段已满足完整性要求。",
                 activity_source="model",
                 recommendation_reason=proposal.recommendation_reason,
             ))
@@ -1180,12 +1147,6 @@ def apply_day_revision(
         candidate = candidate_by_id.get(proposal.candidate_ref or "")
         if candidate is None:
             raise DayRepairInputError("revision candidate is absent")
-        if proposal.duration_s is not None:
-            duration, source, reason = proposal.duration_s, "model", None
-        elif proposal.kind == "sightseeing":
-            duration, source, reason = planning_input.rules.sightseeing_default_s, "default", "未提供建议时长，采用景点默认参考时长。"
-        else:
-            duration, source, reason = planning_input.rules.meal_default_s, "default", "未提供建议时长，采用餐饮默认参考时长。"
         new_activities.append(DraftActivity(
             activity_id=_new_activity_id(draft, revision, proposal),
             candidate_ref=candidate.candidate_id,
@@ -1193,9 +1154,6 @@ def apply_day_revision(
             kind=proposal.kind,
             poi_id=candidate.poi_id,
             place_fact_id=candidate.place_fact_id,
-            duration_s=duration,
-            duration_source=source,
-            duration_reason=reason,
             activity_source="model",
             requirement_ids=proposal.requirement_ids,
             recommendation_reason=proposal.recommendation_reason,
@@ -1266,34 +1224,31 @@ def _collection_scope(planning_input, constraint, day, issues, facts, candidates
     targets: list[DayRepairCollectionTarget] = []
     slots = {slot.slot_id: slot for slot in constraint.slots}
     for issue in issues:
+        if not is_required_place_gap(planning_input, issue):
+            continue
         if issue.code == "missing_meal":
             role = "dining"
-        elif issue.code in {"missing_sightseeing", "must_visit_unplanned"}:
+        elif issue.code == "missing_sightseeing":
             role = "attractions"
         else:
             continue
         if issue.target_id in slots:
             target_slots = (slots[issue.target_id],)
-        elif issue.code == "must_visit_unplanned":
-            target_slots = tuple(slot for slot in constraint.slots if slot.period in {"morning", "afternoon", "evening"} and slot.eligibility != "skipped")
         else:
             target_slots = ()
-        available = [slot for slot in target_slots if slot.eligibility != "skipped"]
+        available = [slot for slot in target_slots if slot.eligibility == "required"]
         if not available:
             continue
         category = "meal" if role == "dining" else "sightseeing"
-        requirement_id = issue.target_id if issue.code == "must_visit_unplanned" else None
         relevant_candidates = [
             candidate for candidate in candidates
             if candidate.category == category
-            and (requirement_id is None or requirement_id in candidate.requirement_ids)
-            and any(not candidate.slot_ids or slot.slot_id in candidate.slot_ids for slot in available)
+            and any(candidate_allows_slot(candidate, slot.slot_id) for slot in available)
         ]
         usable = any(
             candidate.category == category
-            and (requirement_id is None or requirement_id in candidate.requirement_ids)
-            and _candidate_has_verified_place(candidate, facts, planning_input.request.city)
-            and any(not candidate.slot_ids or slot.slot_id in candidate.slot_ids for slot in available)
+            and _candidate_has_verified_place(candidate, facts, city_for_days(planning_input, (day.day_id,)))
+            and any(candidate_allows_slot(candidate, slot.slot_id) for slot in available)
             for candidate in candidates
         )
         if not usable:
@@ -1302,7 +1257,6 @@ def _collection_scope(planning_input, constraint, day, issues, facts, candidates
                 role=role,
                 issue_ids=(issue.issue_id,),
                 slot_ids=tuple(slot.slot_id for slot in available),
-                requirement_ids=(requirement_id,) if requirement_id is not None else (),
                 candidate_ids=tuple(candidate.candidate_id for candidate in relevant_candidates),
             ))
     return bool(targets), tuple(targets)
@@ -1310,19 +1264,18 @@ def _collection_scope(planning_input, constraint, day, issues, facts, candidates
 
 def _candidate_has_verified_place(candidate, facts, city):
     place = next((item for item in facts.places if item.fact_id == candidate.place_fact_id), None)
-    if place is None or place.poi_id != candidate.poi_id or place.location is None or not place.city:
+    if place is None or place.poi_id != candidate.poi_id or place.location is None:
         return False
-    city_key = _city_key(city)
-    place_city = _city_key(place.city)
-    return city_key == place_city or city_key in place_city or place_city in city_key
-
-
-def _city_key(value: str) -> str:
-    text = "".join(value.split())
-    for suffix in ("特别行政区", "自治州", "地区", "市"):
-        if text.endswith(suffix):
-            return text[:-len(suffix)]
-    return text
+    source_ids = {source.tool_call_id for source in facts.sources}
+    if not place.source_refs or not set(place.source_refs).issubset(source_ids):
+        return False
+    if not _city_matches(city, place.city):
+        return False
+    return (
+        _category_status(place) == "sightseeing" if candidate.category == "sightseeing"
+        else _dining_category(place) == "dining" if candidate.category == "meal"
+        else False
+    )
 
 
 def _known_fact_ids(facts: FactStore) -> list[str]:

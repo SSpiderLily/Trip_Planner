@@ -9,13 +9,12 @@ export function v4PreviewStageLabel(stage: string, status: V4TaskState): string 
     planning_input: '正在整理旅行需求',
     dispatch: '正在查询景点、餐馆、住宿和天气',
     proposal: '正在规划每天的行程',
-    current_routes: '正在计算交通路线和活动时间',
-    timing: '正在核对游览时间与返程安排',
+    current_routes: '正在查询交通路线',
     validation: '正在检查行程安排和缺项',
     repair: '正在检查并补齐每天的行程',
     repair_collection: '正在补查行程中的缺项',
     repair_revision: '正在调整每天的行程',
-    repair_routes: '正在重新计算当天交通和时间',
+    repair_routes: '正在核实当天交通',
     cost: '正在汇总已核实的消费参考',
     ready: '行程已生成，正在打开预览',
     failed: '行程未能生成',
@@ -45,7 +44,7 @@ export function v4GenerationFailureMessage(errorCode: string | null): string {
         return '地点或天气信息未能完成核实，因此无法生成预览。请返回首页重新规划。'
       }
       if (errorCode?.startsWith('CURRENT_ROUTE_') || errorCode?.startsWith('ROUTE_')) {
-        return '交通与活动时间未能完成核算，因此无法生成预览。请返回首页重新规划。'
+        return '交通路线未能完成查询，因此无法生成预览。请返回首页重新规划。'
       }
       return '规划过程未能完成，因此没有可预览的行程。请返回首页重新规划。'
   }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from uuid import NAMESPACE_URL, uuid5
 
 from app.models.planning_v4 import (
@@ -23,7 +24,6 @@ from app.services.current_route_service import (
     CurrentRouteError,
     build_pending_route_legs_for_day,
 )
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_preview
 
@@ -84,7 +84,7 @@ class PlanningV4EditService:
         working = list(old_day.activities)
         original_target_legs = [leg for leg in draft.legs if leg.day_id == command.day_id]
         client_ids: dict[str, str] = {}
-        selected_modes: dict[tuple[str, str, str, str, str], str] = {}
+        selected_options: dict[tuple[str, str, str, str, str], tuple[str, str]] = {}
         changed_ids: list[str] = []
         changed_leg_ids: list[str] = []
         topology_changed = False
@@ -168,14 +168,18 @@ class PlanningV4EditService:
                 option = next(
                     item for item in route_fact.options if item.option_id == operation.option_id
                 )
-                if option.duration_s is None or option.duration_s < 0:
+                if option.duration_s is None or not isfinite(option.duration_s) or option.duration_s < 0:
                     raise PlanningV4EditError("selected_option_duration_unknown")
                 signature = _leg_signature(leg)
-                selected_modes[signature] = operation.mode
+                selected_options[signature] = (operation.mode, operation.option_id)
                 previous_preference = leg.preferred_mode or (
                     leg.selected_mode if leg.selection_source == "user" else None
                 )
-                if previous_preference != operation.mode or leg.selection_source != "user":
+                if (
+                    previous_preference != operation.mode
+                    or leg.selected_option_id != operation.option_id
+                    or leg.selection_source != "user"
+                ):
                     preference_changed = True
                     changed_leg_ids.append(leg.leg_id)
             else:  # pragma: no cover - Literal discriminator closes this branch.
@@ -200,17 +204,14 @@ class PlanningV4EditService:
         for leg in draft.legs:
             updates: dict[str, object] = {"plan_revision": revision}
             if leg.day_id == command.day_id:
-                selected_mode = selected_modes.get(_leg_signature(leg))
-                if selected_mode is not None:
+                selected_option = selected_options.get(_leg_signature(leg))
+                if selected_option is not None:
                     updates.update({
-                        "selected_mode": None,
-                        "selected_option_id": None,
-                        "preferred_mode": selected_mode,
+                        "selected_mode": selected_option[0],
+                        "selected_option_id": selected_option[1],
+                        "preferred_mode": selected_option[0],
                         "selection_source": "user",
                     })
-                elif leg.preferred_mode is None and leg.selection_source == "user":
-                    # 兼容尚未有 preferred_mode 字段的已签名选择快照。
-                    updates["preferred_mode"] = leg.selected_mode
             retagged_legs.append(leg.model_copy(update=updates, deep=True))
 
         pending_base = PlanDraft.model_validate(draft.model_dump(mode="python") | {
@@ -231,8 +232,26 @@ class PlanningV4EditService:
             raise PlanningV4EditError("route_scaffold_invalid") from exc
 
         refreshed_signatures = {_leg_signature(leg) for leg in target_legs}
-        if set(selected_modes) - refreshed_signatures:
+        if set(selected_options) - refreshed_signatures:
             raise PlanningV4EditError("selected_leg_removed_by_same_command")
+        previous_by_signature = {
+            _leg_signature(leg): leg for leg in pending_base.legs
+            if leg.day_id == command.day_id
+        }
+        # 日期、公共交通参考时刻及不可变地点事实均未改变。同向相邻边
+        # 继续使用原方案与路径，仅绑定新版本；新邻边才保留待查询骨架。
+        target_legs = tuple(
+            previous_by_signature[_leg_signature(leg)]
+            if _leg_signature(leg) in previous_by_signature
+            and previous_by_signature[_leg_signature(leg)].from_endpoint == leg.from_endpoint
+            and previous_by_signature[_leg_signature(leg)].to_endpoint == leg.to_endpoint
+            else leg
+            for leg in target_legs
+        )
+        old_leg_ids = {leg.leg_id for leg in original_target_legs}
+        new_leg_ids = {leg.leg_id for leg in target_legs}
+        changed_leg_ids.extend(leg.leg_id for leg in original_target_legs if leg.leg_id not in new_leg_ids)
+        changed_leg_ids.extend(leg.leg_id for leg in target_legs if leg.leg_id not in old_leg_ids)
         non_target_legs = [leg for leg in pending_base.legs if leg.day_id != command.day_id]
         final_draft = PlanDraft.model_validate(pending_base.model_dump(mode="python") | {
             "legs": tuple((*non_target_legs, *target_legs)),
@@ -248,25 +267,20 @@ class PlanningV4EditService:
             and any(result.status == "pending" for result in leg.mode_results)
         ))))
 
-        timing = calculate_plan_timing(
-            preview.planning_input,
-            final_draft,
-            preview.facts,
-            verified_departure_fact_id=verified_departure_fact_id or _departure_fact_id(final_draft),
-        )
         report = validate_daily_plan(
             preview.planning_input,
             final_draft,
             preview.facts,
             preview.candidates,
-            timing,
             repair_states=preview.validation.repair_states,
         )
         calculation = PreviewCalculation(
             based_on_revision=revision,
             calculation_id=f"edit:{draft.plan_id}:{command.command_id}",
-            current_routes="pending" if pending_leg_ids else "completed",
-            alternative_backfill="pending",
+            current_routes=("pending" if pending_leg_ids else "failed" if any(
+                result.status == "error" for leg in final_draft.legs for result in leg.mode_results
+            ) else "completed"),
+            alternative_backfill="not_required",
             pending_leg_ids=pending_leg_ids,
         )
         updated_preview = ItineraryPreview(
@@ -277,7 +291,7 @@ class PlanningV4EditService:
             candidates=preview.candidates,
             validation=report,
             day_summaries=build_day_summaries(
-                preview.planning_input, final_draft, timing,
+                preview.planning_input, final_draft, preview.facts,
             ),
             calculation=calculation,
         )
@@ -335,11 +349,6 @@ class PlanningV4EditService:
         activity_id = f"activity:{uuid5(NAMESPACE_URL, '|'.join((preview.draft.plan_id, command.command_id, operation.client_ref)))}"
         if activity_id in existing_activity_ids or activity_id in current_activity_ids:
             raise PlanningV4EditError("generated_activity_id_conflict")
-        duration_s = (
-            preview.planning_input.rules.meal_default_s
-            if expected_category == "meal"
-            else preview.planning_input.rules.sightseeing_default_s
-        )
         activity = DraftActivity(
             activity_id=activity_id,
             candidate_ref=candidate.candidate_id,
@@ -347,13 +356,6 @@ class PlanningV4EditService:
             kind=expected_category,
             poi_id=candidate.poi_id,
             place_fact_id=candidate.place_fact_id,
-            duration_s=duration_s,
-            duration_source="default",
-            duration_reason=(
-                "用户新增餐饮，采用餐饮默认参考时长。"
-                if expected_category == "meal"
-                else "用户新增景点，采用景点默认参考时长。"
-            ),
             activity_source="user",
             requirement_ids=candidate.requirement_ids,
             recommendation_reason=candidate.recommendation_reason,

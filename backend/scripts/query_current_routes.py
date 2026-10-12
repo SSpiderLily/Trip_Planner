@@ -81,7 +81,6 @@ def _result_report(result) -> dict:
             }
             for fact in route_facts.values()
         ],
-        "day_timing": [item.model_dump(mode="json") for item in result.timing.days],
     }
 
 

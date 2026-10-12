@@ -1,4 +1,4 @@
-"""持久化 v4 按日编辑，并协调可恢复的目标日路线重查。"""
+"""持久化 v4 按日编辑，并协调可恢复的相邻边查询。"""
 from __future__ import annotations
 
 import asyncio
@@ -21,13 +21,13 @@ from app.models.preview_storage import (
     PreviewAccessError,
     PreviewConflict,
     PreviewIdentityConflict,
+    PreviewSnapshotUnsupported,
     StoredPreview,
 )
 from app.services.current_route_service import CurrentRouteError, CurrentRouteService
 from app.services.destination_candidate_repository import DestinationCandidateNotFound
 from app.services.destination_search_service import DestinationCandidateBundle, DestinationSearchService
 from app.services.planning_v4_edit_service import PlanningV4EditError, PlanningV4EditService
-from app.services.planning_v4_timing import calculate_plan_timing
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
 from app.services.planning_v4_validator import ContractValidationError, validate_preview
 from app.services.reference_cost import aggregate_reference_costs
@@ -44,6 +44,7 @@ _FATAL_ROUTE_CODES = frozenset({
     "route_context_binding_mismatch",
     "route_cache_plan_mismatch",
     "route_result_contract_invalid",
+    "requested_live_leg_scope_invalid",
 })
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,7 +99,6 @@ def _append_destination_bundle(
     preview = ItineraryPreview.model_validate(preview_payload)
     return PreviewSnapshot.model_validate({
         "preview": preview.model_dump(mode="json"),
-        "timing": snapshot.timing.model_dump(mode="json"),
         "cost": snapshot.cost.model_dump(mode="json"),
     })
 
@@ -214,6 +214,8 @@ class PlanningV4PreviewEditService:
             raise TaskError("IDEMPOTENCY_CONFLICT", str(exc), 409) from exc
         except PreviewAccessError as exc:
             raise TaskError("TASK_NOT_FOUND", "预览任务不存在", 404) from exc
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except PlanningV4EditError as exc:
             status = 409 if exc.code in {"stale_edit_revision", "plan_mismatch"} else 422
             raise TaskError(exc.code.upper(), "编辑命令无法应用到当前预览", status) from exc
@@ -315,6 +317,8 @@ class PlanningV4PreviewEditService:
                 task_id,
                 calculation_id,
             )
+        except PreviewSnapshotUnsupported as exc:
+            raise TaskError("PREVIEW_CONTRACT_UNSUPPORTED", str(exc), 409) from exc
         except Exception as exc:
             raise TaskError("PREVIEW_STORAGE_UNAVAILABLE", "路线任务状态暂不可用", 503) from exc
         if job is None:
@@ -371,7 +375,9 @@ class PlanningV4PreviewEditService:
             await self._ensure_worker(plan_id)
 
     async def schedule_for_record(self, record: StoredPreview) -> None:
-        """还原 pending 最终快照后，安排仓库同事务登记的路线任务。"""
+        """地点初版或还原快照落盘后，安排同事务登记的相邻路线任务。"""
+        if not self.accepting:
+            return
         job = await asyncio.to_thread(
             self.repository.get_route_job_by_plan,
             record.preview.draft.plan_id,
@@ -379,6 +385,17 @@ class PlanningV4PreviewEditService:
         )
         if job is not None and job.status == "pending":
             await self._ensure_worker(job.plan_id)
+
+    async def fail_scheduling_for_record(self, record: StoredPreview) -> None:
+        """启动失败只终结该快照的任务，不触碰后续编辑产生的任务。"""
+        claim = await asyncio.to_thread(
+            self.repository.claim_route_job, record.preview.draft.plan_id,
+            record.preview.calculation.calculation_id,
+        )
+        if claim is not None:
+            await self._publish_failed(
+                claim, claim.record.preview, "ROUTE_SCHEDULING_FAILED", "provider_error",
+            )
 
     async def _ensure_worker(self, plan_id: str) -> None:
         lock = self.scheduler_locks.setdefault(plan_id, asyncio.Lock())
@@ -401,10 +418,9 @@ class PlanningV4PreviewEditService:
                 await self._run_claim(claim)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # 单个计划后台协调异常不能影响 API；保留可编辑快照并终止本 worker。
-            _LOGGER.exception("v4 route worker failed for plan %s", plan_id)
-            pass
+            _LOGGER.warning("v4 route worker failed for plan %s (%s)", plan_id, type(exc).__name__)
         finally:
             lock = self.scheduler_locks.setdefault(plan_id, asyncio.Lock())
             async with lock:
@@ -435,6 +451,13 @@ class PlanningV4PreviewEditService:
         try:
             deadline = asyncio.get_running_loop().time() + self.route_deadline_seconds
             for day_index, day_id in enumerate(job.affected_day_ids):
+                pending_leg_ids = tuple(
+                    leg.leg_id for leg in draft.legs
+                    if leg.day_id == day_id and leg.leg_id in preview.calculation.pending_leg_ids
+                    and any(mode.status == "pending" for mode in leg.mode_results)
+                )
+                if not pending_leg_ids:
+                    continue
                 remaining_seconds = deadline - asyncio.get_running_loop().time()
                 if remaining_seconds <= 0:
                     for expired_day in job.affected_day_ids[day_index:]:
@@ -475,7 +498,7 @@ class PlanningV4PreviewEditService:
                         None,
                     )
                     with _best_effort_task_observation(observation, job.task_id), span(
-                        "planning.v4.edit_routes",
+                        "planning.v4.current_routes" if job.calculation_id.startswith("generation:") else "planning.v4.edit_routes",
                         "planning",
                         {
                             "task_id": job.task_id,
@@ -493,14 +516,15 @@ class PlanningV4PreviewEditService:
                                 verified_departure_fact_id=verified_departure_fact_id,
                                 route_context=context,
                                 only_day_id=day_id,
+                                only_leg_ids=pending_leg_ids,
                             ),
                             timeout=remaining_seconds,
                         )
-                    self._validate_route_result(draft, execution, day_id)
+                    self._validate_route_result(draft, execution, day_id, pending_leg_ids)
                     draft, facts = execution.draft, execution.fact_store
                     provider_errors = [
                         mode
-                        for leg in execution.draft.legs if leg.day_id == day_id
+                        for leg in execution.draft.legs if leg.leg_id in pending_leg_ids
                         for mode in leg.mode_results if mode.status == "error"
                     ]
                     if provider_errors:
@@ -522,6 +546,12 @@ class PlanningV4PreviewEditService:
                                 draft = self._mark_day_failed(draft, remaining, "invalid_response")
                         break
 
+            if not failed_days:
+                retained_errors = [
+                    (leg.day_id, "ROUTE_PROVIDER_ERROR", mode.error_category or "provider_error")
+                    for leg in draft.legs for mode in leg.mode_results if mode.status == "error"
+                ]
+                failed_days.extend(retained_errors)
             final_snapshot = self._refresh_preview(
                 preview,
                 draft=draft,
@@ -551,11 +581,10 @@ class PlanningV4PreviewEditService:
                     "invalid_response",
                     verified_departure_fact_id=verified_departure_fact_id,
                 )
-            except Exception:
-                _LOGGER.exception(
-                    "could not publish failed v4 route job %s", job.calculation_id,
+            except Exception as exc:
+                _LOGGER.warning(
+                    "could not publish failed v4 route job %s (%s)", job.calculation_id, type(exc).__name__,
                 )
-                pass
         finally:
             if owns_context and context is not None:
                 await self._close_route_context(context)
@@ -618,44 +647,38 @@ class PlanningV4PreviewEditService:
         }, deep=True)
         return self._snapshot_with_calculations(
             updated_preview,
-            verified_departure_fact_id=(
-                verified_departure_fact_id
-                if verified_departure_fact_id is not None
-                else self._verified_departure_fact_id(preview)
-            ),
         )
 
     @staticmethod
     def _snapshot_with_calculations(
         preview: ItineraryPreview,
-        *,
-        verified_departure_fact_id: str | None = None,
     ) -> PreviewSnapshot:
-        timing = calculate_plan_timing(
-            preview.planning_input,
-            preview.draft,
-            preview.facts,
-            verified_departure_fact_id=(
-                verified_departure_fact_id
-                if verified_departure_fact_id is not None
-                else PlanningV4PreviewEditService._verified_departure_fact_id(preview)
-            ),
-        )
         report = validate_daily_plan(
             preview.planning_input,
             preview.draft,
             preview.facts,
             preview.candidates,
-            timing,
             repair_states=preview.validation.repair_states,
         )
+        notices = tuple(
+            issue.model_copy(update={"based_on_revision": preview.draft.revision})
+            for issue in preview.validation.issues
+            if issue.code in {"INITIAL_ACTIVITY_OMITTED", "DISPATCH_COLLECTION_PARTIAL"}
+        )
+        if notices:
+            report = report.model_copy(update={
+                "issues": (*report.issues, *notices),
+                "days": tuple(day.model_copy(update={
+                    "issue_ids": (*day.issue_ids, *(issue.issue_id for issue in notices if issue.day_id == day.day_id)),
+                }) for day in report.days),
+            })
         cost = aggregate_reference_costs(
             preview.planning_input,
             preview.draft,
             preview.facts,
         )
         cost_by_day = {day.day_id: day for day in cost.days}
-        summaries = build_day_summaries(preview.planning_input, preview.draft, timing)
+        summaries = build_day_summaries(preview.planning_input, preview.draft, preview.facts)
         summaries = tuple(
             summary.model_copy(update={
                 "cost_status": (
@@ -676,7 +699,7 @@ class PlanningV4PreviewEditService:
             validate_preview(updated)
         except ContractValidationError as exc:
             raise ValueError("preview_after_edit_invalid") from exc
-        return PreviewSnapshot(preview=updated, timing=timing, cost=cost)
+        return PreviewSnapshot(preview=updated, cost=cost)
 
     @staticmethod
     def _verified_departure_fact_id(preview: ItineraryPreview) -> str | None:
@@ -739,6 +762,9 @@ class PlanningV4PreviewEditService:
         # A retained generation context belongs to PreviewTaskService and is closed
         # there. A context created only for this worker belongs to this coordinator.
         shared_context = shared_contexts.get(plan_id)
+        if preview.calculation.calculation_id.startswith("generation:"):
+            shared_contexts[plan_id] = replacement
+            return replacement, False
         if context is shared_context or cancelled:
             if shared_context is not None:
                 shared_contexts[plan_id] = replacement
@@ -758,7 +784,9 @@ class PlanningV4PreviewEditService:
             pass
 
     @staticmethod
-    def _validate_route_result(before: PlanDraft, execution, day_id: str) -> None:
+    def _validate_route_result(
+        before: PlanDraft, execution, day_id: str, only_leg_ids: tuple[str, ...],
+    ) -> None:
         if (
             execution.plan_id != before.plan_id
             or execution.request_id != before.request_id
@@ -768,16 +796,25 @@ class PlanningV4PreviewEditService:
             or execution.draft.days != before.days
         ):
             raise CurrentRouteError("route_result_contract_invalid")
-        before_other = {leg.leg_id: leg for leg in before.legs if leg.day_id != day_id}
-        after_other = {leg.leg_id: leg for leg in execution.draft.legs if leg.day_id != day_id}
-        if before_other.keys() != after_other.keys():
+        before_legs = {leg.leg_id: leg for leg in before.legs}
+        after_legs = {leg.leg_id: leg for leg in execution.draft.legs}
+        selected_ids = set(only_leg_ids)
+        if before_legs.keys() != after_legs.keys() or len(after_legs) != len(execution.draft.legs):
             raise CurrentRouteError("route_result_contract_invalid")
-        for leg_id, previous in before_other.items():
-            if after_other[leg_id].model_copy(update={"plan_revision": previous.plan_revision}) != previous:
+        for leg_id, previous in before_legs.items():
+            updated = after_legs[leg_id]
+            if leg_id not in selected_ids and updated != previous:
+                raise CurrentRouteError("route_result_contract_invalid")
+            if (
+                updated.day_id != previous.day_id
+                or updated.plan_revision != previous.plan_revision
+                or updated.from_endpoint != previous.from_endpoint
+                or updated.to_endpoint != previous.to_endpoint
+            ):
                 raise CurrentRouteError("route_result_contract_invalid")
         if any(
             result.status == "pending"
-            for leg in execution.draft.legs if leg.day_id == day_id
+            for leg in execution.draft.legs if leg.leg_id in selected_ids
             for result in leg.mode_results
         ):
             raise CurrentRouteError("route_result_contract_invalid")
@@ -787,6 +824,9 @@ class PlanningV4PreviewEditService:
         legs = []
         for leg in draft.legs:
             if leg.day_id != day_id:
+                legs.append(leg)
+                continue
+            if not any(result.status == "pending" for result in leg.mode_results):
                 legs.append(leg)
                 continue
             modes = tuple(

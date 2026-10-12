@@ -68,6 +68,12 @@ export function retrySavePreviewAccess(): boolean {
   }
 }
 
+/** 指定任务不回退到最近任务；凭据只留在本机，不放入 URL。 */
+export function getPreviewAccessForTask(taskId: string): V4PreviewAccess | null {
+  if (pendingPreviewAccess?.taskId === taskId) return { ...pendingPreviewAccess }
+  return readPreviewAccess(taskId)
+}
+
 export function readPreviewAccess(taskId: string): V4PreviewAccess | null {
   const serialized = safeStorageGet(accessKey(taskId))
   if (!serialized) return null
@@ -77,6 +83,22 @@ export function readPreviewAccess(taskId: string): V4PreviewAccess | null {
     return access as V4PreviewAccess
   } catch {
     return null
+  }
+}
+
+/** 本机恢复仅轮换已有预览凭据，不提交规划请求；独立客户端不记录凭据。 */
+export async function recoverLocalPreviewAccess(taskId: string): Promise<void> {
+  const response = await previewClient.post(
+    `/api/trip/v4/tasks/${encodeURIComponent(taskId)}/recover-local-access`,
+    null, { headers: { 'X-Trip-Local-Recovery': '1' } },
+  )
+  const recovered = response.data as { task_id: string; plan_id: string; access_token: string }
+  if (recovered.task_id !== taskId) throw new Error('恢复响应与所选任务不一致。')
+  try {
+    savePreviewAccess(taskId, recovered.access_token, recovered.plan_id)
+  } catch (error) {
+    if (getPendingPreviewAccess()?.taskId !== taskId) throw error
+    // 本机存储受限时沿用已有内存继续预览机制。
   }
 }
 
@@ -178,10 +200,14 @@ export async function selectV4Destination(
 
 export function isV4EditConflict(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 409
+    && error.response?.data?.detail?.code !== 'PREVIEW_CONTRACT_UNSUPPORTED'
 }
 
 export function v4EditErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
+    if (error.response?.data?.detail?.code === 'PREVIEW_CONTRACT_UNSUPPORTED') {
+      return '这份行程数据已损坏或不支持当前版本。请返回首页重新创建行程。'
+    }
     if (error.response?.status === 409) return '行程已发生变化。已读取最新内容，这项编辑仍保留，请确认后重试或放弃。'
     if (error.response?.status === 422) return '这项编辑已保留，但当前安排无法应用。请调整内容后重试或放弃。'
     if (error.response?.status === 404) return '无法访问这份行程。这项编辑仍保留在本机。'
@@ -208,6 +234,7 @@ export function v4DestinationSelectErrorMessage(error: unknown): string {
     const code = error.response?.data?.detail?.code
       ?? error.response?.data?.code
       ?? error.response?.data?.detail?.error_code
+    if (code === 'PREVIEW_CONTRACT_UNSUPPORTED') return v4EditErrorMessage(error)
     return mapV4DestinationSelectFailure({
       status: error.response?.status ?? null,
       code: typeof code === 'string' ? code : null,
@@ -220,6 +247,11 @@ export function v4DestinationSelectErrorMessage(error: unknown): string {
 export function v4FinalErrorMessage(error: unknown, action: 'save' | 'restore'): string {
   if (axios.isAxiosError(error)) {
     const code = error.response?.data?.detail?.code
+    if (code === 'PREVIEW_CONTRACT_UNSUPPORTED') {
+      return action === 'restore'
+        ? '保存数据已损坏或不支持当前版本，无法还原。当前行程内容保持不变。'
+        : '行程数据已损坏或不支持当前版本，这次保存未完成。图片仍可使用。'
+    }
     if (error.response?.status === 409) {
       if (code === 'FINAL_NOT_AVAILABLE' || code === 'FINAL_SNAPSHOT_UNAVAILABLE') {
         return '没有可还原的完整保存结果。当前行程内容保持不变。'
@@ -250,6 +282,7 @@ export function v4PreviewErrorMessage(error: unknown): string {
     const detail = error.response?.data?.detail
     if (typeof detail === 'object' && detail !== null && 'code' in detail) {
       const code = String((detail as { code?: unknown }).code ?? '')
+      if (code === 'PREVIEW_CONTRACT_UNSUPPORTED') return '这份行程数据已损坏或不支持当前版本，请返回首页重新创建行程。'
       if (code === 'PREVIEW_NOT_READY') return '行程还在准备，请稍后重试。'
     }
     if (error.response?.status === 404) return '无法恢复这份预览。请返回首页重新开始。'
@@ -268,10 +301,8 @@ function accessKey(taskId: string): string {
 }
 
 function persistPreviewAccess(access: V4PreviewAccess): void {
-  const previousTaskId = safeStorageGet(CURRENT_PREVIEW_KEY)
   safeStorageSet(accessKey(access.taskId), JSON.stringify(access))
   safeStorageSet(CURRENT_PREVIEW_KEY, access.taskId)
-  if (previousTaskId && previousTaskId !== access.taskId) safeStorageRemove(accessKey(previousTaskId))
 }
 
 function safeStorageGet(key: string): string | null {
@@ -282,8 +313,4 @@ function safeStorageSet(key: string, value: string): void {
   try { localStorage.setItem(key, value) } catch {
     throw new Error('本机无法保存预览恢复信息。')
   }
-}
-
-function safeStorageRemove(key: string): void {
-  try { localStorage.removeItem(key) } catch { /* A newer preview remains usable. */ }
 }

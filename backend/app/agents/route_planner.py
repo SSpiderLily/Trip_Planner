@@ -210,7 +210,7 @@ class RouteTripPlanner:
 
     def model(self, agent, name, data, model_type):
         with span('agent.' + name, 'agent', data) as record:
-            response = agent.run(json.dumps({'schema': model_type.model_json_schema(), **data}, ensure_ascii=False), max_tokens=8192)
+            response = agent.run(json.dumps({'schema': model_type.model_json_schema(), **data}, ensure_ascii=False))
             record.output = response
             with span('validation.' + name, 'validation') as validation:
                 result = model_type.model_validate(parse_json(response))

@@ -30,7 +30,6 @@ from app.services.endpoint_verification_service import (
 )
 from app.services.mcp_tool_executor import MCPToolExecutor
 from app.services.planning_input_builder import PlanningInputBuildRequest, build_planning_input
-from app.services.route_backfill_service import RouteBackfillService
 
 
 WINDOWS = (
@@ -58,7 +57,7 @@ def make_planning_input(*, ready_at: str | None = None):
         departure_place_query="上海虹桥站",
         lodging_query="测试酒店",
     )
-    return build_planning_input(PlanningInputBuildRequest(
+    planning_input = build_planning_input(PlanningInputBuildRequest(
         request=request,
         requirements=RequirementSummary(
             requirements_id="current-route-requirements",
@@ -68,14 +67,21 @@ def make_planning_input(*, ready_at: str | None = None):
         rules=RuleSet(
             rule_version="current-route-rules-v1",
             windows=WINDOWS,
-            meal_default_s=1800,
-            sightseeing_default_s=600,
+            meal_minimum_available_s=1800,
+            sightseeing_minimum_available_s=600,
             full_day_start_minute=8 * 60,
             return_buffer_default_s=3600,
             departure_day_minimum_usable_s=3 * 3600,
         ),
-        day_ready_at=datetime.fromisoformat(ready_at) if ready_at else None,
     ))
+    # 当前路线模块的就绪事实测试仍保留；该事实不再改变时段资格。
+    if ready_at is not None:
+        planning_input = planning_input.model_copy(update={
+            "boundary_facts": planning_input.boundary_facts.model_copy(update={
+                "day_ready_at": datetime.fromisoformat(ready_at),
+            }),
+        })
+    return planning_input
 
 
 def make_plan(planning_input):
@@ -99,8 +105,6 @@ def make_plan(planning_input):
                 kind=kind,
                 poi_id=poi_id,
                 place_fact_id=fact_id,
-                duration_s=600,
-                duration_source="user",
             ))
         draft_days.append(DraftDay(
             day_id=constraint.day_id,
@@ -266,7 +270,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.executor.close()
 
-    async def test_current_route_order_time_progression_reference_and_return(self):
+    async def test_current_route_order_queries_only_adjacent_edges_at_reference_time(self):
         result = await query_current_routes(
             self.input, self.draft, self.facts,
             verified_departure_fact_id="fact-terminal",
@@ -283,10 +287,9 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
             ("poi-hotel", "poi-middle-one"),
             ("poi-middle-one", "poi-middle-two"),
             ("poi-hotel", "poi-last"),
-            ("poi-last", "poi-terminal"),
         ])
         self.assertTrue(all(leg.plan_revision == self.draft.revision for leg in result.draft.legs))
-        self.assertEqual(len(result.fact_store.routes), 15)
+        self.assertEqual(len(result.fact_store.routes), 12)
 
         self.assertLessEqual(self.fake_tool.peak, 4)
         self.assertEqual(self.fake_tool.peak, 4)
@@ -298,17 +301,15 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(date_two_calls), 1)
         next_leg_call = next(call for call in transit_calls
                              if call["origin"] == "121.48,31.23" and call["date"] == "2026-10-11")
-        self.assertEqual(date_two_calls[0]["time"], "08:00")
-        self.assertEqual(next_leg_call["time"], "08:20")
+        self.assertEqual(date_two_calls[0]["time"], "09:00")
+        self.assertEqual(next_leg_call["time"], "09:00")
         self.assertEqual(date_two_calls[0]["strategy"], "0")
-        return_call = next(call for call in transit_calls
-                           if call["origin"] == "121.49,31.23" and call["destination"] == "121.495,31.23")
-        self.assertEqual(return_call["time"], "08:20")
+        self.assertFalse(any(call["destination"] == "121.495,31.23" for call in transit_calls))
 
         legs_by_end = {leg.to_endpoint.reference_id: leg for leg in result.draft.legs}
         computed = legs_by_end["middle-one"]
         self.assertEqual(computed.selected_mode, "transit")
-        self.assertEqual(computed.time_basis, "computed")
+        self.assertEqual(computed.time_basis, "reference")
         selected_result = next(item for item in computed.mode_results if item.mode == computed.selected_mode)
         selected_fact = next(fact for fact in result.fact_store.routes
                              if fact.fact_id == selected_result.route_fact_id)
@@ -323,11 +324,8 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         reference = legs_by_end["arrival-poi"]
         self.assertEqual(reference.selected_mode, "transit")
         self.assertEqual(reference.time_basis, "reference")
-        return_leg = legs_by_end["fact-terminal"]
-        self.assertEqual(return_leg.time_basis, "computed")
-        departure_timing = next(day for day in result.timing.days if day.day_id == "day-2026-10-12")
-        self.assertEqual(departure_timing.return_timing.status, "verified")
-        self.assertEqual(departure_timing.return_timing.travel_s, 600)
+        self.assertNotIn("fact-terminal", legs_by_end)
+        self.assertNotIn("timing", result.model_dump())
         self.assertEqual(result.based_on_revision, self.draft.revision)
 
         self.assertEqual(self.input.model_dump(mode="json"), self.input_before)
@@ -421,7 +419,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         statuses = {item.mode: item.status for item in leg.mode_results}
         self.assertEqual(statuses, {"transit": "available", "bicycling": "available", "walking": "error"})
         self.assertEqual(leg.selected_mode, "transit")
-        self.assertEqual(len(result.fact_store.routes), 15)
+        self.assertEqual(len(result.fact_store.routes), 12)
         self.assertEqual(result.status, "partial")
 
     async def test_free_time_keeps_previous_poi_as_route_endpoint(self):
@@ -434,8 +432,6 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
             kind="free_time",
             poi_id=None,
             place_fact_id=None,
-            duration_s=1200,
-            duration_source="user",
         )
         changed_day = day.model_copy(update={"activities": (day.activities[0], free_time, day.activities[1])})
         changed_draft = self.draft.model_copy(update={
@@ -453,7 +449,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         next_transit = next(arguments for name, arguments in self.fake_tool.calls
                             if name == TOOL_BY_MODE["transit"]
                             and arguments["origin"] == "121.48,31.23")
-        self.assertEqual(next_transit["time"], "12:20")
+        self.assertEqual(next_transit["time"], "09:00")
 
     async def test_same_place_and_missing_coordinates_do_not_call_map_tool(self):
         same_place = PlaceFact(
@@ -522,7 +518,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
             tool_executor=self.executor,
             tool_timeout_seconds=1,
         )
-        self.assertEqual(result.draft.legs[-1].to_endpoint.poi_id, "poi-terminal")
+        self.assertEqual(result.draft.legs[-1].to_endpoint.poi_id, "poi-last")
         self.assertIn("fact-terminal", {place.fact_id for place in result.fact_store.places})
 
     async def test_stale_endpoint_execution_is_rejected_before_any_tool_call(self):
@@ -587,7 +583,7 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
         statuses = {item.mode: item.status for item in leg.mode_results}
         self.assertEqual(statuses, {"transit": "empty", "bicycling": "available", "walking": "available"})
         self.assertEqual(leg.selected_mode, "bicycling")
-        self.assertEqual(len(result.fact_store.routes), 15)
+        self.assertEqual(len(result.fact_store.routes), 12)
 
     async def test_ties_use_stable_mode_order_and_user_selection_wins_when_valid(self):
         self.fake_tool.durations = {"transit": 600, "bicycling": 600, "walking": 600}
@@ -701,170 +697,6 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
                 tool_timeout_seconds=1,
             )
 
-    def test_backfill_builds_distinct_directed_pairs_without_self_routes(self):
-        service = RouteBackfillService()
-        middle_day = self.draft.days[1]
-        repeated = middle_day.activities[0].model_copy(update={
-            "activity_id": "middle-one-repeat",
-            "slot_id": self.input.days[1].slots[1].slot_id,
-        })
-        revised_day = middle_day.model_copy(update={
-            "activities": (*middle_day.activities, repeated),
-        })
-        revised = self.draft.model_copy(update={
-            "days": (self.draft.days[0], revised_day, self.draft.days[2]),
-        })
-
-        jobs = service._build_jobs(revised, self.facts)
-        middle_jobs = [job for job in jobs if job.day_id == revised_day.day_id]
-        pairs = {(job.origin.poi_id, job.destination.poi_id) for job in middle_jobs}
-        self.assertEqual(len(middle_jobs), 6)
-        self.assertEqual(pairs, {
-            ("poi-hotel", "poi-middle-one"), ("poi-middle-one", "poi-hotel"),
-            ("poi-hotel", "poi-middle-two"), ("poi-middle-two", "poi-hotel"),
-            ("poi-middle-one", "poi-middle-two"), ("poi-middle-two", "poi-middle-one"),
-        })
-        self.assertTrue(all(origin != destination for origin, destination in pairs))
-
-    async def test_backfill_reuses_route_context_and_loads_new_revision_pois(self):
-        route_service = CurrentRouteService(
-            tool_executor=self.executor, tool_timeout_seconds=1,
-        )
-        context = route_service.create_route_context(self.input, self.draft.plan_id)
-        try:
-            current = await route_service.run_async(
-                self.input, self.draft, self.facts,
-                verified_departure_fact_id="fact-terminal",
-                current_context_revision=7,
-                only_edge=("day-2026-10-11", "middle-one", "middle-two"),
-                route_context=context,
-            )
-            self.assertEqual(len(self.fake_tool.calls), 3)
-            self.assertEqual(current.based_on_revision, self.draft.revision)
-
-            source = self.facts.sources[0]
-            new_place = PlaceFact(
-                fact_id="fact-middle-three",
-                poi_id="poi-middle-three",
-                name="中段景点三",
-                city="上海",
-                location=MapCoordinate(lng=121.500, lat=31.230),
-                source_refs=(source.tool_call_id,),
-            )
-            revised_facts = self.facts.model_copy(update={
-                "places": (*self.facts.places, new_place),
-            })
-            new_activity = DraftActivity(
-                activity_id="middle-three",
-                candidate_ref="candidate-middle-three",
-                slot_id=self.input.days[1].slots[3].slot_id,
-                kind="sightseeing",
-                poi_id=new_place.poi_id,
-                place_fact_id=new_place.fact_id,
-                duration_s=600,
-                duration_source="model",
-            )
-            revised_day = self.draft.days[1].model_copy(update={
-                "activities": (*self.draft.days[1].activities, new_activity),
-            })
-            revised_draft = self.draft.model_copy(update={
-                "revision": self.draft.revision + 1,
-                "base_revision": self.draft.revision,
-                "days": (revised_day,),
-            })
-            backfill = RouteBackfillService()
-            result = await backfill.run_async(
-                self.input, revised_draft, revised_facts, context,
-            )
-
-            # Twelve directed pairs in the edited day, three modes each. The
-            # previously queried middle-one -> middle-two facts are reused.
-            self.assertEqual(result.total_queries, 36)
-            self.assertEqual(result.status, "complete")
-            self.assertEqual(len(self.fake_tool.calls), 36)
-            self.assertTrue(any(
-                arguments.get("origin") == "121.5,31.23"
-                or arguments.get("origin_coordinates") == "121.5,31.23"
-                or arguments.get("destination") == "121.5,31.23"
-                or arguments.get("destination_coordinates") == "121.5,31.23"
-                for _, arguments in self.fake_tool.calls
-            ))
-            transit_calls = [
-                arguments for tool, arguments in self.fake_tool.calls
-                if tool == TOOL_BY_MODE["transit"]
-                and arguments.get("origin") == "121.48,31.23"
-                and arguments.get("destination") == "121.485,31.23"
-            ]
-            self.assertEqual(len(transit_calls), 1)
-            self.assertEqual(transit_calls[0]["date"], "2026-10-11")
-            self.assertEqual(transit_calls[0]["time"], "09:00")
-            self.assertTrue(all(
-                mode.time_basis == ("reference" if mode.mode == "transit" else "unspecified")
-                for pair in result.pair_results for mode in pair.modes
-            ))
-        finally:
-            await context.aclose()
-
-    async def test_stale_backfill_late_result_is_cached_but_not_returned_to_preview(self):
-        self.fake_tool.delay = 0.05
-        route_service = CurrentRouteService(
-            tool_executor=self.executor, tool_timeout_seconds=1,
-        )
-        context = route_service.create_route_context(self.input, self.draft.plan_id)
-        latest_revision = [self.draft.revision]
-        try:
-            backfill = RouteBackfillService()
-            task = asyncio.create_task(backfill.run_async(
-                self.input,
-                self.draft.model_copy(update={"days": (self.draft.days[1],)}),
-                self.facts,
-                context,
-                current_revision=lambda: latest_revision[0],
-            ))
-            for _ in range(100):
-                if self.fake_tool.calls:
-                    break
-                await asyncio.sleep(0.002)
-            self.assertTrue(self.fake_tool.calls)
-            latest_revision[0] += 1
-            result = await task
-
-            self.assertEqual(result.status, "cancelled")
-            self.assertEqual(result.completed_queries, 0)
-            self.assertEqual(result.route_facts, ())
-            self.assertEqual(self.draft.revision, 4)
-            self.assertEqual(self.draft.days[1].activities[0].activity_id, "middle-one")
-            self.assertEqual(len(self.fake_tool.calls), 1)
-            self.assertEqual(context.route_cache.stats.external_loads, 1)
-        finally:
-            await context.aclose()
-
-    async def test_backfill_failure_reports_partial_without_changing_preview(self):
-        self.fake_tool.fail_modes.update({"transit", "bicycling", "walking"})
-        route_service = CurrentRouteService(
-            tool_executor=self.executor, tool_timeout_seconds=1,
-        )
-        context = route_service.create_route_context(self.input, self.draft.plan_id)
-        draft_before = self.draft.model_dump(mode="json")
-        facts_before = self.facts.model_dump(mode="json")
-        try:
-            result = await RouteBackfillService().run_async(
-                self.input,
-                self.draft.model_copy(update={"days": (self.draft.days[1],)}),
-                self.facts,
-                context,
-            )
-            self.assertEqual(result.status, "partial")
-            self.assertEqual(result.completed_queries, result.total_queries)
-            self.assertTrue(all(
-                mode.status == "error"
-                for pair in result.pair_results for mode in pair.modes
-            ))
-            self.assertEqual(self.draft.model_dump(mode="json"), draft_before)
-            self.assertEqual(self.facts.model_dump(mode="json"), facts_before)
-        finally:
-            await context.aclose()
-
     async def test_route_context_keeps_first_fact_source_on_same_key_conflict(self):
         route_service = CurrentRouteService(
             tool_executor=self.executor, tool_timeout_seconds=1,
@@ -913,15 +745,15 @@ class CurrentRouteServiceTests(unittest.IsolatedAsyncioTestCase):
             "days": (revised_day,),
         })
         try:
-            first_result = await RouteBackfillService().run_async(
-                self.input, first_draft, self.facts, context,
+            first_result = await route_service.run_async(
+                self.input, first_draft, self.facts, route_context=context,
             )
-            second_result = await RouteBackfillService().run_async(
-                self.input, revised_draft, moved_facts, context,
+            second_result = await route_service.run_async(
+                self.input, revised_draft, moved_facts, route_context=context,
             )
-            self.assertEqual(first_result.total_queries, 6)
-            self.assertEqual(second_result.total_queries, 6)
-            self.assertEqual(len(self.fake_tool.calls), 12)
+            self.assertEqual(len(first_result.draft.legs), 1)
+            self.assertEqual(len(second_result.draft.legs), 1)
+            self.assertEqual(len(self.fake_tool.calls), 6)
             self.assertEqual(context.alternative_source_count, 0)
             resolved = context._resolve("poi-arrival", (121.476, 31.23))
             self.assertEqual(resolved.fact_id, moved.fact_id)

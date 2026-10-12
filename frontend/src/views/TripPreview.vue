@@ -14,7 +14,7 @@
     <section v-else-if="pageState === 'missing_access'" class="state-page">
       <span class="eyebrow">TRIP PREVIEW</span>
       <h1>这里还没有行程预览</h1>
-      <p>从首页填写旅行计划后，预览会保存在这台设备上，方便你稍后继续查看。</p>
+      <p>{{ route.query.task ? '本浏览器没有此任务的预览访问凭证。请使用发起该任务的浏览器；旧凭证已清除时无法恢复。' : '从首页填写旅行计划后，预览会保存在这台设备上，方便你稍后继续查看。' }}</p>
       <router-link class="quiet-link" to="/">返回首页</router-link>
     </section>
 
@@ -77,7 +77,7 @@
         <button class="preview-action discard-edit-action" type="button" @click="clearBrokenPendingEdit">清除无法读取的缓存</button>
       </section>
       <section v-if="routeJobState === 'pending' || routeJobState === 'running'" class="route-job-banner" aria-live="polite">
-        {{ routeJobState === 'running' ? '正在核实当天交通。你可以继续编辑或导出当前内容。' : '当天交通正在等待核实。你可以继续编辑或导出当前内容。' }}
+        {{ routeJobState === 'running' ? '正在核实交通。你可以继续编辑或导出当前内容。' : '交通信息正在等待核实。你可以继续编辑或导出当前内容。' }}
       </section>
       <section v-else-if="routeJobState === 'failed'" class="route-job-banner failed" aria-live="polite">
         {{ routeJobMessage || '部分交通信息仍未查到。当前行程可继续编辑和导出。' }}
@@ -128,10 +128,8 @@
           <p>{{ activityCountText(activeDay.activities.length) }}</p>
         </div>
         <div class="daily-facts">
-          <span>已知停留 {{ formatReferenceDuration(activeDay.timing.knownStaySeconds) }}</span>
-          <span>已知交通 {{ formatReferenceDuration(activeDay.timing.knownTravelSeconds) }}</span>
-          <span v-if="activeDay.timing.unknownLegCount > 0">{{ activeDay.timing.unknownLegCount }} 段交通耗时待确认</span>
-          <span v-else-if="activeDay.timing.elapsedSeconds !== null">参考安排 {{ formatReferenceDuration(activeDay.timing.elapsedSeconds) }}</span>
+          <span>已知交通耗时 {{ formatReferenceDuration(activeDay.transport.knownTravelSeconds) }}</span>
+          <span v-if="activeDay.transport.unknownLegCount > 0">{{ activeDay.transport.unknownLegCount }} 段交通耗时待确认</span>
           <span v-if="activeDay.cost.knownSubtotal !== null">当日已知景点与餐饮 ¥{{ activeDay.cost.knownSubtotal }} / 人</span>
           <span v-if="activeDay.cost.unknownCount || activeDay.cost.conflictCount">{{ costGapText(activeDay.cost.unknownCount, activeDay.cost.conflictCount) }}</span>
         </div>
@@ -147,7 +145,7 @@
 
           <section class="info-card lodging-card">
             <div class="card-topline"><span class="eyebrow">STAY</span><span class="fact-known">住宿参考</span></div>
-            <div class="lodging-grid">
+            <div class="lodging-grid" :class="{ 'hotel-only': !activeDay.area }">
               <div>
                 <small>{{ activeDay.hotel.label }}</small>
                 <h3>{{ activeDay.hotel.name }}</h3>
@@ -156,7 +154,7 @@
                 <small class="hotel-cost">住宿人均消费参考：{{ activeDay.hotel.cost.text }} · 不按房晚推算</small>
                 <small v-if="activeDay.hotel.cost.evidenceLabel" class="cost-evidence">{{ activeDay.hotel.cost.evidenceLabel }}</small>
               </div>
-              <div class="area-reference">
+              <div v-if="activeDay.area" class="area-reference">
                 <small>推荐寻找区域</small>
                 <h3>{{ activeDay.area.label }}</h3>
                 <p>住宿区域与具体酒店分别展示。区域参考点不代表已选酒店。</p>
@@ -164,17 +162,9 @@
             </div>
           </section>
 
-          <section v-if="activeDay.returnTiming.status !== 'not_applicable'" class="return-card" :class="activeDay.returnTiming.status" aria-label="离开日返程核验">
-            <div class="card-topline"><span class="eyebrow">RETURN</span><span>{{ activeDay.returnTiming.status === 'verified' ? '已核实' : activeDay.returnTiming.status === 'conflict' ? '时间冲突' : '待核实' }}</span></div>
-            <h3>{{ activeDay.returnTiming.headline }}</h3>
-            <div class="return-facts">
-              <span>{{ activeDay.returnTiming.bufferLabel }}</span>
-              <span v-if="activeDay.returnTiming.departureLabel">{{ activeDay.returnTiming.departureLabel }}</span>
-              <span v-if="activeDay.returnTiming.deadlineLabel">{{ activeDay.returnTiming.deadlineLabel }}</span>
-              <span v-if="activeDay.returnTiming.overrunLabel">{{ activeDay.returnTiming.overrunLabel }}</span>
-            </div>
-            <p v-if="activeDay.returnTiming.detail">{{ activeDay.returnTiming.detail }}</p>
-            <div v-if="activeDay.returnLeg" class="return-leg-route">
+          <section v-if="activeDay.returnLeg" class="leg-card" aria-label="返程交通参考">
+            <div class="card-topline"><span class="eyebrow">TRANSPORT</span><span>返程交通参考</span></div>
+            <div>
               <div class="leg-heading"><span>{{ activeDay.returnLeg.fromLabel }} → {{ activeDay.returnLeg.toLabel }}</span><b>{{ activeDay.returnLeg.selectedModeLabel }} · {{ activeDay.returnLeg.selectedDurationLabel }}</b></div>
               <div v-if="activeDay.returnLeg.modes.length" class="mode-list" aria-label="返程交通方式耗时参考">
                 <button v-for="mode in activeDay.returnLeg.modes" :key="mode.mode" type="button" class="mode-chip" :class="{ chosen: activeDay.returnLeg.selectedMode === mode.mode }" :disabled="!canChooseMode(activeDay.returnLeg, mode)" @click="chooseLegMode(activeDay.id, activeDay.returnLeg, mode)"><span>{{ mode.label }}</span><b>{{ mode.durationLabel }}</b><small>{{ activeDay.returnLeg.selectedMode === mode.mode ? '当前采用' : mode.status === '路线已查询' ? '选择该方式' : mode.status }}</small></button>
@@ -229,8 +219,8 @@
                 <div v-for="issue in item.incomingLeg.issues" :key="issue.issue_id" class="issue-row scoped-issue" :class="issueTone(issue)"><b>{{ issueTitle(issue) }}</b><span>{{ issue.message }}</span></div>
               </section>
               <article :data-activity-id="item.activity.id" class="activity-card" :class="{ meal: item.activity.kind === 'meal', free: item.activity.kind === 'free_time', dragging: draggingId === item.activity.id, 'drop-target': dropId === item.activity.id && draggingId !== item.activity.id }">
-                <div class="activity-meta"><span>{{ item.activity.periodLabel }} · {{ activityKind(item.activity.kind) }}</span><div class="activity-actions"><span>{{ item.activity.durationLabel }}</span><button class="drag-handle" type="button" :disabled="editingBlocked" :aria-label="`拖动排序：${item.activity.title}`" title="拖动排序；也可聚焦后用键盘方向键" @pointerdown="startDrag($event, item.activity.id)" @pointermove="trackDrag" @pointerup="finishDrag" @pointercancel="cancelDrag" @keydown.up.prevent="keyboardMove(item.activity.id, -1)" @keydown.down.prevent="keyboardMove(item.activity.id, 1)">⠿</button><button class="activity-remove" type="button" :disabled="editingBlocked" :aria-label="`删除活动：${item.activity.title}`" @click="removeActivity(item.activity)">删除</button></div></div>
-                <div class="activity-title"><span class="activity-number">{{ item.position }}</span><div><h3>{{ item.activity.title }}</h3><small>{{ item.activity.timingLabel }}</small></div></div>
+                <div class="activity-meta"><span>{{ item.activity.periodLabel }} · {{ activityKind(item.activity.kind) }}</span><div class="activity-actions"><button class="drag-handle" type="button" :disabled="editingBlocked" :aria-label="`拖动排序：${item.activity.title}`" title="拖动排序；也可聚焦后用键盘方向键" @pointerdown="startDrag($event, item.activity.id)" @pointermove="trackDrag" @pointerup="finishDrag" @pointercancel="cancelDrag" @keydown.up.prevent="keyboardMove(item.activity.id, -1)" @keydown.down.prevent="keyboardMove(item.activity.id, 1)">⠿</button><button class="activity-remove" type="button" :disabled="editingBlocked" :aria-label="`删除活动：${item.activity.title}`" @click="removeActivity(item.activity)">删除</button></div></div>
+                <div class="activity-title"><span class="activity-number">{{ item.position }}</span><div><h3>{{ item.activity.title }}</h3></div></div>
                 <p v-if="item.activity.description" class="activity-description">{{ item.activity.description }}</p>
                 <p v-if="item.activity.address" class="activity-address">⌖ {{ item.activity.address }}</p>
                 <div v-for="issue in item.activity.issues" :key="issue.issue_id" class="issue-row scoped-issue" :class="issueTone(issue)"><b>{{ issueTitle(issue) }}</b><span>{{ issue.message }}</span></div>
@@ -323,7 +313,6 @@
                   </div>
                   <small>{{ candidateView.city ? `${candidateView.city} · ` : '' }}{{ candidateView.address }}<template v-if="candidateView.typeName"> · {{ candidateView.typeName }}</template></small>
                   <small>{{ candidateView.costLabel }}</small>
-                  <small>{{ candidateView.openingHoursLabel }}</small>
                   <small v-if="candidateView.missingFieldsLabel" class="muted">{{ candidateView.missingFieldsLabel }}</small>
                   <small class="search-source">来源：{{ candidateView.sourceLabel }} · 查询于 {{ candidateView.queriedAtLabel }}</small>
                   <div v-if="candidateView.canSelect && destinationSearchResponse.category" class="candidate-add-row">
@@ -351,11 +340,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import PreviewMap from '@/components/preview/PreviewMap.vue'
 import TripPreviewExport from '@/views/TripPreviewExport.vue'
 import {
   getLatestPreviewAccess,
+  getPreviewAccessForTask,
   getPendingPreviewAccess,
   getV4FinalState,
   getV4EditJob,
@@ -624,6 +615,8 @@ function wait(milliseconds: number): Promise<void> {
   })
 }
 
+const route = useRoute()
+
 async function loadLatest(): Promise<void> {
   const generation = ++requestGeneration
   invalidateDestinationSearch()
@@ -634,7 +627,8 @@ async function loadLatest(): Promise<void> {
   pendingEditCacheBroken.value = false
   editRequestInFlight.value = false
   selectedPoiIds.value = []
-  const access = getLatestPreviewAccess()
+  const requestedTask = route.query.task === undefined ? null : typeof route.query.task === 'string' ? route.query.task : ''
+  const access = requestedTask !== null ? getPreviewAccessForTask(requestedTask) : getLatestPreviewAccess()
   accessPersistencePending.value = Boolean(
     access && getPendingPreviewAccess()?.taskId === access.taskId,
   )
@@ -771,12 +765,12 @@ async function startRouteJobForEnvelope(
       if (result.job.status === 'completed') {
         routeJobState.value = 'idle'
         routeJobMessage.value = ''
-        message.success('当天交通核实已更新。')
+        message.success('交通信息已更新。')
         return
       }
       if (result.job.status === 'failed') {
         routeJobState.value = 'failed'
-        routeJobMessage.value = '当天部分交通信息未能更新；当前安排和其他日期均已保留。'
+        routeJobMessage.value = '部分交通信息未能更新；当前地点安排已保留。'
         return
       }
       if (result.job.status === 'superseded') {
@@ -1403,6 +1397,7 @@ function issueTone(issue: { category: string }): string {
   return issue.category === 'known_conflict' ? 'warning' : 'info'
 }
 
+watch(() => route.query.task, () => { void loadLatest() })
 onMounted(() => { void loadLatest() })
 onUnmounted(() => {
   disposed = true
@@ -1464,15 +1459,8 @@ onUnmounted(() => {
 .lodging-grid h3 { font-size: 17px; }
 .lodging-grid .hotel-cost { display: block; margin-top: 9px; }
 .cost-evidence { display: block; margin-top: 5px; color: #8a9585 !important; font-size: 9px !important; line-height: 1.6; }
+.lodging-grid.hotel-only { grid-template-columns: 1fr; }
 .area-reference { border-left: 1px solid #dce3d3; padding-left: 20px; }
-.return-card { margin: 15px 0; padding: 17px 20px; border: 1px solid #d7dfcf; background: #f5f7ef; color: #5d705c; }
-.return-card.conflict { border-color: #e0c7ab; background: #fbf3e8; color: #80553d; }
-.return-card.unverified { border-color: #e1d6bd; background: #fbf7eb; color: #746443; }
-.return-card h3 { margin: 8px 0; font-size: 15px; font-weight: 600; }
-.return-card p { margin: 8px 0 0; color: inherit; font-size: 10px; line-height: 1.7; }
-.return-facts { display: flex; flex-wrap: wrap; gap: 7px; }
-.return-facts span { padding: 5px 7px; background: #ffffffa8; font-size: 9px; }
-.return-leg-route { margin-top: 13px; padding-top: 13px; border-top: 1px solid #dfdfd0; }
 .muted { color: #718173 !important; }
 .day-issues { margin: 14px 0; }
 .issue-row { display: flex; align-items: flex-start; gap: 10px; margin: 7px 0; padding: 10px 13px; border: 1px solid #e1d6bd; background: #fbf6ea; color: #6e5e43; font-size: 11px; line-height: 1.7; }

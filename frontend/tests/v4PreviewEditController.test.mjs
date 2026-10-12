@@ -217,6 +217,13 @@ const routeEnvelope = structuredClone(envelope)
 routeEnvelope.preview.calculation.current_routes = 'pending'
 routeEnvelope.preview.calculation.calculation_id = 'edit:initial'
 assert.equal(controller.pendingV4RouteJobId(routeEnvelope), 'edit:initial')
+const initialRouteEnvelope = structuredClone(routeEnvelope)
+initialRouteEnvelope.preview.calculation.calculation_id = 'generation:plan:initial'
+assert.equal(controller.pendingV4RouteJobId(initialRouteEnvelope), 'generation:plan:initial',
+  'generation traffic is followed after places have become readable')
+initialRouteEnvelope.preview.calculation.current_routes = 'failed'
+assert.equal(controller.pendingV4RouteJobId(initialRouteEnvelope), null,
+  'failed traffic ends polling without removing the place preview')
 const supersedingRouteEnvelope = structuredClone(routeEnvelope)
 supersedingRouteEnvelope.store_version += 1
 supersedingRouteEnvelope.plan_revision += 1

@@ -1,6 +1,7 @@
 """限制 planning-v4 实际运行中的同步 MCP 调用并保留安全观测。"""
 from __future__ import annotations
 
+from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextvars import ContextVar, copy_context
@@ -272,7 +273,7 @@ class MCPToolExecutor:
         # Copy the caller's observation context through priority admission and
         # into the worker. Pending requests do not occupy a pool worker.
         context = copy_context()
-        deadline = monotonic() + float(timeout_seconds)
+        deadline = deadline_after(monotonic(), float(timeout_seconds))
         state = _CallState(cancel_event)
         lease = current_priority_lease() or PriorityLease("interactive")
         ticket = self._admission.enqueue(lease)
@@ -400,7 +401,7 @@ class MCPToolExecutor:
         wrapped.add_done_callback(consume_unawaited)
         try:
             return await asyncio.wait_for(
-                asyncio.shield(wrapped), timeout=max(0.0, deadline - monotonic()),
+                asyncio.shield(wrapped), timeout=wait_timeout(max(0.0, deadline - monotonic())),
             )
         except asyncio.TimeoutError as exc:
             if future.done():
