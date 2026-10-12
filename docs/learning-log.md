@@ -948,3 +948,33 @@
 - 问题与取舍：离线接线通过后，仍需证明实际模型、地图和浏览器使用同一份新契约草稿。保留上次日期/酒店/预算，只提交一次规划；成功保存后改动草稿，在浏览器定向模拟保存503，再真实还原。故障模拟只覆盖最终保存响应，避免破坏原记录；模型成功与时段齐备不代替餐饮适配和顺路质量接受。
 - 发现与修正：地图把指定酒店标为“推荐住宿”，首页仍称返程交通会纳入安排。PreviewMap.vue和TripPlan.vue各纠正一处文案；README移除过期的时间推算、备用矩阵及历史快照兼容说明。规划规则与查询流程不变。
 - 验证结论、真实耗时、浏览器证据及未核实项统一见[CHG-003 S09](changes/CHG-003-planning-performance-observability.md#s09-live-browser-acceptance)。
+
+<a id="native-agent-tools-step1-2026-10-12"></a>
+## 原生多智能体基础：角色模型与工具协议（2026-10-12）
+
+- 问题与取舍：原LLM包装只返回文本，无法回传原生tool_calls；所有角色默认共用旧模型入口。新增按角色解析配置的客户端及原生响应入口，保留旧文本接口。用户明确所有角色共用地址和密钥，因此移除初版主/子专用网关配置，仅区分模型ID；显式custom供应商避免HelloAgents自动探测覆盖配置。不改本机实际凭据、不切换正式规划流程。
+- 实现与经验：通用NativeToolLoop保留供应商assistant字段，使用Pydantic参数模型校验原生JSON，通过调用标识回传结果。先检查整批调用的标识和额度再执行，避免执行部分工具后才发现协议无法继续；工具失败反馈固定错误码，截断、拒绝和取消停止运行。供应商推理与工具参数只用于协议，不写入新增观测内容；技术调用上限与每日业务修订额度分开。
+- 代码与测试：`backend/app/config.py`、`backend/app/services/llm_service.py`、`backend/app/services/native_tool_loop.py`；模拟覆盖见`backend/tests/test_native_llm_service.py`和`backend/tests/test_native_tool_loop.py`。技术验证与未核实项统一见[CHG-003第一步](changes/CHG-003-planning-performance-observability.md#native-agent-step1)。
+
+<a id="native-attraction-chain-2026-10-12"></a>
+## 原生景点采集链路与真实内容核对（2026-10-12）
+
+- 问题与取舍：只实现协议循环不能证明任务派发与地图候选回传。新增独立主→景点链路，复用现有景点/城市/来源校验，暂不接每日规划。发现模型最终文本虽选对POI却混入说明、代码块和非法引号；改由submit_attractions传递候选参数，校验失败可反馈模型纠正，而非放宽文本解析。
+- 排查经验：MCP子进程需要stderr文件描述符；验证脚本用StringIO重定向导致fileno错误，使用TemporaryFile保留描述符后查询恢复。模型连接断开时保留已有地图事实供下一次派发复用。状态报告区分历史失败与最终候选回传；候选来源可验证不代表推荐理由或自然语言已全面核验。
+- 代码与验证入口：`backend/app/agents/native_attraction_collection.py`、`native_attraction_agent.py`、`backend/app/services/native_chain_trace.py`和`backend/scripts/run_native_attraction_collection.py`；离线回归见`backend/tests/test_native_attraction_collection.py`。技术验证、真实候选与未核实项见[CHG-003第二步](changes/CHG-003-planning-performance-observability.md#native-agent-step2)，使用方式见[README](../README.md)。
+
+
+<a id="native-three-agent-rounds-2026-10-12"></a>
+### 2026-10-12：原生三角色采集的分轮并发与证据边界
+
+第三步把餐饮、住宿接入主模型工具调用，复用既有事实/范围校验。并发任务必须读取同一轮开始的事实快照，完成后集中合并；否则快任务的结果会改变慢任务依赖，或两个store互相覆盖。同查询使用在途结果合并，角色复用通用原生执行循环，日志序号及请求号也需加锁。代码见`native_multiagent_collection.py`、`native_spatial_agents.py`和`native_tool_loop.py`，回归见`test_native_multiagent_collection.py`、`test_native_tool_loop.py`。
+
+真实结果还要核对语义：模型把查询日期范围当成两晚住宿，并把菜系关键词命中说成供应商类别。任务回传已区分可能过夜日期、日期可用性、菜系/菜单未知；复跑修正了这些表述，但自然语言推荐理由仍可能过度推断。另一处问题是只返回“参数不合法”时，模型连续猜字段；补充声明字段路径与Schema能支持纠错，同时必须排除输入值、未知字段名和异常原文。技术测试、两次真实检查及未验收部分统一见[CHG-003第三步](changes/CHG-003-planning-performance-observability.md#native-agent-step3)。
+
+
+<a id="native-daily-plan-repair-2026-10-13"></a>
+### 2026-10-13：同一主智能体提交每日行程与单日修订
+
+第四步复用旧生成器的契约/事实绑定及DayRepairService，模型决策继续使用同一个原生主智能体。后端接收`submit_daily_plan`后按地点覆盖校验；已有候选时只修订，没有候选才限定日期/餐次补查。调用历史不裁剪，阶段间的tool_call_id也不能重复。跨轮候选必须保留所有candidate_id，不能仅按POI合并后令旧任务引用失效；版本、修订问题及保留活动ID由后端绑定，不交给模型填写。
+
+真实模型输出通过结构校验仍有质量问题：正餐馆不应默认用作早餐，不同POI也可能覆盖同一景区体验。提示词已补充餐次与地点重叠判断，营业/房态/路线仍未知，不借此新增精细可行性校验。服务连接失败必须与业务无进展区分；地图故障已有部分事实时仍须合并保留，技术恢复不扣业务轮数。代码见`native_trip_planner.py`、`native_multiagent_collection.py`，测试见`test_native_trip_planner.py`；全部离线、真实初版及真实修订的证据边界统一见[CHG-003第四步](changes/CHG-003-planning-performance-observability.md#native-agent-step4)。

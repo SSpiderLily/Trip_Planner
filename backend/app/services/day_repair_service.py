@@ -41,7 +41,7 @@ from app.services.planning_v4_validator import ContractValidationError, validate
 MAX_REPAIR_ROUNDS_PER_DAY = 3
 MAX_TECHNICAL_FAILURES_PER_DAY = 3
 RECOVERABLE_COLLECTION_CODES = RECOVERABLE_REFERENCE_CODES | {
-    "MASTER_LLM_FAILED", "MODEL_CALL_FAILED", "REPAIR_COLLECTION_TIMEOUT",
+    "MASTER_LLM_FAILED", "MODEL_CALL_FAILED", "REPAIR_COLLECTION_TIMEOUT", "REPAIR_MAP_FAILED",
 }
 RepairStop = Literal["complete", "round_limit", "deadline", "technical_error"]
 CollectionStop = Literal["target_met", "no_progress", "deadline", "technical_error"]

@@ -129,6 +129,20 @@ cp .env.example .env
 
 规划超时：当前默认 `PLANNER_ENFORCE_TIMEOUTS=false`，关闭新规划总流程、采集、子任务、模型HTTP请求及地图查询的主动超时。模型或地图服务返回的明确错误仍会结束对应调用，修复轮数和工具次数限制仍保留；要恢复原技术期限，可设置为 `true` 并重启后端。数据库锁等待、服务关闭等待和前端短请求超时不属于规划执行期限。
 
+原生多智能体基础：已增加按角色创建模型客户端和原生工具循环，以及独立三角色采集、每日地点规划与按日修订链路；正式API仍使用现有pipeline，尚未切换到新原生入口。`MASTER_LLM_MODEL_ID` 默认 `kimi-k3`，`SUBAGENT_LLM_MODEL_ID` 默认 `glm-5.3-flash`，后者供景点、餐饮、住宿三个角色使用。所有角色共用 `LLM_BASE_URL` 和 `LLM_API_KEY`；为空时，使用对应的 `OPENAI_*` 配置兜底。主、子角色只区分模型ID，不配置专用地址或密钥。角色模型ID不继承 `LLM_MODEL_ID`，现有 `get_llm()` 规划入口保持原行为。实际 `.env` 由本机管理，本次没有修改凭据；真实调用范围与验证证据见[CHG-003第四步](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step4)。
+
+后端开发入口：`get_agent_llm("master" | "attractions" | "dining" | "lodging")` 惰性创建对应角色客户端；`UsageAwareLLM.invoke_native()` 返回包含完整assistant消息、用量和结束原因的响应。`NativeToolLoop` 使用继承 `NativeToolArguments` 的参数模型注册同步工具，校验参数、执行工具并通过 `role=tool` / `tool_call_id` 回传结果。默认顺序执行；新采集入口注入批次执行器，最多3个子任务并发，同轮开始时冻结依赖事实，整轮完成后按调用顺序合并并回传；工具错误以固定错误码反馈模型，截断、拒绝、调用标识冲突及取消会停止运行。默认每次最多8个模型请求、24个工具请求，可在构造时指定；这是新入口的技术上限，不改变按日三轮修订规则。专门上下文管理及正式规划接线留待后续阶段。
+
+独立景点采集：`NativeAttractionCollection.run(TripRequest)` 让主模型组织城市、日期、目标、偏好和有原文引用的硬性要求，以 `find_attractions` 调用子模型。子模型自主调用 `maps_text_search` / `maps_search_detail`，经 `AmapContractAdapter` → `MCPToolExecutor` → HelloAgents `MCPTool` 查询；详情只接受已知POI。子模型通过 `submit_attractions` 提交选择与缺项；后端复用现有分类、同城、坐标、必去/必避和来源校验，返回 `TaskResult`、候选、地点事实与主模型总结。提交无效POI时反馈模型纠正，提交成功后不继续地图查询；严格JSON结束响应也须通过同一校验。日期是候选采集范围，不要求提前绑定每日时段；价格/开放时间未知保持未知，重复查询复用已有结果。默认主模型最多4次请求、2次派发，每个子任务最多8次模型请求、9次工具调用（含候选提交）；不生成每日行程或写入正式任务/预览数据库。
+
+独立三角色采集：`NativeMultiagentCollection.run(TripRequest)` 开放 `find_attractions`、`find_restaurants`、`recommend_lodging`。主模型根据需求先选真实景点，再以该POI作为餐次/住宿锚点；互不依赖的任务同轮并发，缺少上一轮锚点的任务明确拒绝，主模型可下一轮重派。餐饮复用餐次范围校验，默认1公里、没有有效候选时才3公里；明确必吃餐馆可按原文店名全城核实。住宿默认推荐一家，先5公里、无候选才10公里；已指定住处按原文核实，不依赖景点，可首轮并发。地图查询会复用在途/已有结果，成功任务可复用；取消后不合并晚到结果。默认主模型最多6次请求/6次派发，各子任务仍最多8次模型请求/9次工具调用。查询日期范围不代表住宿晚数，候选与范围校验也不证明菜单、营业或房态。真实演示运行 `cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_multiagent_collection.py --live`，同样支持 `--request-file`，输出脱敏JSONL，仍不生成每日行程或写入正式数据库。
+
+独立原生规划：`NativeTripPlanner.run(TripRequest)`（异步调用用`run_async`）在三角色采集后，继续使用同一主模型与完整原生消息历史，以`submit_daily_plan`提交每日提案。后端复用现有日期/时段/候选引用校验和事实绑定，形成`PlanDraft`并执行地点覆盖校验。仅必需时段的真实地点缺项进入`DayRepairService`：有候选时直接调用主模型`submit_day_revision`；无候选时先通过原生子任务工具补查目标日期/餐次，再修订。版本、问题和保留活动ID由后端绑定，其他日期及既有真实活动相对顺序保留。每日期最多3轮；无进展耗尽后仍返回草稿和缺项，模型/地图技术故障单独有限恢复，不扣业务轮数。价格、天气、营业未知不触发补查；本入口不查询交通，不落正式任务/预览库，也不改变正式API。初版及每次单日提交最多5次主模型请求/4次提交工具调用，格式/引用纠错与业务修订额度分开。
+
+手动真实核验：`cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_trip_planner.py --live`，或增加`--request-file <TripRequest.json>`。默认使用公开上海两日合成需求，输出候选、每日安排、校验报告及修订的脱敏JSONL；没有单独天气查询则保持未知。具体真实结果与未核实边界见[第四步证据](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step4)。
+
+模拟验证：`cd backend && PYTHONPATH=.:tests venv/bin/python -m unittest discover -s tests -p 'test_native_*.py' -v`。这些测试使用模拟客户端和地图工具，不调用真实模型或高德。真实小闭环手动运行：`cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_attraction_collection.py --live`，可用 `--request-file <TripRequest.json>` 替换默认上海合成案例。脚本将请求配置、模型工具参数、地图返回、候选选择与最终总结输出为脱敏JSONL；不记录密钥、供应商推理或额外响应字段。日志只用于本步核对，不接观测页；完整旅行效果仍需后续验收，见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step2)。
+
 5. 启动后端服务
 
 ```bash
