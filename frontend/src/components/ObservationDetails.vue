@@ -7,6 +7,7 @@
     <template v-else>
       <div class="identity"><span class="kind">{{ detail.operation_type === 'llm' ? '模型调用' : detail.operation_type === 'tool' ? '工具调用' : '执行步骤' }}</span><h4>{{ stepName(detail.name) }}</h4><p>{{ detail.name }}</p><span class="state" :class="detail.status">{{ spanState(detail, active) }}</span><b>{{ spanTime(detail, active, now) }}</b></div>
       <dl class="facts"><dt>调用编号</dt><dd>{{ detail.span_id }}</dd><dt>开始时间</dt><dd>{{ date(detail.started_at) }}</dd><dt>结束时间</dt><dd>{{ date(detail.finished_at) }}</dd><template v-if="detail.operation_type === 'llm'"><dt>模型</dt><dd>{{ model }}</dd><dt>Token 总量</dt><dd>{{ tokenText(tokenTotal(detail)) }}</dd><dt>输入 Token</dt><dd>{{ tokenText(detail.input_tokens) }}</dd><dt>输出 Token</dt><dd>{{ tokenText(detail.output_tokens) }}</dd></template></dl>
+      <section v-if="nativeSummary.length" class="content"><h4>原生多智能体过程</h4><p v-for="line in nativeSummary" :key="line">{{ line }}</p><p class="footnote">业务事件表示已保存的阶段记录；事件耗时不等于模型或高德调用耗时。详细参数、候选、每日安排和校验结果见下方。</p></section>
       <p v-if="timingIssue(detail)" class="warning">{{ timingIssue(detail) }}，不参与耗时比较。</p>
       <p v-if="detail.input_truncated || detail.output_truncated" class="warning">内容超出大小限制，已截断：{{ [detail.input_truncated ? '输入' : '', detail.output_truncated ? '输出' : ''].filter(Boolean).join('、') }}。</p>
       <section class="content"><h4>{{ detail.operation_type === 'tool' ? '调用参数' : '输入' }}</h4>
@@ -21,11 +22,13 @@
 </template>
 <script setup lang="ts">
 import { computed } from 'vue'
+import { nativeObservationSummary } from '@/services/nativeObservationView'
 import type { SpanDetail } from '@/types'
 import { stepName } from '@/services/api'
 import { spanState, spanTime, timingIssue, tokenText, tokenTotal } from '@/services/observationView'
 const props = defineProps<{ detail: SpanDetail | null; spanId: string; loading: boolean; error: string; active: boolean; now: number }>()
 defineEmits<{ retry: [] }>()
+const nativeSummary = computed(() => nativeObservationSummary(props.detail))
 const pretty = (value: unknown) => value == null ? '无可用内容' : typeof value === 'string' ? value : JSON.stringify(value, null, 2)
 const date = (value: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '未知'
 const input = computed(() => props.detail?.input_data && typeof props.detail.input_data === 'object' ? props.detail.input_data as Record<string, unknown> : null)

@@ -24,6 +24,7 @@ from app.models.planning_v4.input import PlanningInput
 from app.services.amap_contract_adapter import AmapContractAdapter
 from app.services.mcp_tool_executor import MCPToolExecutor, get_mcp_tool_executor
 from app.services.observation_service import span
+from app.services.planning_lodging_policy import city_for_days
 
 
 EndpointKind = Literal["arrival", "departure"]
@@ -40,6 +41,8 @@ class EndpointVerificationContext(ContractModel):
     context_revision: int = Field(ge=1)
     base_revision: int | None = Field(default=None, ge=1)
     planning_input: PlanningInput
+    # 空元组保留既有入口按request.city核实两个端点的行为。
+    endpoint_kinds: tuple[EndpointKind, ...] = ()
 
     @model_validator(mode="after")
     def validate_request_reference(self):
@@ -55,6 +58,7 @@ class EndpointVerificationContext(ContractModel):
         run_id: str,
         context_revision: int,
         base_revision: int | None = None,
+        endpoint_kinds: tuple[EndpointKind, ...] = (),
     ) -> "EndpointVerificationContext":
         return cls(
             request_id=planning_input.request.request_id,
@@ -62,6 +66,7 @@ class EndpointVerificationContext(ContractModel):
             context_revision=context_revision,
             base_revision=base_revision,
             planning_input=planning_input,
+            endpoint_kinds=endpoint_kinds,
         )
 
 
@@ -179,9 +184,14 @@ class EndpointVerificationService:
     ) -> EndpointVerificationExecution:
         request, city = _validate_context(context)
         query_by_kind = {
-            "arrival": request.arrival_place_query,
-            "departure": request.departure_place_query,
+            "arrival": request.arrival_place_query if not context.endpoint_kinds or "arrival" in context.endpoint_kinds else None,
+            "departure": request.departure_place_query if not context.endpoint_kinds or "departure" in context.endpoint_kinds else None,
         }
+        def cancelled():
+            if cancel_event is not None and cancel_event.is_set():
+                raise PlanningError("CANCELLED", "到离地点查询已取消", step="endpoint_verify")
+
+        cancelled()
         safe_context = {
             "request_id": context.request_id,
             "run_id": context.run_id,
@@ -198,6 +208,7 @@ class EndpointVerificationService:
             records: dict[str, _EndpointQueryRecord] = {}
             adapter = self.adapter
             for query in dict.fromkeys(query for query in normalized_queries.values() if query is not None):
+                cancelled()
                 if adapter is None:
                     adapter = self._adapter_for(cancel_event)
                 search = adapter.search_text(
@@ -209,6 +220,7 @@ class EndpointVerificationService:
                     extensions="base",
                 )
                 records[query] = _EndpointQueryRecord(query, search)
+                cancelled()
                 exact, duplicate_conflicts = _exact_candidates(query, search.data.places if search.data else ())
                 # Detail is requested only when one exact identity still needs location or city evidence.
                 if search.status == "ok" and len(exact) == 1 and not duplicate_conflicts:
@@ -216,23 +228,8 @@ class EndpointVerificationService:
                     if candidate.location is None or not candidate.city:
                         if not _city_conflicts(candidate.city, city):
                             records[query].details[candidate.poi_id] = adapter.search_detail(candidate.poi_id)
-
-            endpoints = {
-                kind: _verify_endpoint(kind, query_by_kind[kind], normalized_queries[kind], city, records)
-                for kind in ("arrival", "departure")
-            }
-            endpoints, verified_facts = _reconcile_verified_endpoints(endpoints)
-            fact_store = _fact_store(verified_facts, endpoints)
-            execution = EndpointVerificationExecution(
-                request_id=context.request_id,
-                run_id=context.run_id,
-                context_revision=context.context_revision,
-                base_revision=context.base_revision,
-                city=city,
-                arrival=endpoints["arrival"],
-                departure=endpoints["departure"],
-                fact_store=fact_store,
-            )
+            cancelled()
+            execution = _project_execution(context, records)
             record.output = {
                 "arrival_status": execution.arrival.status,
                 "arrival_reason": execution.arrival.reason,
@@ -240,7 +237,7 @@ class EndpointVerificationService:
                 "departure_reason": execution.departure.reason,
                 "search_calls": len(records),
                 "detail_calls": sum(len(item.details) for item in records.values()),
-                "verified_fact_count": len(fact_store.places),
+                "verified_fact_count": len(execution.fact_store.places),
             }
             return execution
 
@@ -276,13 +273,33 @@ def _validate_context(context: EndpointVerificationContext):
             raise ValueError("旅行城市为空")
         if context.planning_input.request.request_id != context.request_id:
             raise ValueError("PlanningInput request_id 与上下文不一致")
+        if context.endpoint_kinds:
+            if len(context.endpoint_kinds) != len(set(context.endpoint_kinds)) or not set(context.endpoint_kinds) <= {"arrival", "departure"}:
+                raise ValueError("到离地点范围无效")
+            days = context.planning_input.days
+            city = city_for_days(context.planning_input, tuple(
+                days[0 if kind == "arrival" else -1].day_id for kind in context.endpoint_kinds))
         return request, city
-    except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError, IndexError) as exc:
         raise PlanningError(
             "ENDPOINT_CONTEXT_INVALID",
             "端点核实上下文无效",
             step="endpoint_preflight",
         ) from exc
+
+
+def _project_execution(context, records):
+    """纯投影可供消费者复核；不发送地图请求，不采用未唯一核实的地点。"""
+    request, city = _validate_context(context)
+    queries = {kind: getattr(request, f"{kind}_place_query")
+               if not context.endpoint_kinds or kind in context.endpoint_kinds else None
+               for kind in ("arrival", "departure")}
+    endpoints = {kind: _verify_endpoint(kind, query, query.strip() if query and query.strip() else None, city, records)
+                 for kind, query in queries.items()}
+    endpoints, facts = _reconcile_verified_endpoints(endpoints)
+    return EndpointVerificationExecution(request_id=context.request_id, run_id=context.run_id,
+        context_revision=context.context_revision, base_revision=context.base_revision, city=city,
+        arrival=endpoints["arrival"], departure=endpoints["departure"], fact_store=_fact_store(facts, endpoints))
 
 
 def _normalize(value: str | None) -> str:

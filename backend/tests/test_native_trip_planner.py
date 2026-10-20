@@ -3,15 +3,23 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 from threading import Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
 from app.agents.native_trip_planner import NativeTripPlanner
 from app.services.native_chain_trace import NativeChainTrace
 from app.services.native_tool_loop import NativeToolLoopError
+from app.services.native_tool_loop import NativeToolLoopResult
 from app.services.planning_v4_validation import is_required_place_gap
 from test_native_attraction_collection import FakeModel, call, final, request
 import test_native_multiagent_collection as spatial
+
+
+def fixed_requirements(summary):
+    interpreter = Mock()
+    interpreter.run.return_value = SimpleNamespace(summary=summary, protocol=NativeToolLoopResult("", (), (), 0))
+    return interpreter
 
 
 def collection():
@@ -99,7 +107,8 @@ class NativeTripPlannerTests(unittest.TestCase):
         state = state or collection()
         collector = Mock()
         collector.run.return_value = state
-        return NativeTripPlanner(master_llm=model, collector=collector, emit=emit), collector
+        return NativeTripPlanner(master_llm=model, collector=collector, emit=emit,
+            requirement_interpreter=fixed_requirements(state.planning_input.requirements)), collector
 
     def test_native_initial_plan_grounded_days_lodging_unknowns_without_business_repairs(self):
         trace = NativeChainTrace()
@@ -215,11 +224,15 @@ class NativeTripPlannerTests(unittest.TestCase):
                            spatial.spatial_query, all_submit, final("补查提交"))
         maps = Mock(side_effect=spatial.map_data)
         trace = NativeChainTrace()
-        collector = NativeMultiagentCollection(master_llm=master,
+        collector = NativeMultiagentCollection(master_llm=master, weather_service=spatial.weather_fixture(),
             attraction_llm=FakeModel(call("maps_text_search", {"city": "上海", "keywords": "外滩"}), choice()),
             dining_llm=dining, lodging_llm=FakeModel(spatial.spatial_query, spatial.spatial_submit, final("提交")),
             adapter=AmapContractAdapter(maps), emit=trace.emit)
-        result = NativeTripPlanner(master_llm=master, collector=collector, emit=trace.emit).run(req)
+        from app.models.planning_v4.input import HardRequirement
+        summary = planning.requirements.model_copy(update={"hard_requirements": (HardRequirement(
+            requirement_id="fixture-must", kind="must_visit", text="外滩", source={"field":"remarks", "quote":"必须去外滩"}),)})
+        result = NativeTripPlanner(master_llm=master, collector=collector, emit=trace.emit,
+            requirement_interpreter=fixed_requirements(summary)).run(req)
         self.assertEqual(result.repair.status, "complete")
         self.assertEqual(result.repair.repair_states[1].completed_rounds, 1)
         self.assertEqual(result.draft.days[0], result.initial_draft.days[0])
@@ -259,7 +272,8 @@ class NativeTripPlannerTests(unittest.TestCase):
             return replace(seed, children=(*seed.children, child), fact_store=facts, protocol=protocol)
         collector = Mock(); collector.run.side_effect = collect
         model = FakeModel(initial, final("初版缺早餐"))
-        result = NativeTripPlanner(master_llm=model, collector=collector).run(request())
+        result = NativeTripPlanner(master_llm=model, collector=collector,
+            requirement_interpreter=fixed_requirements(state.planning_input.requirements)).run(request())
         self.assertEqual(len(calls), 3)
         self.assertEqual(result.repair.repair_states[1].completed_rounds, 0)
         self.assertEqual(result.repair.repair_states[1].stop_reason, "technical_error")

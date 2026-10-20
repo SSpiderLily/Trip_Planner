@@ -224,7 +224,13 @@ function knownCostStatus(entries: ReferenceCostEntry[]): TripPreviewView['cost']
 
 export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
   const preview = envelope.preview
-  const displayIssues = preview.validation.issues.filter((issue) => !HIDDEN_SCHEDULE_ISSUES.has(issue.code))
+  const displayIssues = preview.validation.issues.filter((issue) => {
+    if (HIDDEN_SCHEDULE_ISSUES.has(issue.code)) return false
+    // 兼容旧快照：选填地点为空时不展示历史核实提示。
+    if (issue.code === 'ENDPOINT_ARRIVAL_UNKNOWN') return Boolean(preview.planning_input.request.arrival_place_query?.trim())
+    if (issue.code === 'ENDPOINT_DEPARTURE_UNKNOWN') return Boolean(preview.planning_input.request.departure_place_query?.trim())
+    return true
+  })
   const hasSpecifiedLodging = Boolean(
     preview.planning_input.request.lodging_poi_id?.trim()
     || preview.planning_input.request.lodging_query?.trim(),

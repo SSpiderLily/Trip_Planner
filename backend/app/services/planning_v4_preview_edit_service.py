@@ -24,6 +24,7 @@ from app.models.preview_storage import (
     PreviewSnapshotUnsupported,
     StoredPreview,
 )
+from app.services.preview_notice_policy import preserve_preview_notices
 from app.services.current_route_service import CurrentRouteError, CurrentRouteService
 from app.services.destination_candidate_repository import DestinationCandidateNotFound
 from app.services.destination_search_service import DestinationCandidateBundle, DestinationSearchService
@@ -660,18 +661,7 @@ class PlanningV4PreviewEditService:
             preview.candidates,
             repair_states=preview.validation.repair_states,
         )
-        notices = tuple(
-            issue.model_copy(update={"based_on_revision": preview.draft.revision})
-            for issue in preview.validation.issues
-            if issue.code in {"INITIAL_ACTIVITY_OMITTED", "DISPATCH_COLLECTION_PARTIAL"}
-        )
-        if notices:
-            report = report.model_copy(update={
-                "issues": (*report.issues, *notices),
-                "days": tuple(day.model_copy(update={
-                    "issue_ids": (*day.issue_ids, *(issue.issue_id for issue in notices if issue.day_id == day.day_id)),
-                }) for day in report.days),
-            })
+        report = preserve_preview_notices(report, preview.validation)
         cost = aggregate_reference_costs(
             preview.planning_input,
             preview.draft,

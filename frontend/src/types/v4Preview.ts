@@ -220,6 +220,7 @@ export interface ItineraryPreview {
     days: DayConstraint[]
   }
   draft: {
+    source_run_id?: string
     plan_id: string
     revision: number
     days: DraftDay[]

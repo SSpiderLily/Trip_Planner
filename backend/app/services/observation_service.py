@@ -91,6 +91,13 @@ def record_model_diagnostics(value):
         item.model_diagnostics = value
 
 
+def mark_observation_missing(reason, error=None):
+    context = _context.get()
+    if context is not None:
+        recorder, task_id, _, _ = context
+        recorder.missing(task_id, reason, error)
+
+
 @contextmanager
 def span(name, kind, input_data=None):
     # 即使未挂观测仓库也恢复上下文，避免跨任务/线程串线。

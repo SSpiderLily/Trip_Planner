@@ -1,12 +1,11 @@
 <template>
   <main class="preview-shell">
+    <nav v-if="observationTarget && pageState !== 'loading'" class="planning-observation-entry" aria-label="规划过程"><router-link :to="observationTarget">查看当前任务的规划过程 ↗</router-link></nav>
     <section v-if="pageState === 'loading'" class="state-page loading-state">
       <span class="eyebrow">TRIP PREVIEW</span>
       <div class="generation-spinner" aria-hidden="true"><span></span></div>
       <h1>正在生成你的行程</h1>
-      <span class="loading-caption">当前阶段</span>
-      <p class="loading-stage" role="status" aria-live="polite" aria-atomic="true">{{ progressLabel }}</p>
-      <p class="loading-note">页面会按实际规划阶段更新。完成后会自动打开预览。</p>
+      <PlanningProgress :stage="generationStage" :status="generationStatus" :task-id="activeAccess?.taskId ?? null" />
       <p v-if="accessPersistencePending" class="storage-warning">本机暂未保存恢复信息。当前页可继续查看；刷新或关闭后无法恢复。</p>
       <button v-if="accessPersistencePending" class="quiet-button" :disabled="accessStorageRetrying" @click="retryAccessPersistence">{{ accessStorageRetrying ? '正在保存恢复信息…' : '重试保存恢复信息' }}</button>
     </section>
@@ -343,6 +342,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import PreviewMap from '@/components/preview/PreviewMap.vue'
+import PlanningProgress from '@/components/preview/PlanningProgress.vue'
 import TripPreviewExport from '@/views/TripPreviewExport.vue'
 import {
   getLatestPreviewAccess,
@@ -370,7 +370,8 @@ import { formatReferenceDuration, mapV4Preview, type PreviewActivityView, type P
 import { groupV4DestinationActivities } from '@/utils/v4PreviewEditMapper'
 import { mapV4DestinationSearchCandidate, type V4DestinationSearchCandidateView } from '@/utils/v4DestinationSearchMapper'
 import { canQueryNextDestinationPage, shouldShowDestinationSearchPagination } from '@/utils/v4DestinationSearchPagination'
-import { canRetryV4PreviewRead, v4GenerationFailureMessage, v4PreviewStageLabel } from '@/utils/v4PreviewProgress'
+import { canRetryV4PreviewRead } from '@/utils/v4PreviewProgress'
+import { planningObservationTarget, waitForV4PlanningPreview, V4PlanningReadError as PreviewPageError } from '@/utils/v4PlanningSession'
 import {
   canApplyV4Restore,
   captureV4PreviewExport,
@@ -398,7 +399,8 @@ import {
 const pageState = ref<'loading' | 'missing_access' | 'failed' | 'ready'>('loading')
 const errorMessage = ref('')
 const failureAction = ref<'read' | 'replan'>('read')
-const progressLabel = ref(v4PreviewStageLabel('planning_input', 'running'))
+const generationStage = ref('accepted')
+const generationStatus = ref('accepted')
 const view = ref<TripPreviewView | null>(null)
 const envelope = ref<V4PreviewEnvelope | null>(null)
 const activeAccess = ref<V4PreviewAccess | null>(null)
@@ -451,12 +453,8 @@ let destinationSearchGeneration = 0
 let destinationSearchAbort: AbortController | null = null
 let dragOrigin: { id: string; pointerId: number } | null = null
 
-class PreviewPageError extends Error {
-  constructor(message: string, readonly action: 'read' | 'replan' = 'replan') {
-    super(message)
-  }
-}
 
+const observationTarget = computed(() => planningObservationTarget(activeAccess.value?.taskId))
 const activeDay = computed(() => view.value?.days[activeIndex.value] ?? null)
 const activeConstraints = computed(() => {
   const dayId = activeDay.value?.id
@@ -619,6 +617,7 @@ const route = useRoute()
 
 async function loadLatest(): Promise<void> {
   const generation = ++requestGeneration
+  activeAccess.value = null
   invalidateDestinationSearch()
   routeJobGeneration++
   routeJobState.value = 'idle'
@@ -639,7 +638,8 @@ async function loadLatest(): Promise<void> {
   pageState.value = 'loading'
   errorMessage.value = ''
   failureAction.value = 'read'
-  progressLabel.value = v4PreviewStageLabel('planning_input', 'running')
+  generationStage.value = 'accepted'
+  generationStatus.value = 'accepted'
   view.value = null
   envelope.value = null
   activeAccess.value = access
@@ -666,57 +666,39 @@ async function loadLatest(): Promise<void> {
 }
 
 async function loadUntilReady(access: V4PreviewAccess, generation: number): Promise<void> {
-  while (!disposed && generation === requestGeneration) {
-    const status = await getV4TaskStatus(access)
-    if (disposed || generation !== requestGeneration) return
-    progressLabel.value = v4PreviewStageLabel(status.stage, status.status)
-    if (status.task_id !== access.taskId || status.plan_id !== access.planId) {
-      throw new PreviewPageError('无法恢复这份预览。请从首页重新开始。')
+  const loadedEnvelope = await waitForV4PlanningPreview(access, {
+    readStatus: getV4TaskStatus,
+    readPreview: getV4Preview,
+    isCurrent: () => !disposed && generation === requestGeneration,
+    onProgress: (status) => {
+      generationStage.value = status.stage
+      generationStatus.value = status.status
+    },
+    pause: wait,
+  })
+  if (!loadedEnvelope || disposed || generation !== requestGeneration) return
+  view.value = mapV4Preview(loadedEnvelope)
+  envelope.value = loadedEnvelope
+  activeAccess.value = access
+  activeIndex.value = 0
+  pageState.value = 'ready'
+  void loadFinalState(access, generation)
+  const hasCachedEdit = hasStoredV4PendingEdit(access.taskId)
+  const cachedEdit = readV4PendingEdit(access.taskId)
+  if (hasCachedEdit && (!cachedEdit || cachedEdit.planId !== access.planId)) {
+    pendingEditCacheBroken.value = true
+  } else if (cachedEdit) {
+    pendingEdit.value = cachedEdit
+    if (cachedEdit.status === 'conflict') {
+      message.info('已恢复一项与最新行程冲突的编辑，请选择重试，或读取服务端结果。')
+      void startRouteJobForEnvelope(access, loadedEnvelope, generation)
+    } else {
+      // A prior request may have reached the server before its response was lost.
+      // Replay this exact persisted body and command_id before offering a new edit.
+      void sendPendingEdit(cachedEdit, access, generation)
     }
-    if (status.status === 'failed') {
-      throw new PreviewPageError(v4GenerationFailureMessage(status.error_code), 'replan')
-    }
-    if (status.status === 'interrupted') {
-      throw new PreviewPageError('规划任务已中断，没有可预览的行程。请返回首页重新规划。', 'replan')
-    }
-    if (status.preview_ready || status.status === 'ready') {
-      try {
-        const loadedEnvelope: V4PreviewEnvelope = await getV4Preview(access)
-        if (disposed || generation !== requestGeneration) return
-        if (loadedEnvelope.task_id !== access.taskId || loadedEnvelope.plan_id !== access.planId) {
-          throw new PreviewPageError('无法恢复这份预览。请从首页重新开始。')
-        }
-        view.value = mapV4Preview(loadedEnvelope)
-        envelope.value = loadedEnvelope
-        activeAccess.value = access
-        activeIndex.value = 0
-        pageState.value = 'ready'
-        void loadFinalState(access, generation)
-        const hasCachedEdit = hasStoredV4PendingEdit(access.taskId)
-        const cachedEdit = readV4PendingEdit(access.taskId)
-        if (hasCachedEdit && (!cachedEdit || cachedEdit.planId !== access.planId)) {
-          pendingEditCacheBroken.value = true
-        } else if (cachedEdit) {
-          pendingEdit.value = cachedEdit
-          if (cachedEdit.status === 'conflict') {
-            message.info('已恢复一项与最新行程冲突的编辑，请选择重试，或读取服务端结果。')
-            void startRouteJobForEnvelope(access, loadedEnvelope, generation)
-          } else {
-            // A prior request may have reached the server before its response was lost.
-            // Replay this exact persisted body and command_id before offering a new edit.
-            void sendPendingEdit(cachedEdit, access, generation)
-          }
-        } else {
-          void startRouteJobForEnvelope(access, loadedEnvelope, generation)
-        }
-        return
-      } catch (error) {
-        if (disposed || generation !== requestGeneration) return
-        if (!isPreviewNotReady(error)) throw error
-      }
-    }
-    await wait(1800)
-    if (disposed || generation !== requestGeneration) return
+  } else {
+    void startRouteJobForEnvelope(access, loadedEnvelope, generation)
   }
 }
 
@@ -1352,11 +1334,6 @@ function formatSavedAt(value: string): string {
     : value
 }
 
-function isPreviewNotReady(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'response' in error
-    && (error as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response?.status === 409
-    && (error as { response?: { data?: { detail?: { code?: string } } } }).response?.data?.detail?.code === 'PREVIEW_NOT_READY'
-}
 
 function formatDate(value: string, timezone: string): string {
   const date = new Date(value)
@@ -1409,6 +1386,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.planning-observation-entry { text-align:right; margin-bottom:16px; font-size:12px; }
+.planning-observation-entry a { color:#355b44; text-underline-offset:4px; }
 .preview-shell { max-width: 1440px; min-height: 100vh; margin: 0 auto; padding: 30px clamp(20px, 5vw, 72px) 84px; color: #1b322c; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
 .page-topline { display: flex; justify-content: space-between; align-items: center; padding-bottom: 17px; border-bottom: 1px solid #d7ded2; }
 .preview-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: end; gap: 8px; position: relative; }

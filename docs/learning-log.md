@@ -979,10 +979,110 @@
 
 真实模型输出通过结构校验仍有质量问题：正餐馆不应默认用作早餐，不同POI也可能覆盖同一景区体验。提示词已补充餐次与地点重叠判断，营业/房态/路线仍未知，不借此新增精细可行性校验。服务连接失败必须与业务无进展区分；地图故障已有部分事实时仍须合并保留，技术恢复不扣业务轮数。代码见`native_trip_planner.py`、`native_multiagent_collection.py`，测试见`test_native_trip_planner.py`；全部离线、真实初版及真实修订的证据边界统一见[CHG-003第四步](changes/CHG-003-planning-performance-observability.md#native-agent-step4)。
 
+
+<a id="native-runtime-interface-2026-10-13"></a>
+## 原生流程正式接线：运行身份与进度接口（2026-10-13）
+
+独立脚本生成自己的运行/计划ID，不能直接满足正式任务的身份约束。将身份及进度契约从任务存储服务中分离，再让原生采集、初版和修订接受调用方ID，避免交付前改写草稿而破坏引用。每次运行独立保存进度回调及取消信号，在线程执行的工具通过调用方事件循环报告进度；取消后拒绝采用晚到结果。地点规划结束与预览已落盘分开，只有正式交付层可以报告ready。
+
+模块测试用固定契约数据和模拟响应，不依赖其他测试文件或真实服务。代码见[运行协调模块](../backend/app/services/native_planning_runtime.py)及[独立测试](../backend/tests/test_native_planning_runtime.py)；验证数量、命令和正式替换尚未完成的边界统一见[CHG-003第一点](changes/CHG-003-planning-performance-observability.md#native-api-runtime-step1)。
+
+
+<a id="native-requirement-summary-2026-10-13"></a>
+## 原生流程正式接线：主智能体需求整理（2026-10-13）
+
+按子任务派发逐条登记需求会漏掉未派发要求，也会用局部任务目标覆盖完整摘要。新增独立原生需求提交阶段：先验证原文依据并固定摘要，再让采集任务引用其条目；全局要求一直保留到每日校验，不能因没有查询对应子任务就视为已满足。原始结构化输入和ID由后端保留，目标及偏好另存引用依据，确定规则不需要模型补造假设。日期原文校验需要使用模型实际收到的JSON表示，不能只匹配Python的空格格式。
+
+模块单独模拟测试，并通过固定采集结果验证同一主模型历史、正式身份和未派发要求进入最终草稿/校验。引用存在只证明原文出处，不能证明模型对所有自由文本的语义理解正确；完整真实替换仍待后续。代码见[需求整理模块](../backend/app/agents/native_requirement_interpreter.py)，独立测试见[test_native_requirement_interpreter.py](../backend/tests/test_native_requirement_interpreter.py)，验证命令及边界统一见[CHG-003第二点](changes/CHG-003-planning-performance-observability.md#native-api-requirements-step2)。
+
+
+<a id="native-specified-lodging-2026-10-13"></a>
+## 原生流程正式接线：指定住宿核实（2026-10-13）
+
+选定酒店应按POI核实，名称变化不能使模型重新选一家；仅文本同名时不能任选。新增独立指定住宿模块，复用现有身份、原文和连续范围策略，再将结果作为原生采集的初始事实/候选。主模型只对未指定范围调用住宿子智能体；明确换住处后，新范围的推荐不能继续套用最初酒店。查询复用与日期绑定分开：同住处可复用事实，每个连续范围仍有独立候选；后续补查保留这些候选ID，不能因它们不是子任务结果而丢失。
+
+模拟整链路验证三日指定住处复用，地图详情仅一次且住宿子模型零调用。地图身份核实不代表旅行日期房态或价格；真实替换验收仍待后续。代码见[指定住宿模块](../backend/app/services/specified_lodging_service.py)与[独立测试](../backend/tests/test_native_specified_lodging.py)，验证命令与边界统一见[CHG-003第三点](changes/CHG-003-planning-performance-observability.md#native-api-lodging-step3)。
+
+
+<a id="native-weather-facts-2026-10-13"></a>
+## 原生流程正式接线：天气事实（2026-10-13）
+
+天气查询成功不代表旅行日期有预报。将逐日覆盖、工具状态和可消费事实分开，主模型只使用同城同日的预报；超出范围、重复或无有效字段保留未知。普通天气工具从已确认需求派生城市/日期，既保留主模型原生调用，又由后端保证规划前获得查询结果。修订复用既有事实，天气失败不消耗地点业务修订轮次。同城往返只查一次，但日期仍分别绑定，不能把一个城市的天气用于另一个城市。
+
+加入必需天气前提后，既有模块测试必须显式注入模拟天气；首轮漏注入使一个旧测试误走MCP初始化，初始化权限失败未连接供应商。补齐替身后，专项及全量测试在进程禁网下验证并记录连接尝试0。代码见[天气事实模块](../backend/app/services/native_weather_service.py)和[独立模拟测试](../backend/tests/test_native_weather.py)，数量、证据及正式API尚未切换的边界统一见[CHG-003第四点](changes/CHG-003-planning-performance-observability.md#native-api-weather-step4)。
+
+
+<a id="native-endpoint-facts-2026-10-13"></a>
+## 原生流程正式接线：到离地点事实（2026-10-13）
+
+到离地点身份核实与活动候选、交通事实分开。模型用普通工具调用核实，但后端固定原始查询和首末城市；歧义不能由模型任选，未填写不能根据备注猜测机场或车站。核实结果附诊断，消费者重建状态和来源，防止把未核实候选注入为唯一地点。一次运行内复用查询和事实，修订继续使用同一状态；一端失败不丢弃另一端的有效事实。跨城市核实时，同POI/来源冲突必须降级未知，不能覆盖先前结果。
+
+模拟链路确认主模型接收核实状态后仍只从活动候选生成每日安排；到离查询失败不消耗地点修订轮次，地点身份不证明交通或返程可行性。代码见[到离事实模块](../backend/app/services/native_endpoint_service.py)和[独立模拟测试](../backend/tests/test_native_endpoints.py)；验证数量、禁网证据及正式API尚未切换的边界统一见[CHG-003第五点](changes/CHG-003-planning-performance-observability.md#native-api-endpoints-step5)。
+
+
+<a id="native-preview-delivery-2026-10-13"></a>
+## 原生流程正式接线：预览交付适配（2026-10-13）
+
+原生规划结果与持久化预览是两个边界。适配器采用最后修订的草稿、事实、候选及区域，并拒绝其他任务身份或过期报告；不能先交付初版再修补ID。地点快照只带待查询相邻路线骨架，ready由事务发布，交通等待或失败不撤回可编辑/保存的地点结果。原生消息和查询诊断留在运行阶段，持久化只保存现有业务契约。
+
+编辑/交通重算会重建校验报告，单纯把到离未知提示加入初次预览会在后续丢失。因此抽出稳定信息提示保留策略，仅继承指定提示并更新版本，地点缺项仍按当前活动重算。模拟持久化链验证保留上下文、单调还原版本及迟到结果隔离；一次全量阻塞未复现，当前全量通过不能证明其根因已解决，保留对应证据边界。代码见[预览适配模块](../backend/app/services/native_preview_adapter.py)、[提示策略](../backend/app/services/preview_notice_policy.py)及[独立模拟测试](../backend/tests/test_native_preview_adapter.py)；数量、命令、禁网及未切换正式API的状态统一见[CHG-003第六点](changes/CHG-003-planning-performance-observability.md#native-api-preview-step6)。
+
+
+<a id="native-observation-2026-10-13"></a>
+## 原生流程正式接线：业务观测（2026-10-13）
+
+调用耗时和业务决策是两个观测层次。原生工具循环继续记录真实调用时间/供应商Token，派发、候选、每日草稿和修订另存业务事件；不能把写入事件的短耗时当作模型耗时，也不能再包装一套模型span重复计数。并发子任务复制任务上下文并建立独立父记录，避免多角色/多任务串线。白名单业务字段足以核对依据，完整消息和推理只留在运行内存。代码见[native_observation](../backend/app/services/native_observation.py)、[独立观测测试](../backend/tests/test_native_observation.py)与[Vue详情渲染](../frontend/tests/nativeObservation.test.mjs)；完整证据和浏览器工具不可用边界见[第七点](changes/CHG-003-planning-performance-observability.md#native-api-observation-step7)。
+
+<a id="native-api-switch-2026-10-13"></a>
+## 原生流程正式接线：正式API工厂替换（2026-10-13）
+
+替换生成工厂即可沿用已有202后台任务、预览事务和交通/编辑/保存链；不需要重写下游服务或修改契约。验收使用实际应用启动与默认工厂，只替换供应商依赖，证明没有意外回退旧生成链。模型完成不是ready，事务失败不能交付；交通错误不能撤回有效地点预览。保留总/首次采集配置时，阶段结束必须恢复总预算，否则每日规划仍会受短采集期限约束。历史快照保存与过期编辑拒绝是不同语义，测试须按现有契约断言，不能为了通过新测试改变保存功能。代码见[应用工厂](../backend/app/api/main.py)、[原生桥接](../backend/app/services/native_preview_adapter.py)及[独立API测试](../backend/tests/test_native_planning_api.py)；源码接入、测试与未重启/未真实验收边界见[第八点](changes/CHG-003-planning-performance-observability.md#native-api-switch-step8)。
+
+
+<a id="native-frontend-2026-10-13"></a>
+## 原生流程正式接线：前端读取与交付（2026-10-13）
+
+后端更换生成工厂并不需要新增前端API。前端应把提交、状态读取、预览交付与后续交通分开：202只接受任务，preview_ready才表示地点快照落盘；交通失败不撤回可编辑保存的预览。状态身份应先核对再更新进度，任务切换/退出时丢弃迟到成功和失败，GET重读不能变成重复提交规划。首页按本次任务跳转，观测链接也绑定同一任务，防止“最近任务”被其他标签页覆盖；访问凭据仍只留在本机。
+
+独立轮询模块可以用函数替身测试，并与实际HTTP客户端/页面交付动作和Vue渲染分别验证。组件渲染证明页面状态和入口可展示，不证明真实地图或鼠标交互已验收。代码见[读取模块](../frontend/src/utils/v4PlanningSession.ts)、[进度组件](../frontend/src/components/preview/PlanningProgress.vue)及[独立模拟测试](../frontend/tests/v4NativePlanning.test.mjs)；完整数量及验收边界见[第九点](changes/CHG-003-planning-performance-observability.md#native-api-frontend-step9)。
+
+
+<a id="native-live-acceptance-2026-10-13"></a>
+## 原生流程正式接线：真实整链路验收（2026-10-13）
+
+只通过模块测试和更换源码工厂，不能证明当前运行进程已替换。先确认无活动任务并重启本机服务，再从真实表单提交一次，用原生模型span和子任务/地图事件确认实际执行链。接着用同一预览验证交通、方式选择、活动增删排序、导出保存、单调还原和刷新，而不是用第二次规划替代编辑。持久化结构校验与业务覆盖、地图路径与采用方式、图片导出与数据库保存分别核对；restore必须恢复保存内容并生成新版本，不能回退并发版本号。
+
+本次已完成真实功能闭环，无需修改应用代码。价格未知、未来菜单/营业/房态和预算适配仍是推荐质量边界；单次成功不代表人工接受或所有输入通过。完整原生历史未持久化，因此记录所采用的业务输出与调用用量，不宣称已审查每个中间模型响应。操作证据与具体数量统一见[第十点](changes/CHG-003-planning-performance-observability.md#native-api-live-step10)，前序模拟验证不重复计作本轮重跑结果；本机日志和图片不进入提交。
+
+
+## 原生流程手动任务连接失败（2026-10-13）
+
+子智能体候选返回不代表主采集循环已结束。主模型收取工具结果后的下一次请求若发生连接异常，当前max_retries=0且循环直接抛错，初始采集不会交付每日预览。只读日志可确认传输异常类别及已完成步骤，不能根据RemoteProtocolError独自判定供应商、网关或上下文容量根因；本次未修复或重跑。具体证据、代码链及后续建议见[失败排查](changes/CHG-003-planning-performance-observability.md#native-api-manual-connection-failure)。
+
+
+
+## 2026-10-20：地点消费扩展字段与酒店每晚参考单位
+
+现象：规划地点的人均消费缺失。代码检查发现原生候选搜索请求基础字段，不能据此判断高德没有消费数据。改为相关搜索随请求携带 `extensions=all`；适配器读取 `biz_ext.cost`，空顶层字段不遮蔽有效扩展值，保留消费来源和数值0。缺失仍未知，不追加消费专用查询。
+
+酒店按用户约定使用人均每晚参考单价；不查询入住日期报价。最初单列展示，现行小计已按后续确认纳入过夜日期的已知酒店金额，旧快照仍可读。规则见 [CONTEXT](../CONTEXT.md)，验证及部署状态见 [CHG-003](changes/CHG-003-planning-performance-observability.md)。测试位置：`test_amap_contract_adapter.py`、`test_reference_cost.py`、`test_native_planning_api.py`、`v4PreviewMapper.test.mjs`。
+
+
+## 2026-10-20：新主模型真实消费验收
+
+一次真实前端任务成功，餐饮金额从高德扩展字段到预览小计一致。景点和酒店未知不能视为修复失败或免费：抽查原始高德详情确实返回空cost。景点关键词命中的馆内餐饮不能算作景点已知价格覆盖。另发现“已安排必去点仍提示未绑定”的独立问题，未在消费验收中修改。完整证据与未验证边界见 [CHG-003当前状态](changes/CHG-003-planning-performance-observability.md)。
+
+
 ## 2026-10-20：三类地点消费展示与已知消费小计
 
 用户最终确认景点、餐饮和酒店有值即展示，酒店按人均每晚；提交前核对发现这一后续要求未落实，已补齐预览、候选和导出。展示层汇总三类已知消费，酒店每晚计入且离开日不计住宿，兼容原有快照，不能直接沿用含景点的旧后端小计。三类地点缺失统一提示“未查询到可供参考的人均消费”，真实0元与未知区分；预览、候选搜索和导出一致。25份前端回归与构建通过；旧真实预览因浏览器缺少访问凭据未完成页面复验。证据及范围见 [CHG-003](changes/CHG-003-planning-performance-observability.md)。
 
+
 ## 2026-10-20：删除必去地点绑定判定
 
 问题：模型已经安排豫园与上海博物馆东馆，但后端按完整名称做子串匹配，未能建立候选需求ID；最终双重ID校验又把活动判为未落实。用户选择简化而非继续扩展名称规则。删除必去名称自动匹配/绑定及最终满足性判定，需求继续交给模型，保留POI事实、来源和引用有效性；旧快照可读，历史未绑定提示不再展示。971项禁网后端测试、25份前端回归和构建通过，部署状态见 [CHG-003](changes/CHG-003-planning-performance-observability.md)。
+
+
+## 2026-10-20：选填到离地点不产生缺省告警
+
+问题：未填写到离地点时，事实层的query_missing被直接转成“未唯一核实”提示，混淆了未输入与查询失败。预览适配层先检查用户是否填写，再按未查到、歧义、查询失败生成可读提示；前端按原请求过滤旧快照提示，不修改未知事实。模拟覆盖两端的空值/空串/空白、空结果、同名歧义、查询失败和核实成功，并保留已填写失败提示的编辑/交通重算测试。验证及部署状态见 [CHG-003](changes/CHG-003-planning-performance-observability.md)。

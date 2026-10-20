@@ -1,6 +1,8 @@
 """原生景点子智能体：自主选择地图工具，复用现有事实与候选规则。"""
 from __future__ import annotations
 
+from app.services.native_observation import native_event_emitter
+
 from dataclasses import dataclass, field, replace
 import json
 from threading import Event
@@ -118,7 +120,7 @@ class NativeCandidateAgent:
                  emit: Callable[[str, dict], None] | None = None,
                  max_model_calls=8, max_tool_calls=9):
         self.llm, self.adapter, self.tool_executor = llm, adapter, tool_executor
-        self.emit = emit or (lambda event, data: None)
+        self.emit = native_event_emitter(emit)
         self.max_model_calls, self.max_tool_calls = max_model_calls, max_tool_calls
 
     def run(self, task: Subtask, context: AttractionExecutionContext, *,
@@ -271,6 +273,7 @@ class NativeCandidateAgent:
         protocol = None
         try:
             protocol = NativeToolLoop(self.llm or get_agent_llm(self.role), tools,
+                                      observation_role=self.role, observation_stage="collection",
                                       max_model_calls=self.max_model_calls,
                                       max_tool_calls=self.max_tool_calls).run([
                 {"role": "system", "content": self.system_prompt},

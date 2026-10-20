@@ -1,7 +1,7 @@
 """v4 原始需求、需求整理和后端规划约束。"""
 from __future__ import annotations
 
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Iterable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -113,6 +113,11 @@ def validate_requirement_sources(request: TripRequest, hard_requirements: Iterab
             valid = requirement.source.quote in source_value
         elif isinstance(source_value, TripBudget):
             valid = requirement.source.quote in source_value.model_dump_json()
+        elif isinstance(source_value, datetime):
+            # 模型看到的请求JSON使用ISO格式（含T），不应因Python的空格格式拒收原文。
+            representations = (request.model_dump(mode="json")[requirement.source.field],
+                               source_value.isoformat(), str(source_value))
+            valid = any(requirement.source.quote in value for value in representations)
         elif source_value is None:
             valid = False
         else:

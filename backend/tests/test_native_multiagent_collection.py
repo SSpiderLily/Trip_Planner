@@ -8,11 +8,16 @@ from unittest.mock import Mock
 
 from app.agents.native_multiagent_collection import NativeMultiagentCollection, SharedQueryCache, merge_fact_stores
 from app.models.planning_v4.facts import FactStore
+from app.services.native_weather_service import NativeWeatherService
 from app.services.amap_contract_adapter import AmapContractAdapter
 from app.services.llm_service import NativeLLMCompletion
 from app.services.native_chain_trace import NativeChainTrace
 from app.services.native_tool_loop import NativeToolLoopError
 from test_native_attraction_collection import FakeModel, call, choice, final, poi, raw, request, task_args
+
+
+def weather_fixture():
+    return NativeWeatherService(adapter=AmapContractAdapter(lambda *_: {"result_status": "empty", "city": "上海", "forecasts": []}))
 
 
 def batch(*responses):
@@ -62,7 +67,7 @@ class NativeMultiagentTests(unittest.TestCase):
         lodging = lodging or FakeModel(spatial_query, spatial_submit, final("提交"))
         attraction = FakeModel(call("maps_text_search", {"city":"上海", "keywords":"外滩"}), choice())
         maps = Mock(side_effect=mapper or map_data)
-        return NativeMultiagentCollection(master_llm=master, attraction_llm=attraction, dining_llm=dining,
+        return NativeMultiagentCollection(weather_service=weather_fixture(), master_llm=master, attraction_llm=attraction, dining_llm=dining,
             lodging_llm=lodging, adapter=AmapContractAdapter(maps), emit=emit), master, maps
 
     def test_rounds_concurrent_overlap_ordered_results_fact_source_closure(self):

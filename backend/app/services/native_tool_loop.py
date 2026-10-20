@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .llm_service import NativeLLMCompletion
 from .observation_service import span, token_usage
+from .native_observation import native_metadata
 
 
 class NativeToolArguments(BaseModel):
@@ -116,7 +117,7 @@ class NativeToolLoop:
 
     def __init__(self, llm: NativeModel, tools: Sequence[NativeTool], *,
                  max_model_calls: int = 8, max_tool_calls: int = 24,
-                 batch_executor=None):
+                 batch_executor=None, observation_role=None, observation_stage=None):
         if (type(max_model_calls) is not int or max_model_calls < 1
                 or type(max_tool_calls) is not int or max_tool_calls < 1):
             raise ValueError("模型及工具调用上限必须是正整数")
@@ -127,6 +128,8 @@ class NativeToolLoop:
         self.max_model_calls = max_model_calls
         self.max_tool_calls = max_tool_calls
         self.batch_executor = batch_executor
+        self.observation_metadata = {key: value for key, value in
+            (("role", observation_role), ("stage", observation_stage)) if value is not None}
 
     @staticmethod
     def _check_cancelled(cancel_event):
@@ -190,7 +193,7 @@ class NativeToolLoop:
             return _error_content("INVALID_TOOL_ARGUMENTS")
 
         # 只记录工具名和结果分类，不保存参数、供应商推理或异常原文。
-        with span("tool.native_call", "tool", {"tool_name": tool.name}) as record:
+        with span("tool.native_call", "tool", {**native_metadata(), **self.observation_metadata, "tool_name": tool.name, "tool_call_id": call["id"]}) as record:
             try:
                 result = tool.handler(arguments)
             except NativeToolLoopError as exc:
@@ -223,7 +226,7 @@ class NativeToolLoop:
         tool_count = 0
         for request_number in range(1, self.max_model_calls + 1):
             self._check_cancelled(cancel_event)
-            with span("llm.native_tool_loop", "llm", {"request_number": request_number}) as record:
+            with span("llm.native_tool_loop", "llm", {**native_metadata(), **self.observation_metadata, "request_number": request_number}) as record:
                 try:
                     completion = self.llm.invoke_native(
                         deepcopy(history),

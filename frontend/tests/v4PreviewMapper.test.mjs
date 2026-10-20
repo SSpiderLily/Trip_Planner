@@ -236,6 +236,21 @@ assert.ok(exportSource.includes('hotel.cost'))
 assert.ok(pageSource.includes('v-if="item.activity.kind !== \'free_time\'"'))
 assert.ok(exportSource.includes('v-if="item.activity.kind !== \'free_time\'"'))
 
+const endpointEnvelope = mixedSyntheticEnvelope()
+endpointEnvelope.preview.validation.issues.push(...['ARRIVAL', 'DEPARTURE'].map(kind => ({
+  issue_id: `endpoint-${kind}`, code: `ENDPOINT_${kind}_UNKNOWN`, scope: 'plan', day_id: null,
+  category: 'unknown_info', severity: 'warning', target_id: kind.toLowerCase(), message: '旧地点提示',
+})))
+for (const empty of [null, '', '   ']) {
+  endpointEnvelope.preview.planning_input.request.arrival_place_query = empty
+  endpointEnvelope.preview.planning_input.request.departure_place_query = empty
+  assert.ok(!mapV4Preview(endpointEnvelope).planIssues.some(i => i.code.startsWith('ENDPOINT_')))
+}
+endpointEnvelope.preview.planning_input.request.arrival_place_query = '上海站'
+assert.deepEqual(mapV4Preview(endpointEnvelope).planIssues.filter(i => i.code.startsWith('ENDPOINT_')).map(i => i.code), ['ENDPOINT_ARRIVAL_UNKNOWN'])
+endpointEnvelope.preview.planning_input.request.departure_place_query = '虹桥站'
+assert.equal(mapV4Preview(endpointEnvelope).planIssues.filter(i => i.code.startsWith('ENDPOINT_')).length, 2)
+
 assert.equal(day.activities[0].cost.text, '¥50 / 人')
 const missingCosts = mixedSyntheticEnvelope()
 for (const entry of missingCosts.cost.days[0].entries) { entry.status = 'unknown'; entry.amount = null }

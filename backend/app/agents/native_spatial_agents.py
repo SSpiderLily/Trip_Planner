@@ -45,6 +45,11 @@ class LodgingAnswer(AttractionAnswer):
 
 
 class _NativeLodgingPolicy(LodgingSubtaskRunner):
+    def _validate_preflight(self, subtask, context):
+        from app.services.planning_lodging_policy import stay_for_days
+        self._stay_query = stay_for_days(context.planning_input, subtask.scope.day_ids).lodging_query
+        super()._validate_preflight(subtask, context)
+
     def _eligible_area_ids(self, place, subtask, context):
         # 查询与结果使用同一半径；不能把5公里查询的范围提前放宽成10公里。
         if not super()._eligible_area_ids(place, subtask, context):
@@ -187,7 +192,7 @@ class NativeLodgingAgent(_SpatialAgent):
             return super().search_tools(task, context, policy, store, adapter, receive, search)
 
         def verify(_):
-            query = context.planning_input.request.lodging_query
+            query = policy._stay_query
             arguments = {"keywords": query, "city": task.scope.city, "citylimit": True,
                          "types": None, "page": 1, "offset": 20, "extensions": "all"}
             return receive(("specified", _normalize(task.scope.city), query),
@@ -196,6 +201,6 @@ class NativeLodgingAgent(_SpatialAgent):
                            NoArguments, verify)]
 
     def prompt_extra(self, task, context, policy):
-        return {"original_lodging_query": context.planning_input.request.lodging_query,
+        return {"original_lodging_query": policy._stay_query,
                 "area_scopes": [{"scope_id": key, "anchor": anchor.model_dump(mode="json", exclude={"photos"})}
                                 for key, (anchor, _) in self.scopes(task, context, policy).items()]}

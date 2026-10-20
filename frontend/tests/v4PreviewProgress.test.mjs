@@ -9,11 +9,11 @@ const compiled = ts.transpileModule(helperSource, {
 const progress = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 
 assert.equal(progress.v4PreviewStageLabel('planning_input', 'accepted'), '已收到需求，正在准备规划')
-assert.equal(progress.v4PreviewStageLabel('dispatch', 'running'), '正在查询景点、餐馆、住宿和天气')
-assert.equal(progress.v4PreviewStageLabel('proposal', 'running'), '正在规划每天的行程')
+assert.equal(progress.v4PreviewStageLabel('dispatch', 'running'), '主智能体正在协调景点、餐饮和住宿查询，并核实旅行事实')
+assert.equal(progress.v4PreviewStageLabel('proposal', 'running'), '主智能体正在根据候选地点规划每日行程')
 assert.equal(progress.v4PreviewStageLabel('current_routes', 'running'), '正在查询交通路线')
 assert.equal(progress.v4PreviewStageLabel('repair_revision', 'running'), '正在调整每天的行程')
-assert.equal(progress.v4PreviewStageLabel('cost', 'running'), '正在汇总已核实的消费参考')
+assert.equal(progress.v4PreviewStageLabel('cost', 'running'), '正在汇总消费参考并准备交付预览')
 assert.equal(progress.v4PreviewStageLabel('unexpected_stage', 'running'), '正在准备旅行规划')
 
 const invalidOutput = progress.v4GenerationFailureMessage('PLAN_OUTPUT_INVALID')

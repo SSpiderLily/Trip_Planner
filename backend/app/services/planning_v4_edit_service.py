@@ -25,6 +25,7 @@ from app.services.current_route_service import (
     build_pending_route_legs_for_day,
 )
 from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
+from app.services.preview_notice_policy import preserve_preview_notices
 from app.services.planning_v4_validator import ContractValidationError, validate_preview
 
 
@@ -274,6 +275,7 @@ class PlanningV4EditService:
             preview.candidates,
             repair_states=preview.validation.repair_states,
         )
+        report = preserve_preview_notices(report, preview.validation)
         calculation = PreviewCalculation(
             based_on_revision=revision,
             calculation_id=f"edit:{draft.plan_id}:{command.command_id}",
