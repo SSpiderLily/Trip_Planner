@@ -8,12 +8,15 @@ import json
 import re
 from threading import Event
 from typing import Any, Callable, Protocol, Sequence
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .llm_service import NativeLLMCompletion
 from .observation_service import span, token_usage
 from .native_observation import native_metadata
+from .native_model_retry import MAX_MODEL_ATTEMPTS, is_connection_failure, retry_delay_seconds
+from .model_diagnostics import provider_error_diagnostics
 
 
 class NativeToolArguments(BaseModel):
@@ -69,10 +72,11 @@ class NativeToolLoopResult:
     messages: tuple[dict[str, Any], ...] = field(repr=False)
     completions: tuple[NativeLLMCompletion, ...] = field(repr=False)
     tool_calls: int
+    model_attempts: int | None = None
 
     @property
     def model_calls(self) -> int:
-        return len(self.completions)
+        return self.model_attempts if self.model_attempts is not None else len(self.completions)
 
 
 _TOOL_ERRORS = {
@@ -135,6 +139,57 @@ class NativeToolLoop:
     def _check_cancelled(cancel_event):
         if cancel_event is not None and cancel_event.is_set():
             raise NativeToolLoopError("CANCELLED")
+
+    @staticmethod
+    def _wait_before_retry(delay, cancel_event):
+        # Event.wait允许运行协调器的取消信号立即结束退避等待。
+        (cancel_event if cancel_event is not None else Event()).wait(delay)
+
+    def _request_model(self, history, request_number, cancel_event, model_options):
+        """只重发当前模型请求；history中的工具结果和供应商额外字段保持原样。"""
+        metadata = {**native_metadata(), **self.observation_metadata,
+                    "request_number": request_number, "model_request_id": uuid4().hex,
+                    "model": getattr(self.llm, "model", None), "tool_names": list(self.tools),
+                    "max_attempts": MAX_MODEL_ATTEMPTS}
+        declarations = [tool.declaration() for tool in self.tools.values()] or None
+        # SDK重试保持关闭，由本层记录所有物理请求，避免叠加隐式重试。
+        options = {**model_options, "max_retries": 0}
+        for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+            self._check_cancelled(cancel_event)
+            will_retry = False
+            delay = 0.0
+            try:
+                with span("llm.native_tool_loop", "llm", {**metadata, "attempt": attempt}) as record:
+                    try:
+                        completion = self.llm.invoke_native(
+                            deepcopy(history), tools=deepcopy(declarations), **deepcopy(options))
+                    except Exception as exc:
+                        retryable = is_connection_failure(exc)
+                        will_retry = retryable and attempt < MAX_MODEL_ATTEMPTS
+                        delay = retry_delay_seconds(attempt) if will_retry else 0.0
+                        record.output = {"status": "failed", "retry": {
+                            "retryable": retryable, "will_retry": will_retry,
+                            "exhausted": retryable and not will_retry, "delay_seconds": delay}}
+                        if record.model_diagnostics is None:
+                            record.model_diagnostics = provider_error_diagnostics(exc)
+                        raise NativeToolLoopError("MODEL_CALL_FAILED") from None
+                    if not isinstance(completion, NativeLLMCompletion):
+                        raise NativeToolLoopError("INVALID_COMPLETION")
+                    record.usage = token_usage(completion.usage)
+                    record.output = {"status": "returned", "finish_reason": completion.finish_reason}
+                    return completion, attempt
+            except NativeToolLoopError:
+                self._check_cancelled(cancel_event)
+                if not will_retry:
+                    raise
+            # 等待单独记录，模型调用耗时不包含退避，失败尝试仍保留failed状态。
+            with span("model.retry_wait", "planning", {**metadata, "after_attempt": attempt,
+                      "delay_seconds": delay}) as record:
+                self._check_cancelled(cancel_event)
+                self._wait_before_retry(delay, cancel_event)
+                self._check_cancelled(cancel_event)
+                record.output = {"status": "completed"}
+        raise NativeToolLoopError("MODEL_CALL_FAILED")
 
     @staticmethod
     def _calls(message, seen_ids):
@@ -224,21 +279,11 @@ class NativeToolLoop:
                     for call in (message.get("tool_calls") or []) if isinstance(call, dict)
                     and isinstance(call.get("id"), str)}
         tool_count = 0
+        model_attempts = 0
         for request_number in range(1, self.max_model_calls + 1):
             self._check_cancelled(cancel_event)
-            with span("llm.native_tool_loop", "llm", {**native_metadata(), **self.observation_metadata, "request_number": request_number}) as record:
-                try:
-                    completion = self.llm.invoke_native(
-                        deepcopy(history),
-                        tools=[tool.declaration() for tool in self.tools.values()] or None,
-                        **model_options,
-                    )
-                except Exception:
-                    raise NativeToolLoopError("MODEL_CALL_FAILED") from None
-                if not isinstance(completion, NativeLLMCompletion):
-                    raise NativeToolLoopError("INVALID_COMPLETION")
-                record.usage = token_usage(completion.usage)
-                record.output = {"status": "returned"}
+            completion, attempts = self._request_model(history, request_number, cancel_event, model_options)
+            model_attempts += attempts
             self._check_cancelled(cancel_event)
             completions.append(completion)
             message = deepcopy(completion.message)
@@ -258,7 +303,7 @@ class NativeToolLoop:
                         or not isinstance(text, str) or not text.strip()):
                     raise NativeToolLoopError("INVALID_COMPLETION")
                 history.append(message)
-                return NativeToolLoopResult(text, tuple(history), tuple(completions), tool_count)
+                return NativeToolLoopResult(text, tuple(history), tuple(completions), tool_count, model_attempts)
 
             # 整批预检：无法匹配结果或没有后续模型轮次时，不先执行部分工具。
             if tool_count + len(calls) > self.max_tool_calls:

@@ -1060,6 +1060,10 @@
 子智能体候选返回不代表主采集循环已结束。主模型收取工具结果后的下一次请求若发生连接异常，当前max_retries=0且循环直接抛错，初始采集不会交付每日预览。只读日志可确认传输异常类别及已完成步骤，不能根据RemoteProtocolError独自判定供应商、网关或上下文容量根因；本次未修复或重跑。具体证据、代码链及后续建议见[失败排查](changes/CHG-003-planning-performance-observability.md#native-api-manual-connection-failure)。
 
 
+## 原生模型请求有限重试（2026-10-13）
+
+恢复边界放在模型请求内，保留已经配对的tool_calls与工具结果，才能避免因断连重跑整个智能体。连接异常分类需穿过适配器显式异常包装；不能把历史context里的网络错误当作当前错误。SDK和业务循环只由一层执行传输重试，逻辑轮次与实际尝试分开记录，失败Token未知不能补零。保留已有超时策略时，限制次数不等于限制总耗时；进程内重试也不等于跨进程恢复。代码见[native_model_retry](../backend/app/services/native_model_retry.py)、[原生循环](../backend/app/services/native_tool_loop.py)和[专项测试](../backend/tests/test_native_model_retry.py)；模拟证据、数量及尚未部署/真实验证的状态见[连接重试记录](changes/CHG-003-planning-performance-observability.md#native-model-connection-retry)。
+
 
 ## 2026-10-20：地点消费扩展字段与酒店每晚参考单位
 
