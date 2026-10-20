@@ -129,7 +129,7 @@ class NativeAttractionCollectionTests(unittest.TestCase):
         self.assertIsNone(place.opening_hours_raw)
         self.assertEqual(candidate.slot_ids, ())
         self.assertEqual(result.children[0].task_result.status, "complete")
-        self.assertTrue(candidate.requirement_ids)
+        self.assertEqual(candidate.requirement_ids, ())
         self.assertEqual(maps.call_args.args[0], "maps_text_search")
         self.assertEqual(maps.call_args.args[1]["citylimit"], "true")
         self.assertEqual(master.requests[0]["tools"][0]["function"]["name"], "find_attractions")
@@ -289,7 +289,7 @@ class NativeAttractionCollectionTests(unittest.TestCase):
         child = FakeModel(call("maps_text_search", {"keywords": "外滩", "city": "上海"}), choice())
         chain, _, _ = self.setup_chain(child, map_return=raw([poi("p1"), poi("p2")]))
         result = chain.run(request())
-        self.assertEqual(result.children[0].task_result.stop_reason, "ambiguous")
+        self.assertEqual(result.children[0].task_result.stop_reason, "target_met")
         self.assertEqual(result.candidates[0].requirement_ids, ())
 
     def test_invalid_child_json_and_duplicate_selections_return_failed_not_success(self):

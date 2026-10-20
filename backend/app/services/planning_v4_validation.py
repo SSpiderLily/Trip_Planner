@@ -139,37 +139,20 @@ def validate_daily_plan(
         if day_id is not None:
             issues_by_day[day_id].append(issue_id)
 
-    requirement_results = _requirement_results(
-        planning_input=planning_input,
-        draft=draft,
-        candidates=candidate_by_id,
-        place_by_id=place_by_id,
+    # 必去地点由主智能体依据用户需求安排，不再做名称推断或双重ID绑定判定。
+    requirement_results = tuple(
+        RequirementResult(requirement_id=item.requirement_id, status="unverified")
+        for item in planning_input.requirements.hard_requirements
+        if item.kind != "must_visit"
     )
-    for requirement, result in zip(
-        planning_input.requirements.hard_requirements,
-        requirement_results,
-        strict=True,
-    ):
-        if result.status == "unsatisfied":
-            add_issue(
-                code="must_visit_unplanned",
-                category="missing_arrangement",
-                severity="error",
-                scope="plan",
-                target_id=requirement.requirement_id,
-                message=f"必去要求“{requirement.text}”没有绑定到已核实并实际安排的地点活动。",
-                evidence_refs=(*result.activity_ids, *result.place_fact_ids),
-                triggers_repair=False,
-            )
-        elif result.status == "unverified":
-            add_issue(
-                code="requirement_unverified",
-                category="unknown_info",
-                severity="warning",
-                scope="plan",
-                target_id=requirement.requirement_id,
-                message=f"无法仅根据当前结构化信息核实要求“{requirement.text}”是否落实。",
-            )
+    for result in requirement_results:
+        requirement = next(item for item in planning_input.requirements.hard_requirements
+                           if item.requirement_id == result.requirement_id)
+        add_issue(
+            code="requirement_unverified", category="unknown_info", severity="warning",
+            scope="plan", target_id=requirement.requirement_id,
+            message=f"无法仅根据当前结构化信息核实要求“{requirement.text}”是否落实。",
+        )
 
     # 重复是模型安排质量反馈，不是额外搜索或删除活动的依据。
     sightseeing_by_poi: dict[str, list[tuple[DraftDay, DraftActivity]]] = {}
@@ -468,48 +451,6 @@ def _validate_candidate_references(candidates, planning_input) -> None:
             ))
     if issues:
         raise ContractValidationError(tuple(issues))
-
-
-def _requirement_results(*, planning_input, draft, candidates, place_by_id):
-    results: list[RequirementResult] = []
-    for requirement in planning_input.requirements.hard_requirements:
-        if requirement.kind in {"must_avoid", "must_include"}:
-            # 当前数据结构没有可核验的排除实体或通用偏好约束，不能从文字推断。
-            results.append(RequirementResult(
-                requirement_id=requirement.requirement_id,
-                status="unverified",
-            ))
-            continue
-
-        supported: list[tuple[DraftActivity, CandidateRef]] = []
-        for day in draft.days:
-            for activity in day.activities:
-                candidate = candidates.get(activity.candidate_ref or "")
-                if (
-                    activity.kind == "sightseeing"
-                    and requirement.requirement_id in activity.requirement_ids
-                    and candidate is not None
-                    and candidate.category == "sightseeing"
-                    and requirement.requirement_id in candidate.requirement_ids
-                    and candidate.place_fact_id == activity.place_fact_id
-                    and candidate.poi_id == activity.poi_id
-                    and candidate.place_fact_id in place_by_id
-                    and place_by_id[candidate.place_fact_id].poi_id == candidate.poi_id
-                ):
-                    supported.append((activity, candidate))
-        if supported:
-            results.append(RequirementResult(
-                requirement_id=requirement.requirement_id,
-                status="satisfied",
-                activity_ids=tuple(activity.activity_id for activity, _ in supported),
-                place_fact_ids=tuple(dict.fromkeys(candidate.place_fact_id for _, candidate in supported)),
-            ))
-        else:
-            results.append(RequirementResult(
-                requirement_id=requirement.requirement_id,
-                status="unsatisfied",
-            ))
-    return tuple(results)
 
 
 def _add_place_unknowns(*, day, place_by_id, add_issue) -> None:

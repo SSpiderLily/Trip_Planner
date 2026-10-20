@@ -56,8 +56,8 @@ class SimplifiedDayRepairTests(unittest.IsolatedAsyncioTestCase):
         planning_input = make_input(requirements=(requirement("must-bund", "must_visit", "外滩"),))
         draft = make_filled_draft(planning_input, candidates)
         report = validate_daily_plan(planning_input, draft, facts, candidates)
-        self.assertEqual(report.requirements[0].status, "unsatisfied")
-        self.assertTrue(any(issue.code == "must_visit_unplanned" for issue in report.issues))
+        self.assertEqual(report.requirements, ())
+        self.assertFalse(any(issue.code == "must_visit_unplanned" for issue in report.issues))
         # 即使上游错误地把旧交通冲突标为可补查，业务入口也不能接受。
         stale = ValidationIssue(
             issue_id="stale-return", code="return_deadline_conflict",

@@ -177,6 +177,7 @@ const MODE_LABEL: Record<V4TravelMode, string> = {
 
 // S01只收敛用户展示；后端暂时仍会返回旧时间报告，不能让它从提示区泄漏。
 const HIDDEN_SCHEDULE_ISSUES = new Set([
+  'must_visit_unplanned', // 兼容移除必去绑定检查前保存的快照。
   'cost_unavailable', // 消费缺失统一在各地点的消费位置提示。
   'timing_not_provided', 'activity_timing_unverified', 'activity_exceeds_available_end',
   'departure_day_below_minimum_with_activities', 'departure_day_not_required',

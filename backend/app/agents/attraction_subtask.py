@@ -20,7 +20,6 @@ from uuid import uuid4
 
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
-from app.agents.candidate_identity import version_candidate_ref
 from app.agents.execution import PlanningError
 from app.models.planning_v4.base import ContractModel
 from app.models.planning_v4.facts import FactSource, FactStore, MissingField, PlaceFact, PlaceSearchData, ToolError, ToolResult
@@ -358,16 +357,11 @@ class AttractionSubtaskRunner:
         return True
 
     def _acquisition_targets_met(self, subtask, context, candidates):
-        """核心地点齐备时阻止继续搜索补费用或营业信息，最终绑定仍由模型finish完成。"""
+        """核心地点齐备时阻止继续搜索补费用或营业信息；必去安排由主智能体负责。"""
         if len({place.poi_id for place in candidates}) < subtask.candidate_target:
             return False
         if subtask.requirement_ids:
-            if subtask.role == "attractions":
-                requirements = {item.requirement_id: item for item in context.planning_input.requirements.hard_requirements}
-                if any(len({place.poi_id for place in candidates if _requirement_matches_name(requirements[ref], place.name)}) != 1
-                       for ref in subtask.requirement_ids):
-                    return False
-            elif subtask.role == "dining":
+            if subtask.role == "dining":
                 from app.agents.dining_subtask import eligible_named_restaurant_requirement_ids
                 matched = {ref: set() for ref in subtask.requirement_ids}
                 for place in candidates:
@@ -378,7 +372,7 @@ class AttractionSubtaskRunner:
                         matched[ref].add(place.poi_id)
                 if any(len(pois) != 1 for pois in matched.values()):
                     return False
-            else:
+            elif subtask.role != "attractions":
                 return False
         if subtask.role == "dining":
             covered = {slot for place in candidates for slot in self._eligible_slot_ids(place, context)}
@@ -840,9 +834,6 @@ class AttractionSubtaskRunner:
             item for item in planning_input.requirements.hard_requirements
             if item.kind == "must_avoid"
         ]
-        current_candidate_pool = self._available_places(
-            subtask, context, list(facts.places), sources=list(facts.sources),
-        )
         for candidate in context.candidate_refs:
             place = place_by_fact_id.get(candidate.place_fact_id)
             if (candidate.category != self._candidate_category() or place is None or place.poi_id != candidate.poi_id
@@ -860,14 +851,6 @@ class AttractionSubtaskRunner:
                 reject("CANDIDATE_REF_INVALID", "已有候选包含任务范围外或非游览时段")
             if not set(candidate.requirement_ids).issubset(allowed_requirements):
                 reject("CANDIDATE_REF_INVALID", "已有候选绑定了任务范围外的硬性需求")
-            for requirement_id in candidate.requirement_ids:
-                requirement = requirement_by_id[requirement_id]
-                matching_poi_ids = {
-                    item.poi_id for item in current_candidate_pool
-                    if _requirement_matches_name(requirement, item.name)
-                }
-                if place.poi_id not in matching_poi_ids or len(matching_poi_ids) != 1:
-                    reject("CANDIDATE_REF_INVALID", "已有候选不能唯一满足当前必去要求")
 
     def _allowed_slot_ids(self, subtask: Subtask, context: AttractionExecutionContext) -> set[str]:
         slots = [slot for day in context.planning_input.days for slot in day.slots]
@@ -1344,7 +1327,6 @@ class AttractionSubtaskRunner:
             chosen.append((selection, place))
 
         coverage: list[TaskCoverage] = []
-        covered_requirement_ids: dict[str, str] = {}
         candidate_refs = list(context.candidate_refs)
         chosen_poi_ids = {candidate.poi_id for candidate in candidate_refs}
         for selection, place in chosen:
@@ -1370,27 +1352,6 @@ class AttractionSubtaskRunner:
                     target_id=f"slot:{slot_id}", status="missing", reason="该游览时段没有已核实候选",
                 ))
 
-        for requirement_id in subtask.requirement_ids:
-            requirement = next(item for item in context.planning_input.requirements.hard_requirements
-                              if item.requirement_id == requirement_id)
-            if not bind_requirement_coverage:
-                coverage.append(TaskCoverage(
-                    target_id=requirement_id,
-                    status="unknown",
-                    reason="子任务未正常完成，未绑定必去要求",
-                ))
-                continue
-            matches = [place for place in candidate_pool if _requirement_matches_name(requirement, place.name)]
-            matching_ids = {place.poi_id for place in matches}
-            selected_match = next((place for place in matches if place.poi_id in chosen_poi_ids), None)
-            if len(matching_ids) > 1:
-                coverage.append(TaskCoverage(target_id=requirement_id, status="unknown", reason="同名地点对应多个 POI，无法唯一核实必去对象"))
-            elif selected_match is not None and _category_status(selected_match) == "sightseeing":
-                coverage.append(TaskCoverage(target_id=requirement_id, status="covered"))
-                covered_requirement_ids[requirement_id] = selected_match.poi_id
-            else:
-                coverage.append(TaskCoverage(target_id=requirement_id, status="unknown", reason="没有唯一且已核实的景点候选能对应此必去要求"))
-
         # Required cost/opening-hours may stay unknown; they never invalidate
         # a candidate with a verified identity, location, and scenic category.
         if len(candidate_refs) >= subtask.candidate_target:
@@ -1400,30 +1361,13 @@ class AttractionSubtaskRunner:
                 target_id="candidate_target", status="missing",
                 reason=f"目标为{subtask.candidate_target}个候选，当前为{len(candidate_refs)}个",
             ))
-        if covered_requirement_ids:
-            updated_refs = []
-            for candidate in candidate_refs:
-                inferred = tuple(
-                    requirement_id for requirement_id, poi_id in covered_requirement_ids.items()
-                    if poi_id == candidate.poi_id
-                )
-                updated_refs.append(version_candidate_ref(
-                    candidate,
-                    requirement_ids=tuple(dict.fromkeys((*candidate.requirement_ids, *inferred))),
-                ))
-            candidate_refs = updated_refs
-
         all_covered = all(item.status == "covered" for item in coverage)
         is_complete = len(candidate_refs) >= subtask.candidate_target and all_covered
         if status == "complete" and is_complete:
             effective_status, effective_reason = "complete", "target_met"
         elif status == "complete":
             effective_status = "partial"
-            effective_reason = (
-                "ambiguous"
-                if any(item.reason == "同名地点对应多个 POI，无法唯一核实必去对象" for item in coverage)
-                else "scope_exhausted"
-            )
+            effective_reason = "scope_exhausted"
         else:
             effective_status, effective_reason = status, stop_reason
         return TaskResult(

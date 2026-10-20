@@ -212,7 +212,7 @@ class AttractionSubtaskTests(unittest.TestCase):
         self.assertEqual(task_result.request_id, "f03-request")
         self.assertEqual(task_result.base_revision, 1)
         self.assertEqual(task_result.candidates[0].poi_id, "p1")
-        self.assertEqual(task_result.candidates[0].requirement_ids, ("M1",))
+        self.assertEqual(task_result.candidates[0].requirement_ids, ())
         self.assertEqual(result.usage, {
             "input_tokens": 20, "output_tokens": 10, "total_tokens": 30,
         })
@@ -245,17 +245,16 @@ class AttractionSubtaskTests(unittest.TestCase):
         self.assertEqual(prompt["subtask"]["slots"][0]["date"], "2026-10-10")
         self.assertEqual(prompt["subtask"]["requirement_ids"][0]["source_quote"], M1_TEXT)
 
-    def test_same_name_different_pois_are_ambiguous(self):
+    def test_same_name_pois_do_not_trigger_must_visit_binding_checks(self):
         llm = FakeLLM([(search_action(), usage()), (finish_action(), usage())])
         _, result = self.run_subtask(
             llm,
             lambda *_: map_result([place("p1"), place("p2")]),
         )
 
-        self.assertEqual(result.task_result.status, "partial")
-        self.assertEqual(result.task_result.stop_reason, "ambiguous")
-        requirement = next(item for item in result.task_result.coverage if item.target_id == "M1")
-        self.assertEqual(requirement.status, "unknown")
+        self.assertEqual(result.task_result.status, "complete")
+        self.assertEqual(result.task_result.stop_reason, "target_met")
+        self.assertFalse(any(item.target_id == "M1" for item in result.task_result.coverage))
         self.assertEqual(result.task_result.candidates[0].requirement_ids, ())
 
     def test_model_cannot_select_a_forged_or_out_of_city_poi(self):
@@ -457,7 +456,7 @@ class AttractionSubtaskTests(unittest.TestCase):
         merged = PlanningDispatchService._merge_fact_stores(base_store, next_store)
         self.assertIn(old_candidate.place_fact_id, {item.fact_id for item in merged.places})
 
-    def test_requirement_binding_versions_an_existing_candidate(self):
+    def test_no_automatic_requirement_binding_or_candidate_version_change(self):
         llm = FakeLLM([(search_action(), usage()), (finish_action(), usage())])
         _, first = self.run_subtask(llm, lambda *_: map_result([place("p1")]))
         old_candidate = first.task_result.candidates[0].model_copy(update={"requirement_ids": ()})
@@ -473,8 +472,8 @@ class AttractionSubtaskTests(unittest.TestCase):
         )
 
         updated = next(item for item in result.candidates if item.poi_id == old_candidate.poi_id)
-        self.assertEqual(updated.requirement_ids, ("M1",))
-        self.assertNotEqual(updated.candidate_id, old_candidate.candidate_id)
+        self.assertEqual(updated.requirement_ids, ())
+        self.assertEqual(updated.candidate_id, old_candidate.candidate_id)
         self.assertEqual(context.candidate_refs, (old_candidate,), "不能原地改写旧候选版本")
         from app.services.planning_dispatch_service import PlanningDispatchService
 

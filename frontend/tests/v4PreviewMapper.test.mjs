@@ -22,7 +22,7 @@ assert.equal(day.cost.unknownCount, 1)
 assert.equal(day.activities[1].cost.amount, null, 'unknown cost must remain unknown, not zero')
 assert.match(day.activities[1].cost.text, /未查询到可供参考的人均消费/)
 assert.match(day.activities[1].cost.evidenceLabel, /高德地图.*查询于/)
-assert.equal(mixed.planIssues.length, 1, 'global must-visit issue stays visible')
+assert.equal(mixed.planIssues.length, 0, 'historical must-visit binding issue is no longer displayed')
 assert.ok(!day.issues.some(issue => issue.issue_id === 'issue-activity-conflict'), 'opening-time conclusions are hidden in all notice areas')
 assert.ok(day.legs[0].issues.some(issue => issue.issue_id === 'issue-leg-unknown'), 'route issues stay beside their leg')
 assert.ok(day.unboundIssues.some(issue => issue.issue_id === 'issue-unbound-activity'), 'unbound issues fall back to the day notice area')
@@ -193,7 +193,7 @@ for (const [index, code] of ['timing_not_provided', 'activity_timing_unverified'
 }
 const hiddenView = mapV4Preview(hiddenEnvelope)
 assert.doesNotMatch(JSON.stringify(hiddenView), /hidden-\d|活动时间或返程结论不应展示/)
-assert.ok(hiddenView.planIssues.some(issue => issue.code === 'must_visit_unplanned'), 'real missing destination notices remain')
+assert.ok(!hiddenView.planIssues.some(issue => issue.code === 'must_visit_unplanned'), 'historical binding notices are hidden')
 for (const template of [pageSource, exportSource]) {
   assert.doesNotMatch(template, /activity\.(durationLabel|timingLabel)|returnTiming|knownStaySeconds|elapsedSeconds|openingHoursLabel/)
 }

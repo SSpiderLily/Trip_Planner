@@ -413,8 +413,12 @@ def validate_preview(
                 issues.append(ReferenceIssue("dangling_day_validation", "validation.days", "日期校验引用不存在"))
             if any(issue_id not in issue_by_id for issue_id in day_result.issue_ids):
                 issues.append(ReferenceIssue("dangling_day_issue", f"validation.days.{day_result.day_id}.issue_ids", "日期校验引用了不存在的问题"))
-    if len({item.requirement_id for item in preview.validation.requirements}) != len(preview.validation.requirements) or {item.requirement_id for item in preview.validation.requirements} != known_requirement_ids:
-        issues.append(ReferenceIssue("requirement_result_set_mismatch", "validation.requirements", "硬性需求校验必须与需求列表一一对应"))
+    # 新报告不再评价必去要求；旧快照仍可携带历史结果。
+    result_ids = {item.requirement_id for item in preview.validation.requirements}
+    required_result_ids = {item.requirement_id for item in planning_input.requirements.hard_requirements
+                           if item.kind != "must_visit"}
+    if len(result_ids) != len(preview.validation.requirements) or not required_result_ids.issubset(result_ids):
+        issues.append(ReferenceIssue("requirement_result_set_mismatch", "validation.requirements", "非必去需求校验必须覆盖需求列表且不能重复"))
     for requirement in preview.validation.requirements:
             if requirement.requirement_id not in (known_requirement_ids or set()):
                 issues.append(ReferenceIssue("dangling_requirement_result", "validation.requirements", "校验结果引用了未知需求"))
