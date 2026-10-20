@@ -1,3 +1,4 @@
+import { nativeStepNames } from './nativeObservationView'
 import axios from 'axios'
 import type { TripFormData, TripPlanResponse, TaskStatus, SpanSummary, SpanDetail, TaskMetrics } from '@/types'
 import type { DayEditOperation, DayEditResponse, PoiSearchResult } from '@/types/itinerary'
@@ -82,6 +83,7 @@ export function errorText(error: any): string {
   return detail?.message || (typeof detail === 'string' ? detail : error.message) || '请求失败'
 }
 export const stepName = (name: string) => ({
+  ...nativeStepNames,
   planning: '规划执行', 'planning.collect_sights': '搜集景点候选', 'planning.collect_support': '搜集住宿与餐饮',
   'agent.collect_sights': '理解需求与搜集景点', 'agent.collect_support': '搜集顺路住宿与餐饮',
   'agent.arrange_layout': '安排游玩分布', 'agent.arrange_final': '生成每日路线', 'agent.revision': '调整行程',

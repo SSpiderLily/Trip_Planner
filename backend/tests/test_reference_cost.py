@@ -243,6 +243,10 @@ class ReferenceCostAggregationTest(unittest.TestCase):
             [Decimal("399.50"), Decimal("399.50"), Decimal("399.50")],
         )
 
+        self.assertTrue(all(day.lodging.unit == "per_person_per_night_reference" for day in result.days))
+        self.assertTrue(all(entry.unit == "per_person_reference" for day in result.days for entry in day.entries))
+        self.assertEqual(type(result).model_validate_json(result.model_dump_json()), result)
+
     def test_unknown_and_empty_activity_statuses_are_distinct(self):
         unknown_places = tuple(
             place.model_copy(update={"cost": ReferenceCost()})

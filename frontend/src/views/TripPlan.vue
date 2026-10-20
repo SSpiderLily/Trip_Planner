@@ -17,6 +17,7 @@
         <span class="accepted-mark" aria-hidden="true">✓</span>
         <div class="accepted-copy">
           <strong>规划任务已接收</strong>
+          <router-link v-if="observationTarget" :to="observationTarget">查看当前任务的规划过程 ↗</router-link>
           <span v-if="accessSaved">访问信息已保存在本机。你可以继续打开预览。</span>
           <span v-else>本机暂时无法保存访问信息。当前页面仍保留本次访问信息；关闭或刷新页面后可能无法恢复。</span>
         </div>
@@ -184,12 +185,14 @@ import {
 import { submitV4TripTask, searchHotels, type HotelOption } from '@/services/v4TripTasks'
 import type { V4PreviewAccess } from '@/types/v4Preview'
 import { createSingleFlightSubmitter, buildV4TripRequest } from '@/utils/v4TripRequest'
+import { planningObservationTarget } from '@/utils/v4PlanningSession'
 
 const router = useRouter()
 const submitting = ref(false)
 const savingAccess = ref(false)
 const accessSaved = ref(false)
 const acceptedAccess = ref<V4PreviewAccess | null>(null)
+const observationTarget = computed(() => planningObservationTarget(acceptedAccess.value?.taskId))
 const hasCurrentPreview = ref(false)
 const formError = ref('')
 
@@ -361,7 +364,8 @@ async function retrySaveAccess(): Promise<void> {
 
 async function continueToPreview(): Promise<void> {
   try {
-    await router.push('/preview')
+    const access = acceptedAccess.value
+    if (access) await router.push({ path: '/preview', query: { task: access.taskId } })
   } catch {
     formError.value = '任务已接收。请点击“继续查看预览”再次打开。'
   }

@@ -13,14 +13,14 @@
           <p>{{ day.date }} · {{ visible.view.arrivalAt.slice(0, 10) }} — {{ visible.view.departureAt.slice(0, 10) }}</p>
         </div>
         <div class="v4-export-cost">
-          <small>已知景点与餐饮消费参考 / 人</small>
+          <small>已查询到的消费小计 / 人</small>
           <strong v-if="visible.view.cost.knownSubtotal !== null">¥{{ visible.view.cost.knownSubtotal }}</strong>
-          <strong v-else>暂无可用金额</strong>
+          <strong v-else>未查询到可供参考的人均消费</strong>
           <small v-if="visible.view.cost.unknownCount || visible.view.cost.conflictCount">
             {{ costGapText(visible.view.cost.unknownCount, visible.view.cost.conflictCount) }}
           </small>
           <small v-if="visible.view.tripBudget !== null">全程旅费预算 ¥{{ visible.view.tripBudget }}</small>
-          <small>景点与餐饮小计不含交通；住宿消费单独展示。</small>
+          <small>仅汇总已查到的景点、餐饮及住宿消费；住宿按每晚计入，离开日不计住宿。不代表完整旅费。</small>
         </div>
       </header>
 
@@ -37,7 +37,7 @@
             <div class="v4-export-facts">
               <span>已知交通耗时 {{ formatReferenceDuration(day.transport.knownTravelSeconds) }}</span>
               <span v-if="day.transport.unknownLegCount">{{ day.transport.unknownLegCount }} 段交通耗时待确认</span>
-              <span v-if="day.cost.knownSubtotal !== null">当日已知景点与餐饮 ¥{{ day.cost.knownSubtotal }} / 人</span>
+              <span v-if="day.cost.knownSubtotal !== null">当日已知消费 ¥{{ day.cost.knownSubtotal }} / 人</span>
               <span v-if="day.cost.unknownCount || day.cost.conflictCount">{{ costGapText(day.cost.unknownCount, day.cost.conflictCount) }}</span>
             </div>
           </section>
@@ -50,8 +50,7 @@
 
           <section class="v4-export-card v4-export-lodging" :class="{ 'hotel-only': !day.area }">
             <div><small>{{ day.hotel.label }}</small><b>{{ day.hotel.name }}</b><p>{{ day.hotel.address || '具体酒店信息未核实' }}</p>
-              <small>住宿人均消费参考：{{ day.hotel.cost.text }} · 不按房晚推算</small>
-              <small v-if="day.hotel.cost.evidenceLabel">{{ day.hotel.cost.evidenceLabel }}</small>
+              <p>{{ day.hotel.cost.text }}</p><small v-if="day.hotel.cost.evidenceLabel">{{ day.hotel.cost.evidenceLabel }}</small>
             </div>
             <div v-if="day.area"><small>推荐寻找区域</small><b>{{ day.area.label }}</b><p>区域参考点不代表已选酒店。</p></div>
           </section>
@@ -78,8 +77,8 @@
                 <small>{{ item.activity.periodLabel }}</small>
                 <p v-if="item.activity.address">{{ item.activity.address }}</p>
                 <p v-if="item.activity.description">{{ item.activity.description }}</p>
-                <div class="v4-export-cost-detail">{{ item.activity.cost.text }}</div>
-                <small v-if="item.activity.cost.evidenceLabel">{{ item.activity.cost.evidenceLabel }}</small>
+                <div v-if="item.activity.kind !== 'free_time'" class="v4-export-cost-detail">{{ item.activity.cost.text }}</div>
+                <small v-if="item.activity.kind !== 'free_time' && item.activity.cost.evidenceLabel">{{ item.activity.cost.evidenceLabel }}</small>
                 <div v-for="issue in item.activity.issues" :key="issue.issue_id" class="v4-export-issue-row"><b>{{ issueTitle(issue) }}</b><span>{{ issue.message }}</span></div>
               </article>
             </template>
@@ -124,7 +123,7 @@
           </section>
           <section class="v4-export-card v4-export-cost-list">
             <b>消费来源与状态</b>
-            <p v-if="!day.cost.entries.length">暂无景点或餐饮消费记录。</p>
+            <p v-if="!day.cost.entries.length">暂无消费记录。</p>
             <div v-for="entry in day.cost.entries" :key="`${entry.kind}-${entry.poi_id}-${entry.activity_ids.join('-')}`">
               <span>{{ entry.place_name }} · {{ entry.kind === 'meal' ? '餐饮' : entry.kind === 'lodging' ? '住宿' : '景点' }}</span>
               <b>{{ costEntryText(entry) }}</b>
@@ -176,9 +175,9 @@ function costGapText(unknownCount: number, conflictCount: number): string {
 }
 
 function costEntryText(entry: ReferenceCostEntry): string {
-  if (entry.status === 'unknown' || entry.amount === null) return '金额未查询到'
+  if (entry.status === 'unknown' || entry.amount === null) return '未查询到可供参考的人均消费'
   if (entry.status === 'conflict') return '金额存在冲突'
-  return `¥${entry.amount}${entry.kind === 'lodging' ? ' · 住宿单列' : ' / 人'}`
+  return `¥${entry.amount}${entry.kind === 'lodging' ? ' / 人 / 晚 · 住宿单列' : ' / 人'}`
 }
 
 function providerLabel(provider: string): string {

@@ -10,7 +10,7 @@ from ..services.observation_service import ObservationService
 from ..services.day_edit_service import DayEditService
 from ..services.preview_repository import PreviewRepository
 from ..services.preview_task_service import PreviewTaskService
-from ..services.planning_v4_pipeline import PlanningV4Pipeline
+from ..services.native_preview_adapter import NativePreviewPipeline
 from ..services.destination_candidate_repository import DestinationCandidateRepository
 from ..services.destination_search_service import DestinationSearchService
 
@@ -113,7 +113,7 @@ async def startup_event(application: FastAPI):
     application.state.preview_repository = preview_repository
     pipeline = getattr(application.state, "planning_v4_pipeline", None)
     if pipeline is None:
-        pipeline = PlanningV4Pipeline(
+        pipeline = NativePreviewPipeline(
             enforce_timeouts=settings.planner_enforce_timeouts,
             total_timeout_seconds=settings.planner_v4_total_timeout_seconds,
             initial_collection_timeout_seconds=settings.planner_v4_initial_collection_timeout_seconds,

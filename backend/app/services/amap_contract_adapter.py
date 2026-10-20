@@ -243,7 +243,11 @@ class AmapContractAdapter:
             return None
         location = _coordinate(item.get("location"))
         biz = item.get("biz_ext") if isinstance(item.get("biz_ext"), Mapping) else {}
-        cost_value = item.get("cost", biz.get("cost"))
+        cost_value = item.get("cost")
+        if cost_value in (None, "", [], {}):
+            cost_value = biz.get("cost")
+        if cost_value in ("", [], {}):
+            cost_value = None
         photos = item.get("photos") or []
         if not isinstance(photos, list):
             photos = []
@@ -274,7 +278,8 @@ class AmapContractAdapter:
             opening_hours_raw=_provider_text(hours),
             photos=photo_urls,
             source_refs=(call.tool_call_id,),
-            field_sources={"poi_id": call.tool_call_id, "name": call.tool_call_id},
+            field_sources={"poi_id": call.tool_call_id, "name": call.tool_call_id,
+                          **({"cost": call.tool_call_id} if cost_value is not None else {})},
             missing_fields=tuple(missing),
         )
 

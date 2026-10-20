@@ -174,7 +174,7 @@ assert.match(exportComponent, /scale: 2/, 'pagination preserves readable scale i
 assert.doesNotMatch(exportComponent, /recommendations|候选地点/, 'unplanned candidates are excluded from export')
 assert.match(exportComponent, /全程旅费预算 ¥\{\{ visible\.view\.tripBudget \}\}/)
 assert.doesNotMatch(exportComponent, /全程旅费预算 ¥\{\{ visible\.view\.tripBudget \}\} \/ 人/)
-assert.match(exportComponent, /已知景点与餐饮消费参考 \/ 人/)
+assert.match(exportComponent, /已查询到的消费小计 \/ 人/)
 assert.match(previewPage, /await nextTick\(\)[\s\S]{0,180}const renderer = exportRenderer\.value/, 'the renderer is mounted before its method is read')
 assert.match(previewPage, /exportFiles\.length[\s\S]*?href="file\.url"/, 'generated files remain available for individual downloads')
 assert.match(previewPage, /URL\.createObjectURL\(file\.blob\)/, 'download fallback retains each generated image')

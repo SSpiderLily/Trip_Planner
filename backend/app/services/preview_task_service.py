@@ -4,13 +4,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
-from typing import Awaitable, Callable, Literal, Protocol
+from typing import Awaitable, Callable, Protocol
 from uuid import uuid4
 
 from pydantic import Field
 
 from app.models.planning_v4.base import ContractModel
 from app.models.planning_v4 import TripRequest
+from app.models.planning_runtime import PreviewProgress, ProgressCallback
 from app.models.planning_v4_preview import (
     PreviewEnvelope,
     PreviewFinalMetadata,
@@ -38,22 +39,11 @@ from app.services.task_service import TaskError
 _LOGGER = logging.getLogger(__name__)
 
 
-class PreviewProgress(ContractModel):
-    stage: Literal[
-        "planning_input", "dispatch", "proposal", "current_routes",
-        "validation", "repair", "cost", "ready",
-    ]
-    completed: int = Field(default=0, ge=0)
-    total: int = Field(default=0, ge=0)
-    message: str | None = None
-
-
 class BackfillProgress(ContractModel):
     completed: int = Field(default=0, ge=0)
     total: int = Field(default=0, ge=0)
 
 
-ProgressCallback = Callable[[PreviewProgress], Awaitable[None]]
 BackfillProgressCallback = Callable[[BackfillProgress], Awaitable[None]]
 BackfillRunner = Callable[[BackfillProgressCallback], Awaitable[None]]
 

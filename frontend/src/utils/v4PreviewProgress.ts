@@ -3,19 +3,22 @@ export type V4TaskState = 'accepted' | 'running' | 'ready' | 'failed' | 'interru
 /** 只根据后端状态和阶段映射进度，不推算百分比或剩余时间。 */
 export function v4PreviewStageLabel(stage: string, status: V4TaskState): string {
   if (status === 'accepted') return '已收到需求，正在准备规划'
+  if (status === 'failed') return '行程未能生成'
+  if (status === 'interrupted') return '行程规划已中断'
+  if (status === 'ready') return '地点行程已生成，正在读取预览'
 
   const labels: Record<string, string> = {
     accepted: '已收到需求，正在准备规划',
-    planning_input: '正在整理旅行需求',
-    dispatch: '正在查询景点、餐馆、住宿和天气',
-    proposal: '正在规划每天的行程',
+    planning_input: '主智能体正在整理旅行需求',
+    dispatch: '主智能体正在协调景点、餐饮和住宿查询，并核实旅行事实',
+    proposal: '主智能体正在根据候选地点规划每日行程',
     current_routes: '正在查询交通路线',
-    validation: '正在检查行程安排和缺项',
-    repair: '正在检查并补齐每天的行程',
+    validation: '正在核对每日安排、地点依据和必需时段',
+    repair: '正在核对缺项，按需补查并由主智能体修订对应日期',
     repair_collection: '正在补查行程中的缺项',
     repair_revision: '正在调整每天的行程',
     repair_routes: '正在核实当天交通',
-    cost: '正在汇总已核实的消费参考',
+    cost: '正在汇总消费参考并准备交付预览',
     ready: '行程已生成，正在打开预览',
     failed: '行程未能生成',
     interrupted: '行程规划已中断',
@@ -36,6 +39,20 @@ export function v4GenerationFailureMessage(errorCode: string | null): string {
     case 'REQUIREMENT_INTERPRETATION_FAILED':
     case 'REQUIREMENT_SUMMARY_INVALID':
       return '旅行需求未能整理完成，因此无法生成预览。请返回首页重新规划。'
+    case 'MASTER_DID_NOT_SUBMIT_REQUIREMENTS':
+    case 'REQUIREMENT_SOURCE_INVALID':
+    case 'REQUIREMENT_PREFERENCES_INCOMPLETE':
+      return '旅行需求未能整理完成，因此无法生成预览。请返回首页重新规划。'
+    case 'MODEL_CALL_FAILED':
+      return '规划服务本次未能完成响应，因此没有可预览的行程。请稍后返回首页重新规划。'
+    case 'MASTER_DID_NOT_SUBMIT_PLAN':
+    case 'NATIVE_PLANNING_TECHNICAL_ERROR':
+      return '每日行程未能完成生成或修订，因此无法交付预览。请返回首页重新规划。'
+    case 'NATIVE_PREVIEW_INVALID':
+    case 'NATIVE_RESULT_IDENTITY_MISMATCH':
+    case 'NATIVE_REPORT_VERSION_MISMATCH':
+    case 'NATIVE_FACTS_MISSING':
+      return '行程结果未通过交付核对，因此无法打开预览。请返回首页重新规划。'
     default:
       if (errorCode === 'PIPELINE_DEADLINE' || errorCode?.includes('TIMEOUT')) {
         return '规划过程超过可用时间，未能生成预览。请返回首页调整需求后重新规划。'

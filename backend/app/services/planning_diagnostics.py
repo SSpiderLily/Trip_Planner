@@ -163,7 +163,7 @@ def repair_stage(stage, metadata, **context):
 def observe_pipeline_run(function):
     """记录整次生成的关联标识和交付质量；技术完成不代表每天安排完整。"""
     @wraps(function)
-    async def observed(self, request, *, task_id, plan_id, progress):
+    async def observed(self, request, *, task_id, plan_id, progress=None):
         with diagnostic_stage("planning.v4.run", "planning", {
             "request_id": getattr(request, "request_id", None),
             "plan_id": plan_id,

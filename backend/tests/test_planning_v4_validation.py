@@ -41,7 +41,7 @@ WINDOWS = (
 PERIODS = tuple(window["period"] for window in WINDOWS)
 
 
-def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00", derive_slots=False):
+def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00", derive_slots=False, remarks="外滩；不要去酒吧；安排本帮菜"):
     request = TripRequest(
         request_id="validation-request",
         city="上海",
@@ -49,7 +49,7 @@ def make_input(*, requirements=(), departure="2026-10-12T23:00:00+08:00", derive
         departure_at=datetime.fromisoformat(departure),
         timezone="Asia/Shanghai",
         departure_place_query="虹桥站",
-        remarks="外滩；不要去酒吧；安排本帮菜",
+        remarks=remarks,
     )
     summary = RequirementSummary(
         requirements_id="validation-requirements",
@@ -340,10 +340,8 @@ class PlanningV4ValidationTests(unittest.TestCase):
 
         report = validate_daily_plan(planning_input, draft, facts, candidates)
 
-        result = report.requirements[0]
-        self.assertEqual(result.status, "satisfied")
-        self.assertTrue(result.activity_ids)
-        self.assertTrue(result.place_fact_ids)
+        self.assertEqual(report.requirements, ())
+        self.assertFalse(any(item.code == "must_visit_unplanned" for item in report.issues))
 
     def test_must_visit_stays_satisfied_when_another_candidate_is_also_bound(self):
         must_visit = requirement("req-bund", "must_visit", "外滩")
@@ -377,7 +375,7 @@ class PlanningV4ValidationTests(unittest.TestCase):
 
         report = validate_daily_plan(planning_input, draft, facts, candidates)
 
-        self.assertEqual(report.requirements[0].status, "satisfied")
+        self.assertEqual(report.requirements, ())
 
     def test_dangling_candidate_requirement_and_slot_references_are_rejected(self):
         draft = make_filled_draft(self.planning_input, self.candidates)
@@ -393,6 +391,20 @@ class PlanningV4ValidationTests(unittest.TestCase):
             {issue.code for issue in raised.exception.issues},
             {"dangling_candidate_requirement", "dangling_candidate_slot"},
         )
+
+    def test_named_must_visit_does_not_require_candidate_binding(self):
+        for text, name in (("游览豫园", "上海豫园"), ("游览上海博物馆东馆", "上海博物馆(东馆)")):
+            with self.subTest(name=name):
+                planning = make_input(requirements=(requirement("req-visit", "must_visit", text),), remarks=text)
+                facts, candidates = make_facts_and_candidates()
+                sight = candidates[0]
+                facts = facts.model_copy(update={"places": tuple(
+                    place.model_copy(update={"name": name}) if place.fact_id == sight.place_fact_id else place
+                    for place in facts.places)})
+                draft = make_filled_draft(planning, candidates)
+                report = validate_daily_plan(planning, draft, facts, candidates)
+                self.assertEqual(report.requirements, ())
+                self.assertFalse(any(issue.code == "must_visit_unplanned" for issue in report.issues))
 
     def test_requirement_tag_on_meal_does_not_satisfy_must_visit(self):
         must_visit = requirement("req-bund", "must_visit", "外滩")
@@ -413,10 +425,8 @@ class PlanningV4ValidationTests(unittest.TestCase):
 
         report = validate_daily_plan(planning_input, draft, facts, candidates)
 
-        self.assertEqual(report.requirements[0].status, "unsatisfied")
-        issue = next(item for item in report.issues if item.code == "must_visit_unplanned")
-        self.assertEqual(issue.category, "missing_arrangement")
-        self.assertFalse(issue.triggers_repair)
+        self.assertEqual(report.requirements, ())
+        self.assertFalse(any(item.code == "must_visit_unplanned" for item in report.issues))
 
     def test_must_avoid_and_generic_must_include_remain_unverified(self):
         requirements = (

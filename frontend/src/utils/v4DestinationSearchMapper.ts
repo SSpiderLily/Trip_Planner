@@ -29,9 +29,7 @@ export function mapV4DestinationSearchCandidate(
   const amount = candidate.cost.value
   const costLabel = amount !== null
     ? `人均参考消费：¥${amount}`
-    : candidate.cost.raw?.trim()
-      ? `价格线索：${candidate.cost.raw.trim()}`
-      : '尚未查到价格'
+    : '未查询到可供参考的人均消费'
   const blockReason = candidate.selection_block_reason
   return {
     key: `${index}:${candidate.name}:${candidate.address ?? ''}`,

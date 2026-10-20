@@ -220,6 +220,7 @@ export interface ItineraryPreview {
     days: DayConstraint[]
   }
   draft: {
+    source_run_id?: string
     plan_id: string
     revision: number
     days: DraftDay[]
@@ -453,6 +454,7 @@ export interface DayReferenceCostSummary {
 }
 
 export interface ReferenceCostEntry {
+  unit?: 'per_person_reference' | 'per_person_per_night_reference'
   kind: 'sightseeing' | 'meal' | 'lodging'
   day_id: string
   day_date: string

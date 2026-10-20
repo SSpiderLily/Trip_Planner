@@ -26,6 +26,7 @@ from app.models.planning_v4.input import PlanningInput
 from app.services.amap_contract_adapter import AmapContractAdapter
 from app.services.mcp_tool_executor import MCPToolExecutor, get_mcp_tool_executor
 from app.services.observation_service import span
+from app.services.planning_lodging_policy import city_for_days
 
 
 _ADCODE = re.compile(r"^\d{6}$")
@@ -44,6 +45,7 @@ class WeatherQueryContext(ContractModel):
     context_revision: int = Field(ge=1)
     base_revision: int | None = Field(default=None, ge=1)
     planning_input: PlanningInput
+    day_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_request_reference(self):
@@ -59,6 +61,7 @@ class WeatherQueryContext(ContractModel):
         run_id: str,
         context_revision: int,
         base_revision: int | None = None,
+        day_ids: tuple[str, ...] = (),
     ) -> "WeatherQueryContext":
         return cls(
             request_id=planning_input.request.request_id,
@@ -66,6 +69,7 @@ class WeatherQueryContext(ContractModel):
             context_revision=context_revision,
             base_revision=base_revision,
             planning_input=planning_input,
+            day_ids=day_ids,
         )
 
 
@@ -143,7 +147,7 @@ class WeatherQueryExecution(ContractModel):
         return self
 
 class WeatherQueryService:
-    """单次直接工具查询；不创建模型角色，也不接入主流程。"""
+    """单次普通地图工具查询；可注入城市日期范围，不创建模型角色。"""
 
     def __init__(
         self,
@@ -256,6 +260,12 @@ def _validate_context(context: WeatherQueryContext) -> tuple[str, tuple[date, ..
             raise ValueError("PlanningInput 日期为空或重复")
         if actual_dates != expected_dates:
             raise ValueError("PlanningInput 日期与原始旅行请求不一致")
+        if context.day_ids:
+            selected = set(context.day_ids)
+            if len(selected) != len(context.day_ids) or not selected.issubset({day.day_id for day in context.planning_input.days}):
+                raise ValueError("天气查询日期范围无效")
+            city = city_for_days(context.planning_input, context.day_ids)
+            actual_dates = tuple(day.day_date for day in context.planning_input.days if day.day_id in selected)
         return city, actual_dates, request.timezone
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
         raise PlanningError(

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4"
 
+    # 原生多智能体共用地址和密钥，仅模型ID按主/子角色区分。
+    # 现有 get_llm() 流程继续使用 HelloAgents 配置。
+    llm_api_key: str = Field(default="", repr=False)
+    llm_base_url: str = ""
+    master_llm_model_id: str = Field(default="kimi-k3", min_length=1)
+    subagent_llm_model_id: str = Field(default="glm-5.3-flash", min_length=1)
+
     # 本地任务与观测存储
     task_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "tasks.sqlite3")
     # 预览快照可能很大，必须与受200MiB限制的任务观测库分开。
