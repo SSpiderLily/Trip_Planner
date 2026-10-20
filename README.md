@@ -403,7 +403,9 @@ CC BY-NC-SA 4.0
 
 ## Deployment
 
-Production deployment test.
+前端生产构建部署到同域 `/trip/`，本地 `npm run dev` 仍访问 `/`。Vite 根据构建命令设置资源路径，Vue Router 使用同一基础路径；`frontend/.env.production` 设置 `VITE_API_BASE_URL=/trip`，实际接口请求为 `/trip/api/...`。前端环境变量在构建时写入产物，修改后必须重新构建；构建进程的同名环境变量及 `.env.production.local` 可以覆盖仓库配置，发布前应确认未携带旧地址。`VITE_*` 是公开配置，不得放入后端密钥。
+
+服务器拉取源码后，在 `frontend` 执行 `npm ci` 和 `npm run build`，由 Nginx 提供 `dist` 内容。Nginx 需将 `/trip` 重定向到 `/trip/`，将 `/trip/api/...` 去掉 `/trip` 后转发至后端 `/api/...`，并为 `/trip/preview` 等前端路由回退到旅行助手的 `index.html`；若使用健康检查客户端，还需将 `/trip/health` 转发至后端 `/health`。后端环境、常驻服务和数据库目录须在服务器单独配置。本地构建不能代替服务器部署与在线验收；当前适配验证状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#trip-subpath-deployment)。
 
 按日修订已接入正式v4流程，只补必需时段的真实地点缺项。已有有效候选时直接修订，不追加查询；保留其他日期和有效活动。每日期最多3个业务轮，初版不计，有限技术恢复不占业务轮；耗尽后交付可编辑草稿。未知价格、天气、营业或交通不单独触发修订，边界见[CHG-003 S05](docs/changes/CHG-003-planning-performance-observability.md#s05-light-validation-repair)。
 

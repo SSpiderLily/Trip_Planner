@@ -7,7 +7,7 @@ import 'dayjs/locale/zh-cn'
 import App from './App.vue'
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     ...(import.meta.env.DEV ? [{ path: '/prototype/result', name: 'TripResultPrototype', component: () => import('./views/TripResultPrototype.vue') }] : []),
     { path: '/observability', name: 'Observability', component: () => import('./views/Observability.vue') },

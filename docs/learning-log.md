@@ -1090,3 +1090,15 @@
 ## 2026-10-20：选填到离地点不产生缺省告警
 
 问题：未填写到离地点时，事实层的query_missing被直接转成“未唯一核实”提示，混淆了未输入与查询失败。预览适配层先检查用户是否填写，再按未查到、歧义、查询失败生成可读提示；前端按原请求过滤旧快照提示，不修改未知事实。模拟覆盖两端的空值/空串/空白、空结果、同名歧义、查询失败和核实成功，并保留已填写失败提示的编辑/交通重算测试。验证及部署状态见 [CHG-003](changes/CHG-003-planning-performance-observability.md)。
+
+
+## `/trip/` 生产路径与本地根路径（2026-10-20）
+
+子路径部署需要同时对齐静态资源、Vue Router 和 API 地址。生产构建与生产预览使用 `/trip/`，开发服务使用 `/`；路由读取 Vite BASE_URL，公开生产配置提供同域 API 前缀。环境变量在构建时生效，因此拉取源码后仍需构建，服务器也必须配置深层路由回退及去除 API 的部署前缀。
+
+修改位于 `frontend/vite.config.ts`、`frontend/src/main.ts`、`frontend/.env.production`；现行用法见 [README Deployment](../README.md#deployment)。13份前端回归、类型/构建、模拟 API 路径及本机 HTTP 检查通过；服务器与真实服务尚未验证；用户已授权提交和推送，交付状态以 Git 记录为准。验证证据与探针修正见[本次 Change](changes/CHG-003-planning-performance-observability.md#trip-subpath-deployment)。
+
+<a id="ts-baseurl-migration-2026-10-20"></a>
+## TypeScript `baseUrl` 弃用迁移（2026-10-20）
+
+问题：编辑器报告 `baseUrl` 在 TypeScript 6 中弃用、7 中移除。这是配置选项迁移提示，不是 JSON 语法错误。项目只需 `@/*` 别名，故删除 `baseUrl: "."`，把 `paths` 目标改为 `./src/*`，继续相对 `frontend/tsconfig.json` 定位源码；Vite 的 `@` 别名保持一致。采用[官方迁移方式](https://devblogs.microsoft.com/typescript/announcing-typescript-6-0/#deprecated-baseurl)，不使用仅隐藏提示的 `ignoreDeprecations`。修改位于 `frontend/tsconfig.json`，验证与未确认边界见[CHG-003 当前状态](changes/CHG-003-planning-performance-observability.md#当前状态)。文档路径和用途未变，INDEX 现有导航无需调整。
