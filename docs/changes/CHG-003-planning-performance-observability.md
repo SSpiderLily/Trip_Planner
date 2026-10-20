@@ -2,6 +2,7 @@
 
 ## 当前状态
 
+- TypeScript 路径配置弃用修复（2026-10-20）：移除 `frontend/tsconfig.json` 的 `baseUrl`，将 `@/*` 映射改为相对配置文件的 `./src/*`，不添加 `ignoreDeprecations`。项目安装的 TypeScript 5.9.3 配置解析与类型/服务模块别名解析通过，`npm run build` 的类型检查及生产构建通过，保留既有大包提示；编辑器实际 TypeScript 版本与提示消失尚未确认，未升级依赖或执行 TypeScript 6/7 专项。用户已授权提交和推送；实际提交与远程同步状态以 Git 记录为准。原因与迁移依据见[学习日志](../learning-log.md#ts-baseurl-migration-2026-10-20)。
 
 - `/trip/` 本地部署适配（2026-10-20）：已实现并复核通过。用户已重新明确授权提交和推送，使用独立分支 `codex/trip-subpath-deployment`。生产构建与生产预览使用 `/trip/`，开发服务保持 `/`，路由读取 Vite BASE_URL，生产 API 地址为同域 `/trip`；现行发布用法见[README Deployment](../../README.md#deployment)。技术证据与未验证边界见[本次适配](#trip-subpath-deployment)。服务器配置、上线与人工接受未确认；实际提交与远程同步状态以 Git 记录为准。
 
