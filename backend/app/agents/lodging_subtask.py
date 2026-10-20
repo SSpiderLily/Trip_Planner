@@ -468,11 +468,11 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
             city = subtask.scope.city
             expected = {
                 "keywords": query, "city": city, "citylimit": "true",
-                "page": "1", "offset": "20", "extensions": "base",
+                "page": "1", "offset": "20", "extensions": "all",
             }
             return self._query_with_retry(
                 lambda: adapter.search_text(query, city, citylimit=True, page=1,
-                                            offset=20, extensions="base"),
+                                            offset=20, extensions="all"),
                 deadline, pending, trace, store, cancel_event,
                 validate=lambda result: self._validate_query_result(
                     result, tool_name="maps_text_search", expected=expected,
@@ -496,12 +496,12 @@ class LodgingSubtaskRunner(AttractionSubtaskRunner):
             expected = {
                 "location": location, "radius": str(radius), "keywords": SEARCH_KEYWORDS,
                 "types": LODGING_TYPES, "page": "1", "offset": "20",
-                "extensions": "base", "sortrule": "distance",
+                "extensions": "all", "sortrule": "distance",
             }
             result = self._query_with_retry(
                 lambda radius=radius: adapter.search_around(
                     anchor.location, radius_m=radius, keywords=SEARCH_KEYWORDS,
-                    types=LODGING_TYPES, page=1, offset=20, extensions="base", sortrule="distance",
+                    types=LODGING_TYPES, page=1, offset=20, extensions="all", sortrule="distance",
                 ),
                 deadline, pending, trace, store, cancel_event,
                 validate=lambda value: self._validate_query_result(

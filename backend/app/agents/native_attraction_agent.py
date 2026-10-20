@@ -201,7 +201,7 @@ class NativeCandidateAgent:
                 return {"status": "rejected", "code": "QUERY_SCOPE_INVALID"}
             arguments = {"keywords": args.keywords, "city": task.scope.city, "citylimit": True,
                          "types": args.types, "page": args.page, "offset": args.offset,
-                         "extensions": "base"}
+                         "extensions": "all"}
             key = ("search", _normalize(task.scope.city), _normalize(args.keywords),
                    args.types, args.page, args.offset)
             return receive(key, lambda: adapter.search_text(**arguments), "maps_text_search", arguments)

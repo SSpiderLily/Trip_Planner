@@ -89,14 +89,14 @@
           <p class="date-range">{{ formatDate(view.arrivalAt, view.timezone) }} — {{ formatDate(view.departureAt, view.timezone) }}</p>
         </div>
         <div class="cost-summary" aria-label="已知人均消费参考">
-          <span>已知人均景点与餐饮消费参考</span>
+          <span>已查询到的人均消费小计</span>
           <strong v-if="view.cost.knownSubtotal !== null">¥{{ view.cost.knownSubtotal }}</strong>
-          <strong v-else>暂无可用金额</strong>
+          <strong v-else>未查询到可供参考的人均消费</strong>
           <small v-if="view.tripBudget !== null">全程旅费预算 ¥{{ view.tripBudget }}</small>
           <small v-if="view.cost.unknownCount || view.cost.conflictCount">
             {{ costGapText(view.cost.unknownCount, view.cost.conflictCount) }}
           </small>
-          <small>不含交通；住宿消费单独展示。已知小计不代表完整旅费。</small>
+          <small>仅汇总已查到的景点、餐饮及住宿消费；住宿按每晚计入，离开日不计住宿。不代表完整旅费。</small>
         </div>
       </section>
 
@@ -130,7 +130,7 @@
         <div class="daily-facts">
           <span>已知交通耗时 {{ formatReferenceDuration(activeDay.transport.knownTravelSeconds) }}</span>
           <span v-if="activeDay.transport.unknownLegCount > 0">{{ activeDay.transport.unknownLegCount }} 段交通耗时待确认</span>
-          <span v-if="activeDay.cost.knownSubtotal !== null">当日已知景点与餐饮 ¥{{ activeDay.cost.knownSubtotal }} / 人</span>
+          <span v-if="activeDay.cost.knownSubtotal !== null">当日已知消费 ¥{{ activeDay.cost.knownSubtotal }} / 人</span>
           <span v-if="activeDay.cost.unknownCount || activeDay.cost.conflictCount">{{ costGapText(activeDay.cost.unknownCount, activeDay.cost.conflictCount) }}</span>
         </div>
       </section>
@@ -149,10 +149,10 @@
               <div>
                 <small>{{ activeDay.hotel.label }}</small>
                 <h3>{{ activeDay.hotel.name }}</h3>
+                <span class="hotel-cost">{{ activeDay.hotel.cost.text }}</span>
+                <small v-if="activeDay.hotel.cost.evidenceLabel">{{ activeDay.hotel.cost.evidenceLabel }}</small>
                 <p v-if="activeDay.hotel.address">{{ activeDay.hotel.address }}</p>
                 <p v-else class="muted">具体酒店未核实时，会保留未知状态。</p>
-                <small class="hotel-cost">住宿人均消费参考：{{ activeDay.hotel.cost.text }} · 不按房晚推算</small>
-                <small v-if="activeDay.hotel.cost.evidenceLabel" class="cost-evidence">{{ activeDay.hotel.cost.evidenceLabel }}</small>
               </div>
               <div v-if="activeDay.area" class="area-reference">
                 <small>推荐寻找区域</small>
@@ -225,10 +225,10 @@
                 <p v-if="item.activity.address" class="activity-address">⌖ {{ item.activity.address }}</p>
                 <div v-for="issue in item.activity.issues" :key="issue.issue_id" class="issue-row scoped-issue" :class="issueTone(issue)"><b>{{ issueTitle(issue) }}</b><span>{{ issue.message }}</span></div>
                 <footer>
-                  <span>{{ item.activity.cost.text }}</span>
+                  <span v-if="item.activity.kind !== 'free_time'">{{ item.activity.cost.text }}</span>
                   <span v-if="item.activity.kind === 'free_time'">不指定地点</span>
                 </footer>
-                <small v-if="item.activity.cost.evidenceLabel" class="cost-evidence">{{ item.activity.cost.evidenceLabel }}</small>
+                <small v-if="item.activity.kind !== 'free_time' && item.activity.cost.evidenceLabel" class="cost-evidence">{{ item.activity.cost.evidenceLabel }}</small>
               </article>
             </template>
           </template>

@@ -177,6 +177,7 @@ const MODE_LABEL: Record<V4TravelMode, string> = {
 
 // S01只收敛用户展示；后端暂时仍会返回旧时间报告，不能让它从提示区泄漏。
 const HIDDEN_SCHEDULE_ISSUES = new Set([
+  'cost_unavailable', // 消费缺失统一在各地点的消费位置提示。
   'timing_not_provided', 'activity_timing_unverified', 'activity_exceeds_available_end',
   'departure_day_below_minimum_with_activities', 'departure_day_not_required',
   'return_deadline_conflict', 'return_timing_unverified', 'return_route_unverified',
@@ -206,6 +207,20 @@ export function formatPreviewEvidenceTime(value: string | null | undefined): str
   }).format(date)
 }
 
+// 从已有消费明细计算展示小计，未知和冲突金额不计入。
+function knownCostSubtotal(entries: ReferenceCostEntry[]): string | null {
+  const amounts = entries.filter((entry) => entry.status === 'known' && entry.amount !== null)
+    .map((entry) => Number(entry.amount)).filter((amount) => Number.isFinite(amount) && amount >= 0)
+  if (!amounts.length) return null
+  return formatReferenceAmount(amounts.reduce((sum, amount) => sum + Math.round(amount * 100), 0) / 100)
+}
+
+function knownCostStatus(entries: ReferenceCostEntry[]): TripPreviewView['cost']['status'] {
+  if (!entries.length) return 'no_activities'
+  if (knownCostSubtotal(entries) === null) return 'all_unknown'
+  return entries.every((entry) => entry.status === 'known') ? 'all_known' : 'known_partial'
+}
+
 export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
   const preview = envelope.preview
   const displayIssues = preview.validation.issues.filter((issue) => !HIDDEN_SCHEDULE_ISSUES.has(issue.code))
@@ -222,20 +237,23 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
   const validationsByDay = new Map(preview.validation.days.map((day) => [day.day_id, day]))
   const routesByFact = new Map(preview.facts.routes.map((route) => [route.fact_id, route]))
   const sourcesById = new Map((preview.facts.sources ?? []).map((source) => [source.tool_call_id, source]))
-  const tripCostEntries = envelope.cost.days.flatMap((day) => day.entries)
+  const departureDate = preview.planning_input.request.departure_at.slice(0, 10)
+  const entriesForDay = (day: typeof envelope.cost.days[number]) => [
+    ...day.entries,
+    ...(day.lodging && day.day_date < departureDate ? [day.lodging] : []),
+  ]
+  const tripCostEntries = envelope.cost.days.flatMap(entriesForDay)
   const tripUnknown = tripCostEntries.filter((entry) => entry.status === 'unknown').length
   const tripConflicts = tripCostEntries.filter((entry) => entry.status === 'conflict').length
-  const subtotal = envelope.cost.status === 'all_unknown' || envelope.cost.status === 'no_activities'
-    ? null
-    : formatReferenceAmount(envelope.cost.known_sightseeing_meal_per_person_subtotal)
+  const subtotal = knownCostSubtotal(tripCostEntries)
 
   const days: PreviewDayView[] = preview.draft.days.map((day) => {
     const constraint = dayConstraints.get(day.day_id)
     const dayTransport = transportByDay.get(day.day_id)
     const dayCost = costByDay.get(day.day_id)
-    const costEntries = dayCost?.entries ?? []
+    const costEntries = dayCost ? entriesForDay(dayCost) : []
     const activityCost = new Map<string, ReferenceCostEntry>()
-    for (const entry of costEntries) {
+    for (const entry of dayCost?.entries ?? []) {
       for (const activityId of entry.activity_ids) activityCost.set(activityId, entry)
     }
     const issues = displayIssues
@@ -283,7 +301,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
     const areaHintId = day.lodging?.area_hint_id ?? lodgingCandidate?.area_hint_id
     const areaHint = preview.draft.area_hints.find((hint) => hint.area_hint_id === areaHintId)
     const lodgingEntry = dayCost?.lodging ?? null
-    const hotelCost = mapCost(lodgingEntry, lodgingEntry ? '未查询到住宿人均消费参考' : '住宿消费参考尚未汇总')
+    const hotelCost = mapCost(lodgingEntry, '未查询到可供参考的人均消费')
     const lodgingChange = preview.planning_input.requirements?.lodging_changes
       ?.filter((change) => change.start_date <= day.day_date)
       .sort((left, right) => right.start_date.localeCompare(left.start_date))[0]
@@ -324,9 +342,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
       kind: 'area',
       coordinate: area.coordinate,
     })
-    const daySubtotal = dayCost && dayCost.status !== 'all_unknown' && dayCost.status !== 'no_activities'
-      ? formatReferenceAmount(dayCost.known_sightseeing_meal_per_person_subtotal)
-      : null
+    const daySubtotal = knownCostSubtotal(costEntries)
 
     return {
       id: day.day_id,
@@ -351,7 +367,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
         unknownLegCount: dayTransport?.unknown_leg_ids.length ?? 0,
       },
       cost: {
-        status: (dayCost?.status ?? 'unavailable') as PreviewDayView['cost']['status'],
+        status: knownCostStatus(costEntries),
         knownSubtotal: daySubtotal,
         unknownCount: costEntries.filter((entry) => entry.status === 'unknown').length,
         conflictCount: costEntries.filter((entry) => entry.status === 'conflict').length,
@@ -375,7 +391,7 @@ export function mapV4Preview(envelope: V4PreviewEnvelope): TripPreviewView {
       .filter((issue) => issue.day_id === null || issue.scope === 'plan')
       .map(mapValidationIssue),
     cost: {
-      status: envelope.cost.status,
+      status: knownCostStatus(tripCostEntries),
       knownSubtotal: subtotal,
       unknownCount: tripUnknown,
       conflictCount: tripConflicts,
@@ -392,7 +408,7 @@ function mapActivity(
   dayIssues: ValidationIssue[],
 ): PreviewActivityView {
   const place = activity.place_fact_id ? placesByFact.get(activity.place_fact_id) : undefined
-  const cost = mapCost(costEntry ?? null, '未查询到人均消费参考')
+  const cost = mapCost(costEntry ?? null, '未查询到可供参考的人均消费')
   const periodLabel = period ? PERIOD_LABEL[period] : '行程安排'
   return {
     id: activity.activity_id,
@@ -432,7 +448,7 @@ function mapCost(entry: ReferenceCostEntry | null, unknownText: string): Preview
     const amount = formatReferenceAmount(entry.amount)
     return amount == null
       ? { status: 'unavailable', amount: null, text: '消费参考暂不可用', sourceLabel, queriedAt, evidenceLabel }
-      : { status: 'known', amount, text: `¥${amount} / 人`, sourceLabel, queriedAt, evidenceLabel }
+      : { status: 'known', amount, text: `¥${amount} / 人${entry.kind === 'lodging' ? ' / 晚' : ''}`, sourceLabel, queriedAt, evidenceLabel }
   }
   if (entry.status === 'conflict') return { status: 'conflict', amount: null, text: '消费参考存在冲突', sourceLabel, queriedAt, evidenceLabel }
   return { status: 'unknown', amount: null, text: unknownText, sourceLabel, queriedAt, evidenceLabel }
@@ -676,7 +692,7 @@ function mapRecommendations(
       address: place.address ?? '',
       area: place.business_area ?? '',
       reason: candidate.recommendation_reason,
-      cost: costEntry ? mapCost(costEntry, '未查询到人均消费参考') : mapFactCost(place, sourcesById),
+      cost: costEntry ? mapCost(costEntry, '未查询到可供参考的人均消费') : mapFactCost(place, sourcesById),
     }]
   })
 }
@@ -724,7 +740,7 @@ function mapFactCost(place: PlaceFact, sourcesById: Map<string, { provider: stri
   const queriedAt = source?.queried_at ?? null
   const evidenceLabel = formatCostEvidence(sourceLabel, queriedAt)
   return amount == null
-    ? { status: 'unknown', amount: null, text: '未查询到人均消费参考', sourceLabel, queriedAt, evidenceLabel }
+    ? { status: 'unknown', amount: null, text: '未查询到可供参考的人均消费', sourceLabel, queriedAt, evidenceLabel }
     : { status: 'known', amount, text: `¥${amount} / 人`, sourceLabel, queriedAt, evidenceLabel }
 }
 

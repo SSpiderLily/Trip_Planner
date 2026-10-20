@@ -183,6 +183,7 @@ def _entry_from_places(
     )
     return ReferenceCostEntry(
         kind=kind,
+        unit="per_person_per_night_reference" if kind == "lodging" else "per_person_reference",
         day_id=day_id,
         day_date=day_date,
         activity_ids=activity_ids,

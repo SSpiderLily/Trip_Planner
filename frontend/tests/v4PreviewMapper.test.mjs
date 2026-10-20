@@ -13,11 +13,15 @@ const { formatPreviewEvidenceTime, formatReferenceDuration, mapV4Preview } = awa
 
 const mixed = mapV4Preview(mixedSyntheticEnvelope())
 const day = mixed.days[0]
-assert.equal(mixed.cost.knownSubtotal, '90', 'display the backend subtotal without recalculating it')
+assert.equal(day.hotel.cost.text, '¥360 / 人 / 晚', 'stored hotel entries use per-person nightly reference')
+assert.ok(!day.activities[0].cost.text.includes('/ 晚'))
+assert.ok(!pageSource.includes('不按房晚推算'))
+assert.ok(!exportSource.includes('不按房晚推算'))
+assert.equal(mixed.cost.knownSubtotal, '450', 'sum known sightseeing and nightly lodging, exclude unknown meal')
 assert.equal(day.cost.unknownCount, 1)
 assert.equal(day.activities[1].cost.amount, null, 'unknown cost must remain unknown, not zero')
-assert.match(day.activities[1].cost.text, /未查询到/)
-assert.match(day.activities[0].cost.evidenceLabel, /高德地图.*查询于/)
+assert.match(day.activities[1].cost.text, /未查询到可供参考的人均消费/)
+assert.match(day.activities[1].cost.evidenceLabel, /高德地图.*查询于/)
 assert.equal(mixed.planIssues.length, 1, 'global must-visit issue stays visible')
 assert.ok(!day.issues.some(issue => issue.issue_id === 'issue-activity-conflict'), 'opening-time conclusions are hidden in all notice areas')
 assert.ok(day.legs[0].issues.some(issue => issue.issue_id === 'issue-leg-unknown'), 'route issues stay beside their leg')
@@ -150,7 +154,7 @@ assert.equal(samePlaceView.timeBasisLabel, null)
 
 assert.match(pageSource, /全程旅费预算 ¥\{\{ view\.tripBudget \}\}/)
 assert.doesNotMatch(pageSource, /全程旅费预算 ¥\{\{ view\.tripBudget \}\} \/ 人/, 'whole-trip budget has no per-person label')
-assert.match(pageSource, /已知人均景点与餐饮消费参考/)
+assert.match(pageSource, /已查询到的人均消费小计/)
 
 const short = mapV4Preview(shortDepartureSyntheticEnvelope())
 assert.equal(short.days[0].missingSlots.length, 0, 'F07 short departure days remain exempt even when input slots are required')
@@ -208,3 +212,41 @@ changedLodging.preview.draft.days[0].lodging.selection_source = 'user'
 const newSpecifiedLodgingView = mapV4Preview(changedLodging).days[0]
 assert.equal(newSpecifiedLodgingView.hotel.label, '已指定住处')
 assert.equal(newSpecifiedLodgingView.area, null, 'newly specified residence hides accommodation recommendations')
+
+const mealsOnly = mixedSyntheticEnvelope()
+const meal = mealsOnly.cost.days[0].entries.find(entry => entry.kind === 'meal')
+meal.status = 'known'; meal.amount = '12.30'; meal.unknown_reason = null
+mealsOnly.cost.days[0].entries.push({ ...meal, activity_ids: ['second-meal'], amount: '0.10' })
+const mealView = mapV4Preview(mealsOnly)
+assert.equal(mealView.cost.knownSubtotal, '462.4')
+assert.equal(mealView.days[0].cost.knownSubtotal, '462.4')
+assert.equal(mealView.cost.unknownCount, 0)
+assert.equal(mealView.days[0].cost.entries.length, 5)
+meal.amount = '0'; mealsOnly.cost.days[0].entries.pop()
+for (const entry of mealsOnly.cost.days[0].entries.filter(entry => entry.kind !== 'meal')) { entry.status = 'unknown'; entry.amount = null }
+mealsOnly.cost.days[0].lodging.status = 'unknown'; mealsOnly.cost.days[0].lodging.amount = null
+assert.equal(mapV4Preview(mealsOnly).cost.knownSubtotal, '0', 'real zero is known')
+meal.status = 'conflict'; meal.amount = null
+assert.equal(mapV4Preview(mealsOnly).cost.knownSubtotal, null)
+assert.equal(mapV4Preview(mealsOnly).cost.conflictCount, 1)
+mealsOnly.preview.validation.issues.push({ ...mealsOnly.preview.validation.issues[0], issue_id: 'cost-hidden', code: 'cost_unavailable' })
+assert.ok(!mapV4Preview(mealsOnly).planIssues.some(issue => issue.code === 'cost_unavailable'))
+assert.ok(pageSource.includes('hotel.cost'))
+assert.ok(exportSource.includes('hotel.cost'))
+assert.ok(pageSource.includes('v-if="item.activity.kind !== \'free_time\'"'))
+assert.ok(exportSource.includes('v-if="item.activity.kind !== \'free_time\'"'))
+
+assert.equal(day.activities[0].cost.text, '¥50 / 人')
+const missingCosts = mixedSyntheticEnvelope()
+for (const entry of missingCosts.cost.days[0].entries) { entry.status = 'unknown'; entry.amount = null }
+missingCosts.cost.days[0].lodging.status = 'unknown'; missingCosts.cost.days[0].lodging.amount = null
+const missingCostsView = mapV4Preview(missingCosts).days[0]
+assert.equal(missingCostsView.hotel.cost.text, '未查询到可供参考的人均消费')
+for (const activity of missingCostsView.activities.filter(item => item.kind !== 'free_time')) {
+  assert.equal(activity.cost.text, '未查询到可供参考的人均消费')
+}
+
+const departureCosts = mixedSyntheticEnvelope()
+departureCosts.preview.planning_input.request.departure_at = '2026-11-05T19:00:00+08:00'
+assert.equal(mapV4Preview(departureCosts).cost.knownSubtotal, '90', 'departure day has no overnight charge')
+assert.equal(mapV4Preview(departureCosts).days[0].hotel.cost.text, '¥360 / 人 / 晚', 'nightly reference remains visible')

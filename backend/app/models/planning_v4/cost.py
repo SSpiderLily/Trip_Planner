@@ -41,7 +41,7 @@ class ReferenceCostEntry(ContractModel):
     status: CostEntryStatus
     unknown_reason: Literal["cost_not_returned", "conflicting_values"] | None = None
     evidence: tuple[ReferenceCostFactEvidence, ...] = Field(min_length=1)
-    unit: Literal["per_person_reference"] = "per_person_reference"
+    unit: Literal["per_person_reference", "per_person_per_night_reference"] = "per_person_reference"
 
     @model_validator(mode="after")
     def validate_status(self):

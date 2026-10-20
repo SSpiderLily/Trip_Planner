@@ -88,10 +88,10 @@ class _SpatialAgent(NativeCandidateAgent):
             keywords = "酒店" if self.role == "lodging" else args.keywords
             types = LODGING_TYPES if self.role == "lodging" else DINING_TYPES
             arguments = {"location": anchor.location.model_dump(mode="json"), "radius_m": radius,
-                         "keywords": keywords, "types": types}
+                         "keywords": keywords, "types": types, "extensions": "all"}
             key = ("around", anchor.location.lng, anchor.location.lat, radius, _normalize(keywords), types)
             payload = receive(key, lambda: adapter.search_around(anchor.location, radius_m=radius,
-                              keywords=keywords, types=types), "maps_around_search", arguments)
+                              keywords=keywords, types=types, extensions="all"), "maps_around_search", arguments)
             if "result_status" in payload:
                 previous[args.scope_id] = payload["result_status"]
             return payload
@@ -123,7 +123,7 @@ class NativeDiningAgent(_SpatialAgent):
                 return {"status": "rejected", "code": "RESTAURANT_REQUIREMENT_UNKNOWN"}
             keywords = names[args.requirement_id]
             arguments = {"keywords": keywords, "city": task.scope.city, "citylimit": True,
-                         "types": DINING_TYPES, "page": 1, "offset": 20, "extensions": "base"}
+                         "types": DINING_TYPES, "page": 1, "offset": 20, "extensions": "all"}
             return receive(("named_restaurant", _normalize(task.scope.city), _normalize(keywords)),
                 lambda: adapter.search_text(**arguments), "maps_text_search", arguments)
         tools.append(NativeTool("verify_restaurant", "按已声明必吃餐馆的原文店名在任务城市核实；不能改写店名。",
@@ -189,7 +189,7 @@ class NativeLodgingAgent(_SpatialAgent):
         def verify(_):
             query = context.planning_input.request.lodging_query
             arguments = {"keywords": query, "city": task.scope.city, "citylimit": True,
-                         "types": None, "page": 1, "offset": 20, "extensions": "base"}
+                         "types": None, "page": 1, "offset": 20, "extensions": "all"}
             return receive(("specified", _normalize(task.scope.city), query),
                            lambda: adapter.search_text(**arguments), "maps_text_search", arguments)
         return [NativeTool("verify_specified_lodging", "按用户原始住处文本和城市核实，查询参数不可修改，不过滤酒店类别。",

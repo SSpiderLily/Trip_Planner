@@ -1,5 +1,6 @@
 """AMap HTTP 包装和 planning_v4 类型化适配测试，不访问外网。"""
 from datetime import date, datetime
+from decimal import Decimal
 import importlib
 import json
 import os
@@ -122,6 +123,22 @@ class AmapContractAdapterTest(unittest.TestCase):
         legacy = RouteTripPlanner._reference_metadata(detail)
         self.assertEqual(legacy["reference_cost"], 42.0)
         self.assertEqual(legacy["opening_hours"], "08:00-20:00")
+
+    def test_search_extended_cost_fallback_and_provenance(self):
+        for flat, expected in ((None, "35.50"), ("", "35.50"), ([], "35.50"), (0, "0"), ("42", "42")):
+            with self.subTest(flat=flat):
+                payload = {"status": "1", "count": "1", "pois": [{
+                    "id": "hotel", "name": "模拟酒店", "location": "121.49,31.24",
+                    "cost": flat, "biz_ext": {"cost": "35.50"}}]}
+                for method in ("text", "around"):
+                    with patch.object(vendor.requests, "get", return_value=Response(payload)) as request:
+                        adapter = AmapContractAdapter(lambda name, args: getattr(vendor, name)(**args))
+                        result = (adapter.search_text("酒店", "上海", extensions="all") if method == "text"
+                                  else adapter.search_around(MapCoordinate(lng=121.49, lat=31.24), extensions="all"))
+                    self.assertEqual(request.call_args.kwargs["params"]["extensions"], "all")
+                    place = result.data.places[0]
+                    self.assertEqual(place.cost.value, Decimal(expected))
+                    self.assertEqual(place.field_sources["cost"], place.source_refs[0])
 
     def test_place_parser_handles_array_fields_unknown_cost_and_missing_coordinates(self):
         raw = {

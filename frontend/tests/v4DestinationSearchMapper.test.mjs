@@ -31,7 +31,7 @@ const candidate = {
 }
 
 const mapped = mapper.mapV4DestinationSearchCandidate(candidate, 0)
-assert.equal(mapped.costLabel, '尚未查到价格')
+assert.equal(mapped.costLabel, '未查询到可供参考的人均消费')
 assert.equal(mapped.sourceLabel, '高德地图')
 assert.match(mapped.queriedAtLabel, /2026/)
 assert.equal(mapped.canSelect, true)
