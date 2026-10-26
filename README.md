@@ -1,620 +1,107 @@
-# HelloAgents智能旅行助手 🌍✈️
-
-基于HelloAgents框架构建的智能旅行规划助手,集成高德地图MCP服务,提供个性化的旅行计划生成。
-
-## 学习文档
-
-- [项目实现地图](docs/project-overview.html)：按分层、模块、四条执行流程和数据来源理解当前实现；点击函数入口可读取当前源码并定位行号。通过项目根目录的本地 HTTP 静态服务访问（例如 `python3 -m http.server 8765 --bind 127.0.0.1`），再打开 `http://127.0.0.1:8765/docs/project-overview.html`。说明核对日期与适用范围在页内记录，代码变化后需重新核对；交付状态仍见对应 Change。
-- [规划改造设计参考](docs/planning-design.html)：**2026-10-12已确认的[简化流程与保留/删除清单](docs/planning-design.html#simplified-flow)为最新设计；分步实施、验证和剩余范围以[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#simplified-implementation)为准；旧章节仅供迁移核对。** 统一查看规划泳道、逻辑数据关系、预览状态与导出时序，支持节点说明、缩放及 SVG 下载，并附[上海三日数据结构示例](docs/planning-design.html#data-walkthrough)、[时间与交通算法推演](docs/planning-design.html#time-transport-algorithm)、[交通查询与缓存](docs/planning-design.html#route-query-cache)、参考窗口、缺项位置和[实现方式、算法与成本控制清单](docs/planning-design.html#implementation-choices)。单个 HTML 无外部依赖，可直接打开；沿用上方静态服务时访问 `http://127.0.0.1:8765/docs/planning-design.html`。页面区分已确认行为与待讨论方案，正式改造状态见 CHG-003。
-- [单任务工程指标设计](docs/engineering-metrics-design.md)：观测页指标与 Token 采集的统计口径及验收依据。
-- [当前变更与待办导航](docs/changes/CHG-003-planning-performance-observability.md)：性能、日志与结果提示的剩余需求，以及产品、工程与人工验收的逐项入口。
-- [学习目标与阶段计划](docs/learning-plan.md)：全栈技术学习范围、掌握程度、阶段路线与第一轮项目完成标准。
-- [问题解决记录](docs/problems/README.md)：一问题一份Markdown，记录描述、排查、尝试结果、解决边界和经验。
-- [学习日志](docs/learning-log.md)：开发与设计时间线，链接独立问题记录。
-- [旅行规划术语与规则](CONTEXT.md)：已确认的业务语言与规划规则。
-- [旅行规划体验优化需求](docs/trip-planning-requirements.md)：本轮输入简化与每日路线展示的已确认需求、后续待办及验收方向（最小闭环已接入，完整目标分步落实）。
-
-## ✨ 功能特点
-
-- 🤖 **AI驱动的旅行规划**: 主智能体通过原生 tool_calls 调用景点、餐饮、住宿子智能体，生成并修订每日行程
-- 🗺️ **高德地图集成**: 通过MCP协议接入高德地图服务,支持景点搜索、路线规划、天气查询
-- 🧠 **智能工具调用**: Agent自动调用高德地图MCP工具,获取实时POI、路线和天气信息
-- 🎨 **现代化前端**: Vue3 + TypeScript + Vite,响应式设计,流畅的用户体验
-- 📱 **完整功能**: 包含住宿、交通、餐饮和按时段安排的景点推荐
-
-## 🏗️ 技术栈
-
-### 后端
-
-- **智能体执行**: 原生 tool_calls 循环；HelloAgents 提供 MCP 工具接入，SimpleAgent 保留在旧兼容入口
-- **API**: FastAPI
-- **MCP工具**: amap-mcp-server (高德地图)
-- **LLM**: 支持多种LLM提供商(OpenAI, DeepSeek等)
+# HelloAgents 智能旅行助手
 
-### 前端
-
-- **框架**: Vue 3 + TypeScript
-- **构建工具**: Vite
-- **UI组件库**: Ant Design Vue
-- **地图服务**: 高德地图 JavaScript API
-- **HTTP客户端**: Axios
+基于 Vue 3、FastAPI 和 HelloAgents 高德 MCP 工具的旅行规划助手。主智能体协调景点、餐饮和住宿子智能体，生成可按日编辑、查看地图及导出 PNG 的行程。
 
-## 📁 项目结构
+## 快速开始
 
-```
-helloagents-trip-planner/
-├── backend/                    # 后端服务
-│   ├── app/
-│   │   ├── agents/            # Agent实现
-│   │   │   └── trip_planner_agent.py
-│   │   ├── api/               # FastAPI路由
-│   │   │   ├── main.py
-│   │   │   └── routes/
-│   │   │       ├── trip.py
-│   │   │       └── map.py
-│   │   ├── services/          # 服务层
-│   │   │   ├── amap_service.py
-│   │   │   └── llm_service.py
-│   │   ├── models/            # 数据模型
-│   │   │   └── schemas.py
-│   │   └── config.py          # 配置管理
-│   ├── requirements.txt
-│   ├── .env.example
-│   └── .gitignore
-├── frontend/                   # 前端应用
-│   ├── src/
-│   │   ├── components/        # Vue组件
-│   │   ├── services/          # API服务
-│   │   ├── types/             # TypeScript类型
-│   │   └── views/             # 页面视图
-│   ├── package.json
-│   └── vite.config.ts
-└── README.md
-```
+本机日常运行使用 `production/helloagents-trip-planner` 主目录；独立 worktree 的修改需整合并验证后才会在此生效。以下命令适用于 macOS / Linux。
 
-## 🚀 快速开始
+1. 准备 Python（本机使用3.13）、Node.js（须满足 `frontend/package.json` 中 Vite 的要求）、uv/uvx、可访问的 PostgreSQL，以及模型和高德 API 配置。
+2. 在项目根目录安装依赖；已有 `backend/venv` 时跳过创建步骤：
 
-### 本地一键启动（macOS / Linux）
+   ```bash
+   python3 -m venv backend/venv
+   backend/venv/bin/python -m pip install -r backend/requirements.txt
+   npm --prefix frontend ci
+   ```
 
-本机日常开发与运行统一使用 VS Code 打开的 `production/helloagents-trip-planner` 主目录。独立 worktree 的文件改动不会自动同步；修复需先整合回主目录并在主目录验证，再重启服务。
+3. 首次配置时复制环境示例，再填写下表中的实际值；已有 `.env` 时直接编辑，不要覆盖：
 
-首次使用先按下文安装后端和前端依赖，并分别配置 `backend/.env` 与 `frontend/.env`。之后在项目根目录的 VS Code 终端执行：
+   ```bash
+   cp backend/.env.example backend/.env
+   cp frontend/.env.example frontend/.env
+   ```
 
-```bash
-python3 dev.py
-```
+   | 文件 | 必要配置 |
+   | --- | --- |
+   | `backend/.env` | `LLM_API_KEY`、`LLM_BASE_URL`、`MASTER_LLM_MODEL_ID`、`SUBAGENT_LLM_MODEL_ID`；模型须支持原生工具调用 |
+   | `backend/.env` | `AMAP_API_KEY`（高德 Web 服务 Key） |
+   | `backend/.env` | `DATABASE_URL`、`DATABASE_SCHEMA_PREFIX`；正式存储为 PostgreSQL，缺配置不回退 SQLite |
+   | `frontend/.env` | `VITE_AMAP_WEB_JS_KEY`、`VITE_AMAP_WEB_JS_SECURITY_CODE`（浏览器地图配置） |
 
-脚本直接使用 `backend/venv/bin/python` 和前端已安装的 Vite，无需激活虚拟环境或打开两个终端。浏览器访问 `http://127.0.0.1:5173`；按 `Ctrl+C` 同时停止两个服务。后端仅监听本机 `127.0.0.1:8000`。若端口已被占用，脚本会停止另一服务并报告启动失败。前端支持热更新；修改后端代码后请按 `Ctrl+C` 停止并重新运行脚本。
+   `.env` 不提交；`VITE_*` 会进入浏览器，不能填写后端密钥。完整字段和默认值以 [config.py](backend/app/config.py) 为准，模型参数与数据库权限见[运行手册](docs/runtime-guide.md)。环境中同名变量优先，修改后端配置后需重启服务。
 
-若 VS Code 终端不在项目根目录，请先 `cd` 到包含 `dev.py` 的目录，或直接运行脚本的绝对路径；虚拟环境仍位于 `backend/venv`，无需另建根目录虚拟环境。
+4. 数据库可连接后，在项目根目录启动：
 
-### 前提条件
+   ```bash
+   python3 dev.py
+   ```
 
-- Python 3.10+
-- Node.js 16+
-- 高德地图API密钥 (Web服务API和Web端(JS API))
-- LLM API密钥 (OpenAI/DeepSeek等)
-- 可访问的PostgreSQL实例及已有数据库账号；运行环境缺少连接配置时启动失败，不回退SQLite
+访问 [本地页面](http://127.0.0.1:5173) 和 [API 文档](http://127.0.0.1:8000/docs)。`Ctrl+C` 同时停止两端；前端热更新，后端代码改动后需重启脚本。端口被占用时脚本退出并停止另一服务。
 
-### 后端安装
+前端 axios 默认直连 `http://localhost:8000`，可用 `VITE_API_BASE_URL` 覆盖；当前不依赖 Vite 的 `/api` 代理。跨域由后端 CORS 配置允许。
 
-1. 进入后端目录
+## 日常使用
 
-```bash
-cd backend
-```
+1. 打开 `/` 或 `/plan`，填写城市、到达和离开日期时间、备注等需求。预算为**人均预算（元/全程）**；已订酒店需从同城搜索结果中选择。到离地点选填。
+2. 提交后进入 `/preview` 查看真实阶段与结果。地点先交付，相邻交通独立查询；交通等待或失败不妨碍查看、编辑和导出。
+3. 按日拖动排序、删除活动、搜索添加景点或餐馆，并选择已查询的交通方式。修改城市、日期或其他整体需求需重新规划。
+4. “导出全部日期”按当前快照生成 PNG，长日分页；下载后尝试保存最终结果，保存失败会单独提示。“还原上次保存”恢复最近一次成功保存的快照。
+5. 顶部“规划记录”进入 `/history`，切换本浏览器保存了凭据的规划；单条不可读时可刷新。换浏览器、无痕窗口、网站来源变化或清除网站数据后不会自动找回。
 
-2. 创建虚拟环境
-
-```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-```
-
-3. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-4. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑.env文件,填入你的API密钥
-```
-
-自定义 OpenAI 兼容接口配置在 `backend/.env`：`LLM_BASE_URL` 填接口根地址（通常以 `/v1` 结尾），`LLM_MODEL_ID` 填供应商提供的模型ID，`LLM_API_KEY` 填该接口的Key。当前使用 Chat Completions；正式原生规划通过 `tools` 和 `tool_calls` 交换工具参数/结果，旧兼容入口可能传递 `response_format={"type":"json_object"}`。本机已验证当前Kimi/GLM配置的原生工具协议；其他供应商或模型须分别验证兼容性。备用地址需手动替换 `LLM_BASE_URL`，当前没有自动切换。修改后重启后端；环境中显式设置的同名变量优先于 `.env`，启动时不要继续携带旧模型覆盖值。
-
-模型调用参数统一在`backend/app/config.py`声明，由环境变量/`backend/.env`覆盖，模型工厂读取；不放进旅行规划规则。`LLM_TEMPERATURE`默认`0.01`，同时用于主/子角色及旧模型工厂。主/子角色参数如下：
-
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `MASTER_LLM_REASONING_EFFORT` | 不传 | 服务端默认推理强度 |
-| `SUBAGENT_LLM_REASONING_EFFORT` | `low` | 三个采集子角色共用 |
-| `MASTER_LLM_MAX_OUTPUT_TOKENS` | `1000000` | 主角色输出上限，配置时须为正整数 |
-| `SUBAGENT_LLM_MAX_OUTPUT_TOKENS` | `1000000` | 子角色输出上限，配置时须为正整数 |
-| `LLM_OUTPUT_TOKEN_PARAMETER` | `max_tokens` | 可改为`max_completion_tokens`，按实际网关文档选择 |
-
-主/子角色按用户指定请求最多1,000,000 tokens（1M按十进制解释），2026-10-26本机真实任务的11次请求均接受此参数并成功返回，但不表示服务端保证可输出此长度。不接受字符串`max`，不传也不等于最大输出。`reasoning_effort=max`与输出长度是不同参数。旧模型入口仍省略输出上限；不自动把主角色额度套给旧模型。所有配置变更须重启后端以重建缓存客户端。上述参数已验证发送逻辑及本机当前网关请求接受情况；不据此认定其他网关兼容或实际最大输出长度。
-
-规划超时：当前默认 `PLANNER_ENFORCE_TIMEOUTS=false`，关闭新规划总流程、采集、子任务、模型HTTP请求及地图查询的主动超时。模型或地图服务返回的明确错误仍会结束对应调用，修复轮数和工具次数限制仍保留；要恢复原技术期限，可设置为 `true` 并重启后端。数据库锁等待、服务关闭等待和前端短请求超时不属于规划执行期限。
-
-原生多智能体基础：已增加按角色创建模型客户端和原生工具循环，以及独立三角色采集、每日地点规划与按日修订链路；正式`POST /api/trip/v4/tasks`默认使用`NativePreviewPipeline`，后台运行新原生规划入口。`MASTER_LLM_MODEL_ID` 默认 `kimi-k3`，`SUBAGENT_LLM_MODEL_ID` 默认 `sub_agent`，后者供景点、餐饮、住宿三个角色使用。所有角色共用 `LLM_BASE_URL` 和 `LLM_API_KEY`；为空时，使用对应的 `OPENAI_*` 配置兜底。主、子角色区分模型ID，不配置专用地址或密钥；景点、餐饮、住宿三个子角色请求默认显式传递`reasoning_effort="low"`，包括补查和连接重试，主角色及旧入口不主动新增该参数，保留服务端默认。该角色默认值集中在`config.py`，模型工厂读取配置，本次不修改`.env`；实际模型请求span记录设置值，网关是否执行及真实收益仍需专项核对。角色模型ID不继承 `LLM_MODEL_ID`，现有 `get_llm()` 规划入口保持原行为。实际 `.env` 由本机管理，本次没有修改凭据；真实调用范围与验证证据见[CHG-003第四步](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step4)。
-
-后端开发入口：`get_agent_llm("master" | "attractions" | "dining" | "lodging")` 惰性创建对应角色客户端；`UsageAwareLLM.invoke_native()` 返回包含完整assistant消息、用量和结束原因的响应。`NativeToolLoop` 使用继承 `NativeToolArguments` 的参数模型注册同步工具，校验参数、执行工具并通过 `role=tool` / `tool_call_id` 回传结果。默认顺序执行；新采集入口注入批次执行器，最多3个工具请求并发，同轮开始时冻结依赖事实，整轮完成后按调用顺序合并并回传；工具错误以固定错误码反馈模型，截断、拒绝、调用标识冲突及取消会停止运行。默认每次最多8轮有效模型响应、24个工具请求，可在构造时指定；连接重试有独立上限，实际模型请求数可能增加，不改变按日三轮业务修订规则。专门上下文管理暂未增加；正式接线状态见下方第八点说明。
-
-
-公共循环可由调用方显式指定 `accepted_submission_tools`，默认空集合。只有登记提交返回明确 accepted、整批结果回填且无执行错误或取消时，才以 `termination_reason=submission_accepted` 返回，`text` 为空；供应商 finish_reason、协议历史和用量保持真实。业务 handler 须先校验并保存结果再返回 accepted。需求整理、景点/餐饮/住宿候选、每日初版和单日修订六种提交阶段已显式启用；主采集仍由模型决定是否补查与结束；接入与验证进度见[CHG-003分步计划](docs/changes/CHG-003-planning-performance-observability.md#native-submit-completion-plan-20261021)。
-
-原生模型连接重试：`NativeToolLoop`对连接/传输超时异常在同一逻辑请求内最多额外重试2次（合计3次尝试），分别等待1—2秒、2—4秒随机退避。每次采用相同消息、工具声明及参数，保留已完成工具结果；SDK重试强制关闭，HTTP状态错误、校验/协议错误和取消不套用连接重试。每次物理请求有独立模型记录，以`model_request_id`关联、`attempt`标识尝试次数；退避另记`model.retry_wait`，失败用量未知不补零。结果`model_calls`统计实际尝试，`completions`只含成功响应；有效响应轮次最多N轮时，物理尝试最多3N次。沿用原主动超时策略，关闭超时不保证总耗时有限；等待可取消，已发出的同步请求仍须返回后丢弃晚到结果。该功能仅支持本次进程内恢复，不恢复此前失败任务或进程退出后的状态；模型供应商可能已执行失败请求，无法保证只计费一次。模拟证据及部署状态见[连接重试](docs/changes/CHG-003-planning-performance-observability.md#native-model-connection-retry)。
-
-独立景点采集：`NativeAttractionCollection.run(TripRequest)` 让主模型组织城市、日期、目标、偏好和有原文引用的硬性要求，以 `find_attractions` 调用子模型。子模型自主调用 `maps_text_search` / `maps_search_detail`，经 `AmapContractAdapter` → `MCPToolExecutor` → HelloAgents `MCPTool` 查询；详情只接受已知POI。子模型通过 `submit_attractions` 提交选择与缺项；后端复用现有分类、同城、坐标、必避和来源校验；必去需求交给主模型安排，后端不再按名称或候选/活动双重需求ID绑定判定是否满足，返回 `TaskResult`、候选、地点事实与主模型总结。提交无效POI时反馈模型纠正，提交成功后不继续地图查询；严格JSON结束响应也须通过同一校验。日期是候选采集范围，不要求提前绑定每日时段；价格/开放时间未知保持未知，重复查询复用已有结果。默认主模型最多4次请求、2次派发，每个子任务最多8次模型请求、9次工具调用（含候选提交）；不生成每日行程或写入正式任务/预览数据库。
-
-独立三角色采集：`NativeMultiagentCollection.run(TripRequest)` 开放 `find_attractions`、`find_restaurants`、`recommend_lodging`，并提供普通工具`query_weather`、`verify_endpoints`。主模型根据需求先选真实景点，再以该POI作为餐次/住宿锚点；互不依赖的任务同轮并发，缺少上一轮锚点的任务明确拒绝，主模型可下一轮重派。餐饮复用餐次范围校验，默认1公里、没有有效候选时才3公里；明确必吃餐馆可按原文店名全城核实。住宿默认推荐一家，先5公里、无候选才10公里；已指定住处由后端在主模型采集前直接核实，POI优先查详情，纯文本要求唯一匹配，不调用住宿子模型、不推荐替代住处。地图查询会复用在途/已有结果，成功任务可复用；取消后不合并晚到结果。默认主模型最多6次请求/6次派发，各子任务仍最多8次模型请求/9次工具调用。查询日期范围不代表住宿晚数，候选与范围校验也不证明菜单、营业或房态。真实演示运行 `cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_multiagent_collection.py --live`，同样支持 `--request-file`，输出脱敏JSONL，仍不生成每日行程或写入正式数据库。
-
-独立原生规划：`NativeTripPlanner.run(TripRequest)`（异步调用用`run_async`）先由主模型以`submit_requirements`整理完整需求，再进行三角色采集，继续使用同一主模型与完整原生消息历史，以`submit_daily_plan`提交每日提案。后端复用现有日期/时段/候选引用校验和事实绑定，形成`PlanDraft`并执行地点覆盖校验。仅必需时段的真实地点缺项进入`DayRepairService`：有候选时直接调用主模型`submit_day_revision`；无候选时先通过原生子任务工具补查目标日期/餐次，再修订。版本、问题和保留活动ID由后端绑定，其他日期及既有真实活动相对顺序保留。每日期最多3轮；无进展耗尽后仍返回草稿和缺项，模型/地图技术故障单独有限恢复，不扣业务轮数。价格、天气、营业未知不触发补查；本入口不查询交通，不落正式任务/预览库，也不改变正式API。初版及每次单日提交最多5次主模型请求/4次提交工具调用，格式/引用纠错与业务修订额度分开。
-
-<a id="sole-planning"></a>
-**独立仅规划模式**：借鉴 TravelPlanner 的 sole-planning，将已准备的需求和固定参考资料直接交给规划模型。入口只输出 `PlanDraft` 和 `ValidationReport`；不运行需求模型、采集、按日补查、交通查询或保存正式预览。缺项和未知资料保留，后端拒绝无效候选引用。正式 API 仍沿用现有链路。
-
-在 `backend` 目录运行离线示例：
-
-```bash
-PYTHONPATH=. venv/bin/python scripts/run_planning_core.py --mode fake --input-file tests/fixtures/planning_core/normal.json
-```
-
-`fake` 回放文件中的固定提案，验证核心接受流程，不加载模型配置或读取密钥。要仅调用真实规划模型，显式将 `--mode fake` 改为 `--mode live`；使用现有 master 角色配置和超时策略，最多5次有效模型响应、4次工具请求，连接重试沿用现有独立额度。已接受提交立即结束。仓库样本均为合成资料，不代表真实地点核实；真实模型专项状态见[单次验证记录](docs/changes/CHG-003-planning-performance-observability.md#sole-planning-live-20261021)。
-
-质量对照使用独立的多候选合成样本，旧六例和 golden 保留作兼容回归。显式选择案例（不自动扫描或重跑）：
-
-```bash
-PYTHONPATH=. venv/bin/python scripts/run_planning_core.py --mode fake --cases normal no_breakfast_evidence insufficient_candidates specified_hotel unknown_cost_weather explicit_repeat rest_preference > /tmp/planning-quality-fake.json
-```
-
-可用 `--fixture-dir <目录>` 指定资料目录；它与单文件 `--input-file` 共用同一接受边界。多案例输出 `runs`，单文件保留原 `result.draft/report` 访问路径。每例包含草稿/报告、独立 `evaluation` 和 `run` 运行记录；不输出采集历史、模型协议或内部推理。`status=complete/partial` 只表示必需地点时段覆盖；`delivered=true` 也可以有缺项，不表示推荐质量或可行性通过。失败例保留 `delivered=false`、安全错误码、请求尝试，`evaluation=null`，后续显式案例继续执行。
-
-`app/planning/evaluation.py` 的 `evaluate_draft(snapshot, result, review=...)` 重算引用、必需覆盖及住宿绑定，核对输入身份/资料/结果版本；人工结论通过 `app/models/planning_evaluation.py` 的 `QualityReview` 单独传入。评估输出与人工评价契约均为版本2；评价必须携带对应评估输出的 `result_fingerprint`，绑定具体草稿、报告和资料，同一案例同一版本的不同生成结果不能互用评价。早餐用途、重复合理性、休息偏好、指定需求和无依据承诺默认均为 `unknown`；`pass` 表示该项满足要求（“无依据承诺”项为没有发现此类承诺），`fail` 表示不满足。评估器不请求模型、不回写生产拒绝或修订规则。
-
-`run` 仅记录耗时、物理请求次数、各次状态/usage及模型ID、temperature、reasoning_effort白名单配置。JSON `null` 表示未知；缺 usage 或某次失败请求缺用量时，对应累计字段也保持未知，不当作0。fake的请求数为0，usage未知。真实对照需先明确案例、基线/修改版次数与配置；本次仅完成离线实现，尚未验证模型推荐效果。阶段状态与证据见下方唯一计划。
-
-模块入口：`app/models/planning_execution.py` 定义快照、提交和结果；`app/planning/core.py` 编排；`app/planning/context.py` 投影本阶段资料；`app/planning/validation.py` 统一接受及校验；`app/agents/native_daily_plan_agent.py` 适配原生工具调用。调用方显式注入生成器和运行端口，核心不依赖模型实现；旧生成器复用提取后的纯规则。阶段状态见[分层改造计划](docs/changes/CHG-003-planning-performance-observability.md#modular-planning-20261021)。
-
-**正式模块化装配（P5）**：现有v4 API的`NativePreviewPipeline`通过`NativeTripPlanner`编排需求适配、采集快照、独立初版和按日修订，输出`PlanningOutcome` v1。该结果包含初版、最终修订值及可重验的快照，不含采集器实例或模型历史；`final_result`提供统一`DraftResult`视图。预览只消费此公开结果并重新核对身份、版本、事实和报告。技术失败不交付，缺项耗尽仍可编辑；地点预览持久化后才查询相邻交通。API响应和数据库格式不变。阶段及真实验收状态见[P5记录](docs/changes/CHG-003-planning-performance-observability.md#p5-implementation-20261022)。
-
-工厂回退沿用应用启动前的`application.state.planning_v4_pipeline`注入，可使用既有`PlanningV4Pipeline`替换默认`NativePreviewPipeline`；这是部署装配选择，不是配置热切换。已接受任务继续使用其创建时的服务装配，重启不能代替任务恢复。固定资料CLI和真实采集研究CLI继续用于独立模块回归，不参与正式预览持久化。
-
-**独立真实资料与按日修订模式（P3/P4）**：`NativeRequirementAdapter`复用现有需求解释器和输入转换器，仅返回`PlanningInput`；`NativeCollectionSession`复用三角色采集器，内部持有请求缓存和执行状态，对外返回`PlanningSnapshot` v2。阶段之间只交接原请求、有效摘要和结构化资料；`NativeTripPlanner`也使用独立初版/单日修订会话，不再拼接旧消息历史。v2增加天气/到离地点完整结构化执行证据及任务缺项说明；缺项说明按task_id投影进规划模型的task_results.unmet_needs，标明是采集说明而非已核实事实，旧v1快照明确拒绝，仓库固定样本已同步升级；固定资料可以省略查询证据，真实适配器必须提供两类证据并重新验证。
-
-在`backend`目录为一个公开或合成`TripRequest`文件显式运行一次：
-
-```bash
-PYTHONPATH=. venv/bin/python scripts/run_collected_planning.py --live --request-file /tmp/public-trip-request.json > /tmp/collected-planning.json
-```
-
-该入口使用现有主/子模型与高德配置，保留有限连接重试和超时策略，输出分阶段耗时、各角色物理请求与usage、规范化快照、草稿、后端报告和独立评估。`null`仍表示未知；生成失败时保留已完成的需求/快照，失败请求用量不补零。CLI已接入P4按日修订：有候选直接修订，无候选通过同一采集会话补查目标日；每日期最多3个业务轮，技术恢复独立计数。输出`initial_result`、最终`result`及`repair`；技术故障或取消时`delivered=false`，普通缺项耗尽保留partial草稿。该研究CLI不执行路线查询或预览保存；正式API使用下述P5装配。Python装配函数仍允许省略`revision_generator`运行P3研究边界。快照的executions是经适配器规范化的工具证据，不含完整供应商回复或模型推理；文件只应用于公开/合成资料的研究，运行时避免传入真实用户资料。当前技术验证、真实样本及独立评审状态见[唯一计划](docs/changes/CHG-003-planning-performance-observability.md#p4-implementation-20261022)。 最新[P4真实专项结果](docs/changes/CHG-003-planning-performance-observability.md#p4-real-validation-20261022)区分受控补查/修订通过与完整初版模型流程失败。
-
-独立入口现已接入配置的PostgreSQL任务观测schema，输出`identity.task_id`和`observation`状态，可通过原任务列表、spans、metrics接口和观测页查询。`--observation-db /tmp/research.sqlite3`可指定独立研究库；挂接已有库不会执行进程恢复，也不会把其他活动任务标为中断。`app/services/collected_planning_service.py`负责装配需求、采集、生成、每次提交校验及独立评估；生成和纯校验核心不依赖仓库。生成耗时包含其内部提交校验，校验另有子span，不能将父子耗时相加。
-
-每次物理模型请求的输出记录`model_configuration`（SDK发送前解析的model、temperature、reasoning_effort和`output_limits`参数名/数值）及`model_call`安全诊断（结束原因、异常类型链、HTTP状态、供应商码和可用请求ID）。这些参数表示实际发送值，不证明网关执行了请求额度或模型最大能力。无供应商信息时仍为null，不保存异常原文、完整响应、消息或推理。任务失败时CLI还输出相应`failure_details`，未知usage不补零；观测写入失败标记`incomplete`，不改业务结果。独立任务只登记观测状态，不生成正式预览或旧TripPlan结果；行程文件仍由CLI输出，旧`/result`接口不承载该研究结果。真实及离线证据见[分层观测补齐](docs/changes/CHG-003-planning-performance-observability.md#modular-observation-20261021)。
-
-
-正式接线的运行接口：`NativeTripPlanner.run_async(request, task_id=..., plan_id=..., progress=..., cancel_event=...)`已支持调用方分配的身份，两个ID须同时提供；独立演示省略时仍自行生成。`progress`是接收`PreviewProgress`的异步回调，统一在调用方事件循环执行；契约位于`app/models/planning_runtime.py`，原`preview_task_service`导入路径继续有效。规划器报告请求核对、采集、提案、校验和按日修订，不自行报告预览`ready`或交通完成。共享取消信号贯穿线程，协程取消后不采用晚到结果；已发出的供应商请求不会被强行终止。运行接口已通过正式工厂接入，单模块禁网测试及证据见[接线第一点](docs/changes/CHG-003-planning-performance-observability.md#native-api-runtime-step1)。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_planning_runtime.py' -v`，不需要其他测试文件或服务启动。
-
-原生需求整理：`NativeRequirementInterpreter(llm=...).run(request)`返回结构化`RequirementSummary`、提交数据及真实原生协议。仅检查原始输入基本合法、已知字段结构/类型/类别、原始请求及后端ID保护、住宿变更日期范围和同日冲突。模型可提交四类可选列表：core_goals、preferences、hard_requirements、lodging_changes；不要求原文引用、偏好逐项再提交或unknowns/assumptions，多余字段忽略，重复及空白文字不额外拒绝。新摘要source为空，原始请求完整保留，ID由后端生成；旧显式来源对象的兼容检查不用于新摘要。默认最多4次模型请求、3次工具提交；拒绝可纠正，接受后直接结束。采集和每日规划继续使用原始请求与有效摘要，阶段间不传完整协议历史，真实POI及事实/版本引用校验保持原规则。模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_requirement*.py' -v`；决定与验证见[本次校验收缩](docs/changes/CHG-003-planning-performance-observability.md#minimal-requirement-validation-20261021)。
-
-指定住宿核实：`SpecifiedLodgingService(adapter=...).run(planning_input)`独立复用既有酒店/原文核实策略，返回事实、按连续日期范围绑定的候选及核实状态。选定POI即使名称变化也按ID识别；ID、同城、酒店类别或坐标无法核实时明确失败，不按名称另选。纯文本可核实具体住宅/地址，同名多POI保留歧义。相同住处在一次运行内复用查询，补查沿用原候选ID；未指定的新范围才交给住宿子模型，不能混合不同住宿范围，明确换住处时不能复用前一家推荐候选。原生采集已通过正式v4工厂接入；这是地点身份核实，不证明房态或旅行日期价格。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_specified_lodging.py' -v`，证据及边界见[接线第三点](docs/changes/CHG-003-planning-performance-observability.md#native-api-lodging-step3)。
-
-原生天气事实：`NativeWeatherService(adapter=...).run(planning_input, run_id=..., cancel_event=...)`可单独使用。模块复用既有天气投影，按已确认城市/日期查询；同一城市一次查询，返回每个旅行日的available/partial/unknown、原因及可消费事实。`NativeMultiagentCollection`向主模型开放无参数`query_weather`普通工具，可与独立景点任务同轮执行；城市和日期由后端限定，重复调用及后续修订复用结果，不新增天气子模型。主模型漏查时，后端在每日规划前补执行查询，并把事实更新加入完整消息历史。查询失败或超出预报日期均保持未知，只有同城同日有效预报可绑定草稿；天气未知不触发地点补查。每轮最多3个工具请求并发；主采集循环的整体调用上限见下方到离地点接入说明。构造采集器或规划器时可注入`weather_service`，单独验证其他模块时使用模拟天气替身。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_weather.py' -v`，正式接线现状统一见下方第八点，模块证据见[接线第四点](docs/changes/CHG-003-planning-performance-observability.md#native-api-weather-step4)。
-
-到离地点事实：`NativeEndpointService(adapter=...).run(planning_input, run_id=..., cancel_event=...)`可独立使用。模块只核实原始`arrival_place_query`/`departure_place_query`，按首日、末日已确认城市查询；名称唯一匹配、城市一致、有有效坐标且来源闭合才标为verified。同名/简称歧义不任选，未填写保持missing，找不到、未核实和查询失败保留原因并标为未知；不会从备注推断车站。唯一候选缺坐标/城市时，只对其POI查详情。同城同查询的到离地点共用查询/事实，后续修订复用原结果。主模型通过无参数`verify_endpoints`普通工具调用；漏查时，后端在每日规划前补核实。初版和单日修订显式收到地点状态，地点不会自动变成活动候选，不查询交通、不推算酒店就绪或返程可行性。采集器和规划器可注入`endpoint_service`以独立验证；主采集默认最多6次模型请求、6次子任务执行、10次工具调用，天气/到离普通工具和参数纠正共用额外4次额度。既有端点服务省略新增范围参数时保持原行为。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_endpoints.py' -v`；正式接线现状统一见下方第八点，模块范围和证据见[接线第五点](docs/changes/CHG-003-planning-performance-observability.md#native-api-endpoints-step5)。
-
-原生预览交付：`NativePreviewAdapter().convert(result, request=..., task_id=..., plan_id=...)`独立将`NativeTripPlanResult`转换为现有`PreviewPipelineResult`。采用最终修订的草稿、事实、候选、区域与修订轮数；核对原始请求、任务/计划身份及报告版本，不改写ID。复用现有消费汇总、地点校验和相邻路线骨架；未知消费/天气保留未知，缺项草稿仍可交付，技术终态失败明确拒收。转换本身不调用模型/地图、不写数据库，不存模型消息/推理或查询诊断原文。
-
-`NativePreviewPipeline(planner_factory=..., current_route_service_factory=...).run(request, task_id=..., plan_id=..., progress=...)`可注入现有`PreviewTaskService`。该桥接运行原生规划器并报告cost阶段，创建共享`PlanRouteContext`；ready只由预览事务发布，交通只在落盘后通过原有编辑协调器调度。交通等待/失败时地点仍可读取、编辑、保存和还原；转换/进度/落盘失败会关闭未保留的路线上下文。到离未知及既有生成提示通过独立提示策略在交通重算和编辑后保留并绑定当前版本，实际地点缺项仍重新计算。正式API默认工厂现已使用该桥接；预览契约及数据库结构保持兼容。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_preview_adapter.py' -v`；本模块使用模拟规划/地图和临时SQLite，不需要运行真实服务，证据与边界见[接线第六点](docs/changes/CHG-003-planning-performance-observability.md#native-api-preview-step6)。
-
-原生日志观测：`native_observation`将已声明的派发、地图查询、候选、初版、校验和修订事件写入现有步骤仓库。线程继承任务上下文，每条记录带任务/计划身份、角色、阶段及适用的子任务/轮次。观测页“执行轨迹”使用中文名称，点击记录可查看参数、地点、候选、每日草稿和修订校验。业务事件耗时只是记录写入耗时，模型/工具调用耗时与Token仍由原有调用span统计，不重复计数。消息历史、模型推理和供应商原始响应不落观测库，内容超限明确截断。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_observation.py' -v`；前端详情渲染：`cd frontend && node --test tests/nativeObservation.test.mjs`。证据和浏览器验收边界见[第七点](docs/changes/CHG-003-planning-performance-observability.md#native-api-observation-step7)。
-
-正式生成API：应用启动默认创建`NativePreviewPipeline`，`POST /api/trip/v4/tasks`返回202和访问标识，`PreviewTaskService`后台执行主需求整理→指定住宿/天气/到离事实→三角色候选→每日规划/按日修订→预览适配。地点快照及路线任务事务落盘后才发布ready，再查询相邻交通；后续编辑、方式选择、保存和还原沿用现有接口，模型失败不回退旧生成链。总预算和首次采集预算沿用现有配置；`PLANNER_ENFORCE_TIMEOUTS=false`仍关闭主动规划超时，取消信号仍生效。首次采集预算从dispatch开始，到dispatch完成/进入proposal恢复总预算。`application.state.planning_v4_pipeline`仍允许显式注入测试工厂；旧兼容API保留，现行v4默认不使用旧`PlanningV4Pipeline`。独立模拟验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -p 'test_native_planning_api.py' -v`。源码工厂已替换，当前本机服务已加载新流程并通过单次真实整链路功能验收；范围与推荐质量边界见[第十点](docs/changes/CHG-003-planning-performance-observability.md#native-api-live-step10)，工厂模拟证据见[第八点](docs/changes/CHG-003-planning-performance-observability.md#native-api-switch-step8)。
-
-原生规划前端：首页继续提交同一v4 API，接受202后按本次task_id打开`/preview`，不读取其他标签页的最近任务。`v4PlanningSession`独立负责状态读取、任务/计划身份、交付标识和版本核对；只发GET，不自动重发规划。`PlanningProgress`显示主需求整理、三角色协调查询、每日规划、校验/修订和预览准备，不推算完成百分比。已发布地点预览即打开，交通等待/失败不阻塞已有编辑、方式选择、导出保存和还原；短暂PREVIEW_NOT_READY继续读取，网络故障可重读，任务切换/退出后丢弃迟到结果。提交成功、生成中、失败和预览页的观测入口都绑定当前任务，URL仅含任务标识，不含访问凭据。旧预览未提供source_run_id时保持兼容，提供时核对所属任务。独立模拟验证：`cd frontend && node --test tests/v4NativePlanning.test.mjs`，使用实际API客户端的模拟HTTP适配器、实际页面交付动作及Vue页面渲染，地图组件为替身，不需后端或尚未授权的真实供应商。验证证据与浏览器边界见[第九点](docs/changes/CHG-003-planning-performance-observability.md#native-api-frontend-step9)。
-
-
-
-手动真实核验：`cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_trip_planner.py --live`，或增加`--request-file <TripRequest.json>`。默认使用公开上海两日合成需求，输出候选、每日安排、校验报告及修订的脱敏JSONL；未覆盖旅行日期的天气保持未知。具体历史真实结果与未核实边界见[第四步证据](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step4)；天气模块第四点接线时仅用模拟响应验证，第十点正式API真实任务已核对两日天气覆盖，见[整链路证据](docs/changes/CHG-003-planning-performance-observability.md#native-api-live-step10)。
-
-模拟验证：`cd backend && PYTHONPATH=.:tests venv/bin/python -m unittest discover -s tests -p 'test_native_*.py' -v`。这些测试使用模拟客户端和地图工具，不调用真实模型或高德。真实小闭环手动运行：`cd backend && PYTHONPATH=. venv/bin/python scripts/run_native_attraction_collection.py --live`，可用 `--request-file <TripRequest.json>` 替换默认上海合成案例。脚本将请求配置、模型工具参数、地图返回、候选选择与最终总结输出为脱敏JSONL；不记录密钥、供应商推理或额外响应字段。日志只用于本步核对，不接观测页；完整旅行效果仍需后续验收，见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#native-agent-step2)。
-
-5. 启动后端服务
-
-```bash
-uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### PostgreSQL配置与旧数据迁移
-
-三个仓库共用`DATABASE_URL`，分别使用前缀加`_observation`、`_preview`、`_destination`的schema。账号需要在已有库内创建这些schema及表/函数/触发器的权限，不需要超级用户、建库或建角色权限。本机与生产必须使用不同前缀；仍只运行单个后端进程。SQLite路径配置仅保留给显式离线测试和旧数据备份。
-
-本机复用服务器开发库时，先建立SSH隧道，再启动后端；私有连接配置使用本机端口15432。隧道停止后数据库不可用，不自动改用本地旧库。生产连接服务器本机5432，不依赖这条隧道。
-
-```bash
-ssh -N -L 127.0.0.1:15432:127.0.0.1:5432 centos-cloud
-```
-
-迁移前停止所有写入并退出旧后端，用SQLite backup API制作三个一致性备份，保留代码、私有配置及回滚副本。以下命令从项目根目录运行，连接串和schema前缀预先配置在私有环境中；不在参数里传密码。
-
-```bash
-backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3
-# 只读源结构检查通过、目标schema为空后，显式执行：
-backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3 --apply --report /private/migration.json
-backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3 --verify-only --report /private/verification.json
-```
-
-迁移拒绝非空目标，逐表核对数量和内容哈希，保留凭据哈希、版本、历史字段及序列高水位。复制失败回滚业务数据，可能保留预先准备的空结构；源备份不删除。核对通过后才切换正式配置。若新库已接收用户写入，不得直接回退旧SQLite而丢弃新数据，应先停写并保全PostgreSQL。当前实际切换与验证状态见[唯一Change](docs/changes/CHG-003-planning-performance-observability.md#postgresql-migration-20261026)。
-
-真实PostgreSQL回归通过私有`TRIP_TEST_DATABASE_URL`连接开发库，测试创建并清理随机schema；无配置时跳过不能算PG验收。专项模块为`test_postgres_tasks`、`test_postgres_preview`、`test_postgres_candidates`、`test_postgres_migration`、`test_postgres_observation_api`。数据库中断、坏JSON、事务回滚、跨任务凭据及迁移一致性均有覆盖；不触发真实模型或地图调用。
-
-### 前端安装
-
-1. 进入前端目录
-
-```bash
-cd frontend
-```
-
-2. 安装依赖
-
-```bash
-npm install
-```
-
-3. 配置环境变量
-
-```bash
-# 创建.env文件，按示例填写浏览器使用的高德 JS Key 与安全码占位项
-cp .env.example .env
-```
-
-`frontend/.env.example` 仅保留占位值。`VITE_*` 变量会进入浏览器构建产物，不要在其中填写后端 `AMAP_API_KEY` 或其他服务端凭据；实际前端配置写入不提交的 `frontend/.env`。
-
-4. 启动开发服务器
-
-```bash
-npm run dev
-```
-
-5. 打开浏览器访问 `http://localhost:5173`
-
-## 📝 使用指南
-
-以下描述当前实现。2026-10-09已确认收敛核心需求，并调整预览、导出保存、主要消费计算及用户页面与后台工作台的边界；这些调整已接入v4用户流程，默认首页已切换到可编辑预览流程；目标规则见[CONTEXT](CONTEXT.md#本轮核心范围2026-10-09确认待实现)，当前讨论见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#核心范围与流程讨论2026-10-09)。
-
-1. 填写目的地、到达与离开日期时间，可选人均参考预算、到离地点、住处和完整备注。首页保持默认公共交通结合步行，出行偏好通过备注表达。
-2. 提交后查看真实执行步骤；结果按天展示活动、用餐区域、交通参考和地图位置。到离地点未填的一端不生成接驳。
-3. 在地图旁搜索目的地城市内的地点，先查看详情，再加入当天。系统选择插入位置；可确认删除、上移或下移景点，不能跨天自动移动。参考游玩时长只读；新增地点暂用90分钟系统参考值。
-4. 各路段比较步行、骑行、公共交通，自驾行程增加驾车。初次采用方式参考首页偏好；编辑产生的新路段默认最快，未变路段保留选择。手动切换只更新当天参考时间。
-5. “可能需要调整”和“信息未查到”分别提示可能超时、开放冲突或缺失信息，不自动删改已选景点。交通只作路线参考，不承担具体导航、停车取车或班次保障。
-6. 预算按一人独住的住宿、餐饮、门票计算，不含交通。只统计查询价格；缺失显示“未查询到真实数据”，不使用模型估价。已知小计不等于完整支出。
-7. “导出长图”独立导出当前所见行程及提示，含全部日期。超长行程分图，空白日、更新中或更新失败不阻止导出。
-
-结果页只提供当天局部调整；改变城市、日期时间、预算、住处或首页偏好需重新生成。编辑没有新增服务端持久化，原生成任务结果保留；不要依赖编辑跨设备或长期恢复。历史v1/v2结果只读，保留原费用口径。
-
-## 🔧 当前规划流程
-
-### 结果页交互原型
-
-在 `frontend` 运行 `npm run dev`，访问 [结果页原型](http://127.0.0.1:5173/prototype/result)。原型沿用当前结果页并保留每日主题；左侧卡片通过右上角手柄拖动排序（也可聚焦手柄后用键盘上下方向键），地图下方管理当天目的地增删，默认推荐未加入的两个景点和一家餐馆，仍可搜索景点和餐馆。推荐目前来自固定示例库，添加后补位，候选不足时显示实际数量。两侧顺序、地图编号和实际道路路线同步更新。每天同时展示具体酒店参考、寻找酒店的区域及对应日期的天气建议；地图用独立酒店标记展示推荐住处，点击可查看住宿卡片。参考时长显示小时和分钟。路段提供公交、地铁、骑行、步行的查询耗时，可选择采用方式，地图和当天总时长随之更新。仅开发模式注册该路由，生产构建不包含原型页面。
-
-原型已接入高德真实底图、地点查询、公交、地铁、骑行和步行的路径。需在 `frontend/.env` 配置 `VITE_AMAP_WEB_JS_KEY` 和 `VITE_AMAP_WEB_JS_SECURITY_CODE`；沿用项目已有配置，不把凭据写入原型。天气按旅行日期匹配预报，未覆盖时显示未知；酒店核实名称、位置并尝试查询详情中的最低房价参考，可能不返回，不代表旅行日期及房型报价，POI人均消费不充当房价。费用、停留时长及行程安排仍是示例；预览恢复和上次保存用专用v3本机缓存模拟，不连接业务API、模型或数据库。新增地点先加到当天末尾，用户可拖动调整；整天自动排序尚未实现。长图导出会实际下载PNG。页面底部“原型演示设置”可以模拟重算中、重算失败、保存失败，并重置示例。2026-10-10用户已初步接受展示与操作方向，原型仍未接入正式功能。数据契约模型、引用校验及AMap字段适配已作为独立模块实现，正式规划流程、页面和计算算法仍待后续接入，状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)。
-
-### 正式规划流程
-
-旧版v3入口使用 `backend/app/agents/route_planner.py` 的三个 HelloAgents 角色。模型负责理解完整备注、选择景点与提出安排，程序核实地点并计算路线、参考时间和查询费用。开放备注不使用关键词分类，模型价格不进入预算。
-
-2026-10-10第一步已实现独立的 `backend/app/models/planning_v4/` 数据契约与 `backend/app/services/planning_v4_validator.py` 引用/版本校验，以及 `backend/app/services/amap_contract_adapter.py` 类型化地图适配。真实 MCP 样本核对了地点、天气、步行、骑行和公共交通字段。后续F01需求整理、F02日期时段规则和F11a路线缓存基础已作为独立模块验收并合并。这些模块已接入默认v4用户流程，其他后端模块也按小步计划完成接线；详见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#第一步实施与验收2026-10-10授权)与[学习日志](docs/learning-log.md#planning-v4-amap-live-contract-2026-10-10)。
-
-当前工作区的v4使用确定的可用/跳过时段，模型与草稿只按时段安排地点和顺序，活动时间及停留字段已移除；新快照读写不依赖timing。住宿按已核实的连续日期范围复用。明确跨城或换住处时，在备注写清日期、城市和新住处；没有指定新住处时才推荐。仅必需时段缺真实地点时按日补查；已有候选直接修订，保留有效安排。初版不计、每日期最多3轮，技术恢复不扣业务轮；耗尽仍可编辑、导出。
-
-交通只查住处到首个真实地点及当前顺序的相邻地点，比较公共交通、骑行和步行，默认推荐最快有效方案；同条件缓存继续复用，不查询全量矩阵或返程路线。公共交通使用当天当地09:00参考时刻，不代表活动实际出发时刻；缺起点保留未知。生成先完成地点初版、轻量校验和按日修订，再保存可读的地点快照并独立查询相邻交通。交通等待或失败时仍可查看、编辑和导出当前内容；交通旧结果不能覆盖后续编辑。增删和排序只查新相邻边，未变化的边保留已有方案；有效交通方式切换直接采用当前方案，不重新查询。刷新和重启只接续有效待查边，完整保存可还原为新草稿；损坏或不支持的数据明确提示，不自动重新规划。单次真实接线和浏览器功能已通过S09验收，推荐质量及人工接受仍未确认，证据边界见[CHG-003 S09](docs/changes/CHG-003-planning-performance-observability.md#s09-live-browser-acceptance)。
-
-旧版v3代码曾恢复到性能方案1—3之前，保留各阶段完整 JSON 示例；模型由本地 `LLM_MODEL_ID` 指定。模型仍输出原 `Collection` / `Draft`，后端沿用原核实与计算流程，不再提供三项性能实验开关，不额外配置角色思考或思考预算。回滚包括实验期间的住宿来源与缺餐反馈修正；这些已确认的业务要求仍有效，当前实现缺口及逐项重做方案见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
-
-v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—19:00，到达后和离开前各预留系统缓冲；晚到、早离不强行填满。路线或开放信息缺失时明确提示；初次生成没有已核实景点不能交付，但用户编辑后可保留空白日期。
-
-创建任务仍独立于HTTP连接在线程池执行，PostgreSQL保留任务、结果和Span。局部编辑基于服务端签发的快照和操作列表，不接受客户端改写全局条件、金额或参考时长。连续操作合并处理，旧响应不覆盖新列表，重排失败可重试且不会恢复过期路线。
-
-地图查询保留数量限制；新规划的超时由 `PLANNER_ENFORCE_TIMEOUTS` 控制，默认关闭。免费数据不可用时保留缺失状态，不自动启用付费服务。天气只按查询覆盖日期展示；住宿区域不冒充具体酒店，地图顺序示意不冒充实际道路导航。营业预约、酒店房价等内容以供应商实际返回为限，不保证全面覆盖。费用只汇总可解析的明确数值；价格区间或无法解释的单位保留为缺失，不取均值估算。
-
-高德 MCP 的独立 uvx 环境固定 `amap-mcp-server==0.1.11` 与 `pydantic==2.13.5`：该服务依赖的 MCP 1.8.1 与 Pydantic 2.14 的内部接口不兼容。后端 requirements.txt 不控制 uvx 子进程的依赖。高德 MCP 通过项目内 `backend/scripts/amap_stdio.py` 启动，并使用项目内保留许可的固定版本封装；`UV_CACHE_DIR` 可按部署环境显式指定。适配仅丢弃第三方工具模块的调试 `print`，避免原始公交响应污染 JSON-RPC 标准输出或进入日志；不屏蔽 MCP 日志、依赖警告或启动异常。
-
-旧版v3参考时刻按活动与路段时长连续推算，尚未按午餐、晚餐窗口等待；餐次标签齐全不保证用餐时刻合理。相关缺口与后续验证维护于CHG-003。
-
-`PLANNER_PLACE_QUERY_LIMIT` 默认36，`PLANNER_ROUTE_QUERY_LIMIT` 默认80，失败调用也计入额度；`PLANNER_TOOL_TIMEOUT_SECONDS` 默认25秒。当天编辑共享查询缓存并设总查询期限，额度耗尽后显示未知。`uvx` 需在 PATH 或 `~/.local/bin/uvx`，首次运行需要可访问 MCP 包与缓存；初始化没有发现工具时明确报错。
-
-编辑请求携带 `task_id`、`date`、`edit_token`、`client_revision`、`request_id` 和最多20项 `operations`。操作支持 `add_poi`、确认后的 `delete_activity`、`move_activity` 和 `select_leg_mode`；服务端签名绑定任务、日期、当天内容及已撤销的必去要求。签名密钥仅在当前服务进程内有效，重启后需要重新载入原行程。签名用于校验快照，不提供编辑历史存储或多设备同步。
-
-## 📄 API文档
-
-启动后端服务后,访问 `http://localhost:8000/docs` 查看完整的API文档。
-
-主要端点:
-
-- `POST /api/trip/tasks` - 接收任务（202）；忙时返回 409 / TASK_BUSY，不排队
-- `GET /api/trip/tasks` - 任务列表；支持 status、limit、offset
-- `GET /api/trip/tasks/{task_id}` - 轻量状态与当前步骤；任务失败时查询仍返回 200
-- `GET /api/trip/tasks/{task_id}/result` - 成功行程；运行中/失败/中断分别返回 409 及对应错误码
-- `GET /api/trip/tasks/{task_id}/spans` - 调用树摘要
-- `GET /api/trip/tasks/{task_id}/spans/{span_id}` - 单步骤输入输出与错误详情
-- `GET /api/trip/tasks/{task_id}/metrics` - 已结束任务的单任务工程指标；运行中返回 409
-- `GET /api/map/poi` - 搜索POI
-- `GET /api/map/poi/{poi_id}` - 查询地点详情
-- `POST /api/trip/recalculate-day` - 执行当天局部编辑并重新计算
-- `GET /api/map/weather` - 查询天气
-- `POST /api/map/route` - 规划路线
+预览按时段展示地点顺序，不提供精确活动时刻、停留时长或返程可行性保证。交通只作参考；天气、消费等缺失信息保留未知。已知消费小计不等于完整旅费，酒店地点核实不保证房态或旅行日期报价。
 
 ## 本地任务观测
 
-公网从行程预览的“规划过程”进入`/observability?task=<task_id>`，只查看该任务，不加载全部任务列表。浏览器复用创建该行程时保存的访问凭据，刷新后仍按该任务读取；URL不带凭据。缺少凭据时使用原浏览器从行程预览重新进入，公网不恢复或轮换访问凭据；换浏览器或仅复制任务链接不能取得访问权。
+从行程的“规划过程”查看当前任务的执行轨迹、模型与工具调用、Token 和异常。浏览器按任务保存访问凭据，URL 不含凭据；仅复制链接不能取得访问权。公网不提供全部任务列表或凭据恢复。
 
-任务观测复用v4 Bearer：`GET /api/trip/v4/tasks/{task_id}/metrics`、`.../spans`和`.../spans/{span_id}`各自独立验证凭据，详情还绑定任务与调用编号。生成中可查看已保存的四类观测，指标是当前快照；返回`Cache-Control: no-store`。凭据不匹配拒绝访问，有效行程但观测已清理、调用不存在及接口转发404分别提示；观测记录不完整仍保留已有记录。这些接口复用已有观测记录；数据库切换时按下文迁移。
+本机回环地址可直接访问 `/observability` 使用管理工作台；观测保留期限、旧凭据恢复和只读诊断命令见[运行手册](docs/runtime-guide.md#任务观测与诊断)。
 
-生产同域请求为`/trip/api/trip/v4/tasks/...`，Nginx通用`/trip/api/`转发覆盖新路径；继续拦截旧无鉴权`/trip/api/trip/tasks`及其子路径，以及`recover-local-access`。本机回环地址仍保留以下全部任务工作台；主机名仅选择前端模式，后端鉴权不依赖此判断。公网HTTP目前不加密Bearer传输，HTTPS仍需单独配置。本次实现/本地与生产验收状态见[按任务观测](docs/changes/CHG-003-planning-performance-observability.md#task-scoped-observation-20261026)。
+当前仅支持单后端进程，不使用多个 worker 共享任务运行状态。关闭浏览器不会取消规划；后端正常退出会等待活动任务，强制退出后未完成任务在下次启动标记中断，不自动重跑。
 
-本机启动 `python3 dev.py` 后，直接访问 `/observability`。左侧任务列表支持状态筛选、每页50条及刷新；默认打开“执行轨迹”，调用树和共用时间轴对齐展示真实步骤。点击调用，在右侧查看已脱敏的输入、输出、错误和截断提示；手机上详情位于轨迹下方。初始优先选中最慢的已计时模型调用，也可按模型、异常、≥10秒慢调用或名称筛选。
+## 验证
 
-“Token分析”按调用顺序展示输入/输出堆叠柱；“工具分析”按实际工具分组并支持排序与逐次定位；“异常调用”仅统计模型和工具自身的失败及中断，点击可回到执行轨迹。任务编号与视图保存在URL，支持刷新、前进和后退；旧 `view=metrics` 链接兼容进入轨迹。运行中每2秒更新状态和调用摘要，完整聚合待任务结束后读取，结束时保留当前视图。详情只按选中调用加载，需要更新时点击详情刷新。成功任务保留行程结果入口。入口兼容旧版行程与v4预览；v4按所选任务跳转到`/preview?task=<task_id>`，凭据仍仅保存在发起规划的浏览器中。新任务不会再清除旧任务凭据；如果本机浏览器缺少旧任务凭据，观测页会为已完成且未在更新的预览签发新凭据，再打开所选任务，不重新规划。恢复仅允许本机请求，旧凭据随轮换失效；正常预览及编辑接口仍校验凭据。
-
-Token逐次调用与角色汇总统一显示“主智能体、景点子智能体、餐饮子智能体、住宿子智能体”。优先采用调用已记录的角色，旧调用回退父级Agent；没有角色证据时保留“未归属”，不猜测或修改历史记录。
-
-第一版使用单后端进程、一个活动规划任务，子 Agent 顺序执行；请勿用多个 worker 共享此数据库。关闭浏览器不会取消任务；后端正常退出等待正在执行的任务，强制退出后下次启动标记中断，不自动重跑。旧 `/api/trip/plan` 已移除。
-
-配置写入 `backend/.env`，经 `app/config.py` 读取：
-
-| 配置 | 默认值 |
-| --- | --- |
-| `STORAGE_BACKEND` | `postgresql`；仅离线测试显式使用`sqlite` |
-| `DATABASE_URL` | 必填；PostgreSQL连接串，仅放私有配置，不写命令行或Git |
-| `DATABASE_SCHEMA_PREFIX` | `trip`；本机`trip_local`、生产`trip_prod`隔离 |
-| `OBSERVATION_RETENTION_DAYS` | 7 天 |
-| `OBSERVATION_MAX_BYTES` | 209715200（200 MiB 观测逻辑内容治理目标，不是整个数据库物理大小） |
-| `OBSERVATION_CONTENT_LIMIT` | 65536（单步骤输入、输出各 64 KiB） |
-
-启动及接收新任务前清理过期/超容量的已结束任务，连同行程和步骤一起删除；活动任务保留。无法腾出空间时停止保存观测详情并提示不完整。内容先脱敏后限长；截断有标记，未知温度与未知用量不填零。数据库及辅助文件不入 Git。
-
-观测记录缺失时，后端控制台输出`[observation]`分类、异常类型及可用的数据库错误分类，不输出异常原文。历史缺失记录没有原因日志时，不能倒推出确定根因。观测写入失败不改变业务判定；任务结果保存失败不能显示为成功。数据库无法写入时，当前进程仅保留有界错误摘要，重启后无法还原未落盘内容。输入校验拒绝仍返回 422，拒绝记录展示后置；第一版不提供自动重试、取消或重放。Token 只统计供应商实际返回的用量，不估算、不计价；历史用量与供应商未返回的字段保持未知，缺失用量与步骤记录不完整分别提示。工程指标不代表行程质量或所有价格信息都经过核验。
-
-优化前基准及R1—R3的合成请求、源码归档、调用用量、失败和质量复核均保留在不入Git的 `backend/data/`。性能实验采集和运行脚本已随代码回滚撤回，历史快照可追溯；实验结论见[学习日志](docs/learning-log.md#不限思考预算实验r32026-10-09)，当前回滚与重新规划状态见CHG-003。历史实验数据库保留新增元数据列，恢复后的代码继续使用原有Token统计；不删除数据或改写旧报告。
-
-验证：`cd backend && PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v`；`cd frontend && npm run build`。替代依赖测试与真实调用验收结论见[学习日志](docs/learning-log.md)。
-
-F04c天气查询的独立手动核验（只调用高德MCP，不调用模型或写数据库）：
+后端标准库 unittest（在 `backend` 目录）：
 
 ```bash
-cd backend
-PYTHONPATH=. venv/bin/python -m scripts.run_weather_query --live
+PYTHONPATH=.:tests venv/bin/python -m unittest discover -s tests -v
 ```
 
-必须显式传入`--live`。命令保留固定上海三日的2026-10-10至12日，按实际预报匹配日期；未覆盖日期显示unknown，工具错误与日期缺失分开。输出包含日级状态、供应商发布时间和查询来源摘要。后续规划只使用`WeatherQueryExecution.fact_store`中的已核验投影；`diagnostic_tool_result`仅供诊断。正式规划入口尚未接入，验收与交付状态见[CHG-003 F04c](docs/changes/CHG-003-planning-performance-observability.md#f04c-weather-query)。
-
-F01需求整理的独立手动核验（会调用配置的LLM，不属于离线测试）：
+前端类型检查与生产构建（在 `frontend` 目录）：
 
 ```bash
-cd backend
-PYTHONPATH=. venv/bin/python scripts/run_requirement_interpreter.py --timeout-seconds 120
+npm run build
 ```
 
-命令使用设计页中的固定上海三日请求，最多进行一次格式修复；每个HTTP请求超时上限为120秒，SDK自动重试关闭。成功时只输出结构化需求摘要、供应商usage、模型调用次数和总耗时；不调用高德、不运行完整规划、不写正式任务数据库。超时、认证及结构化校验失败输出安全错误码，不显示原始模型响应或错误文本。
+前端专项回归位于 `frontend/tests/`，按改动选择文件，例如 `node --test tests/v4PreviewAccessStorage.test.mjs`；当前没有 npm test/lint 脚本。真实 PostgreSQL 专项使用私有 `TRIP_TEST_DATABASE_URL`，无配置而跳过不能算数据库验收，模块入口见[运行手册](docs/runtime-guide.md#postgresql配置与旧数据迁移)。
 
-F03单个景点子任务的独立手动核验（会调用配置的LLM和高德MCP，必须明确传入`--live`）：
-
-```bash
-cd backend
-PYTHONPATH=. venv/bin/python scripts/run_attraction_subtask.py --live
-```
-
-命令复用完整的上海三日原始请求构造`PlanningInput`，任务仅覆盖10月10日下午的“必须去外滩”景点子任务，首次规划的`base_revision`为空。模型只返回搜索关键词或已查到的POI选择；后端固定城市、查询参数、事实来源与任务版本。模型输入包含已有候选的坐标、城市、分类、费用原文/数值、营业时间原文及来源引用。营业时间只作原文参考，不推断旅行日期是否开放。模型预期执行一次关键词搜索后结束，但若它继续搜索、需要补真实景点详情或遇到可重试的地图错误，实际地图调用次数会增加。命令不会重跑F01，不生成整趟行程，也不写正式任务数据库。成功输出TaskResult、事实来源、地图调用摘要、Token和耗时；不输出原始模型响应、第三方异常文本或密钥。已完成离线回归及一次上海外滩真实子任务核验；这不代表完整三日行程已经生成，F03进度与验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f03-单个景点子任务2026-10-11授权)。
-
-F05a主智能体决定为独立模块：`MasterDecider.run(MasterDecisionContext(...))`接收固定的PlanningInput、事实、候选及历史任务，返回后端定稿的delegate/plan决定。可执行角色和直接查询由当前依赖收窄；最多一次JSON格式修复，业务引用不合法直接拒绝。它不执行MCP或生成行程；F05b负责调度续派，F06负责每日安排。调用会使用配置的真实LLM。范围及验收见[CHG-003 F05a](docs/changes/CHG-003-planning-performance-observability.md#f05a-master-decision)。
-
-F05b可通过 `await PlanningDispatchService(...).run_async(PlanningDispatchContext(...))` 执行决定、就绪任务并行及结果续派。默认最多3个信息任务并行，工具仍共用4个名额；600秒为单次搜集技术期限，不是业务调用总额。返回已核实事实、候选、区域、各任务结果及停止原因；`technical_error`必须先分类；身份或事实损坏终止，其他错误经保留快照校验后可进入带提示的草稿。主模型只接收候选关联事实与工具查询摘要，后端保留完整事实。正式首页已接入，真实服务验收限制见[CHG-003 F05b](docs/changes/CHG-003-planning-performance-observability.md#f05b-dispatch)。
-
-
-F06每日规划为独立模块：`DailyPlanGenerator.generate(planning_input, candidates, facts, area_hints, task_results, source_run_id=...)`调用配置模型，返回提案、已绑定事实的草稿和调用用量。后端计算缺项清单；空白或占位时段仍是未完成安排。120秒技术期限内，截断补全、格式修复与活动局部修复共用最多一次额外模型调用；模型截断不接受为完整结果。可定位到合法日期、时段及活动身份的错误会收到具体约束和可选候选；后端只合并目标活动的修复，保留有效安排。未修复的活动被排除并附位置提示，空缺时段进入既有按日补查；日期身份、事实来源及最终草稿仍须通过校验。`UsageAwareLLM.invoke_with_metadata`提供结束原因，原`invoke_with_usage`两值接口保持兼容。显式手动核验可用`python -m scripts.run_daily_plan_generator --help`查看输入格式；会调用模型，不调用MCP或写正式数据库。范围见[CHG-003 F06](docs/changes/CHG-003-planning-performance-observability.md#f06-daily-plan)，本次恢复策略验收见[局部修复](docs/changes/CHG-003-planning-performance-observability.md#v4-local-plan-repair)。
-
-初版模型输入按候选关联地点摘要，并提供每时段可选ID；未入选的搜索结果不进入可选地点列表。输出Schema与后端保持一致：景点/用餐必须提供`candidate_ref`，自由活动不引用候选。景点搜索覆盖不再限制排程时段，餐馆的餐次区域范围继续保留；局部修复保留原时段与顺序，不要求或填充活动时长。观测`validation.daily_plan_local_repair`按活动记录可用候选数量及处理结果，`diagnose_task`报告会显示无候选、未返回有效修复、错误替换、主动留空、调用失败或修复额度耗尽。验收与历史证据边界见[初版候选恢复](docs/changes/CHG-003-planning-performance-observability.md#v4-initial-candidate-recovery)。
-
-当前相邻路线为异步服务：`query_current_routes(planning_input, draft, facts, ...)`按当前顺序查询住处起点及相邻地点，使用共享四并发MCP与查询条件缓存。跨日并行，公共交通每段都使用当天当地09:00参考，不推进活动时间。若提供F04d execution，仍须同时提供当前context_revision并匹配请求、run、版本和端点原文；核实端点不追加返程查询。现行范围见[CHG-003 S06](docs/changes/CHG-003-planning-performance-observability.md#s06-adjacent-routes-cache)。显式真实核验仅查传入草稿的一段：
-
-```bash
-cd backend
-PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file /path/to/route-input.json --day-id day-2026-10-10 --from-ref lodging:day-2026-10-10 --to-ref activity-id
-```
-
-输入文件须包含PlanningInput、PlanDraft与来源闭合的FactStore；命令不会代造POI或运行完整规划。
-
-`CurrentRouteService.create_route_context`建立同一行程的查询缓存，由任务服务保留，初版相邻交通与编辑继续复用；停止持有行程时调用`aclose()`。备用矩阵服务与启动入口已移除，新预览的`alternative_backfill`为`not_required`；有效期与查询条件的专项证据见[CHG-003 S06](docs/changes/CHG-003-planning-performance-observability.md#s06-adjacent-routes-cache)。
-
-已知人均消费纯函数为`aggregate_reference_costs(planning_input, draft, facts)`：返回`ReferenceCostSummary`和按日明细，后台明细保留景点同日去重、餐次分别计及酒店参考事实；结果页和导出汇总已知景点、餐饮及住宿明细（住宿按每日一晚，离开日不计住宿），各地点独立展示已知消费（酒店按人均每晚），三类地点未知均显示“未查询到可供参考的人均消费”。原生候选搜索请求高德扩展字段，消费缺失仍保留未知；不另查入住日期报价，不自动乘旅行天数。调用方按覆盖状态显示未知/部分已知，不能把全未知的小计0显示为“免费”或“总旅费0”；只使用cost已有值，不推算人数或全程预算是否足够。范围见[CHG-003消费汇总](docs/changes/CHG-003-planning-performance-observability.md#reference-cost)。
-
-独立预览存储模块为`PreviewRepository`：初始化独立的PostgreSQL预览schema后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。完整PreviewSnapshot校验来源、引用图与版本；单独ItineraryPreview只验证模型结构和存储身份/版本。新快照不读写timing；保存失败不覆盖上次成功保存，待查交通仍可保存和还原。损坏或不支持的数据明确拒绝，不转换历史数据。v4任务API和浏览器已单独接入，默认首页已使用新需求表单；范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
-
-每日检查使用`validate_daily_plan(planning_input, draft, facts, candidates)`，保留地点覆盖、需求与来源/引用检查；`build_day_summaries(planning_input, draft, facts)`仅汇总已查到的交通耗时及未知路段。旧F07活动时间服务已删除，不再检查营业或推算返程可行性。只因必需时段缺真实地点启动按日补查，技术恢复不占业务轮；规则与专项证据见[CHG-003 S05](docs/changes/CHG-003-planning-performance-observability.md#s05-light-validation-repair)。地点修订只做轻量校验；独立交通交付及任务状态规则见[CHG-003 S07](docs/changes/CHG-003-planning-performance-observability.md#s07-place-first-pipeline)。
-
-F04b住宿子任务的独立手动核验（会调用配置的LLM和高德MCP）：
-
-```bash
-cd backend
-PYTHONPATH=. venv/bin/python scripts/run_lodging_subtask.py --live --anchor-file /path/to/dining-anchor.json
-```
-
-沿用上海三日空住宿请求，锚点文件包含已核实`fact_store`和`area_hints`。子任务推荐一家酒店及住宿区域；先查5公里，没有有效酒店时才扩大至10公里，缺cost不扩搜。服务也支持用户指定住处原文核实，允许住宅，拒绝同名区域冒充具体住处；歧义保留未知且不替换住处。候选以`area_hint_id`保留来源区域关联。完整范围及验收见[CHG-003 F04b](docs/changes/CHG-003-planning-performance-observability.md#f04b-lodging-subtask)。
-
-F04d到离地点核实的独立手动核验（只调用高德MCP，不调用模型）：
-
-```bash
-cd backend
-PYTHONPATH=. venv/bin/python -m scripts.verify_endpoints --live
-PYTHONPATH=. venv/bin/python -m scripts.verify_endpoints --live --departure-query '上海虹桥站'
-```
-
-第一条保留原上海三日请求的空端点，因此零工具调用；第二条是明确补充地点的专项场景。只有唯一同城、全名匹配且带来源坐标的结果才标记verified；其他情况保留待确认、无结果或错误原因，不默认选择车站。返回请求与版本标识供后续调用方校验。实现范围及验收见[CHG-003 F04d](docs/changes/CHG-003-planning-performance-observability.md#f04d-endpoint-query)。
-
-F04a餐饮子任务的独立手动核验（会调用配置的LLM和高德MCP，必须显式传入`--live`及来源化区域锚点文件）：
-
-```bash
-cd backend
-PYTHONPATH=. venv/bin/python scripts/run_dining_subtask.py --live --anchor-file /path/to/dining-anchor.json
-```
-
-锚点文件包含`fact_store`和`area_hints`，使用F03已核实的地点事实与区域引用。命令保留原始上海三日请求，仅验证首日晚餐在外滩区域附近的餐馆子任务；这不是新增用户硬性条件。每个餐次绑定自己的区域锚点，先查1公里，没有有效候选时扩大至3公里。模型选择关键词、餐次或已有POI；后端校验类别、距离、来源与版本。人均`cost`缺失不扩大搜索，营业时间只保留原文。支持按原始要求核实明确餐馆名，同名歧义保留未知；饮食属性不能仅凭地图名称认定。结果包含餐次覆盖与缺项，正式调度和整趟行程尚未接入。范围及验收状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#f04a-dining-subtask)。
-
-任务总耗时不累加父子步骤。共用时间轴用于查看先后与重叠，累计调用耗时不等于任务实际总耗时；工具平均仅基于有可靠起止时间的调用。异常总数下列出“调用失败”和“中断未完成”两个子项；仍在执行或状态未确定的记录不计为失败。未知耗时不参与慢调用比较，未采集Token与真实零值分别显示，供应商总量不反推缺失的输入/输出。角色汇总保留在Token分析的折叠明细中。
-
-前端边界验证：`cd frontend && node tests/observationView.test.mjs`。正式页展示已于2026-10-09获用户接受，验证证据见[学习日志](docs/learning-log.md#agent观测正式页改版2026-10-09)；剩余需求见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md)。
-
-## 🤝 贡献指南
-
-欢迎提交Pull Request或Issue!
-
-## 📜 开源协议
-
-CC BY-NC-SA 4.0
-
-## 🙏 致谢
-
-- [HelloAgents](https://github.com/datawhalechina/Hello-Agents) - 智能体教程
-- [HelloAgents框架](https://github.com/jjyaoao/HelloAgents) - 智能体框架
-- [高德地图开放平台](https://lbs.amap.com/) - 地图服务
-- [amap-mcp-server](https://github.com/sugarforever/amap-mcp-server) - 高德地图MCP服务器
-
----
-
-**HelloAgents智能旅行助手** - 让旅行计划变得简单而智能 🌈
+模拟测试、构建、真实服务核验和人工接受分别记录。完整离线回归需封锁外部模型和地图连接；测试通过不代表真实行程质量已接受。当前范围及证据见 [CHG-003](docs/changes/CHG-003-planning-performance-observability.md#当前状态)。
 
 ## Deployment
 
-前端生产构建部署到同域 `/trip/`，本地 `npm run dev` 仍访问 `/`。Vite 根据构建命令设置资源路径，Vue Router 使用同一基础路径；`frontend/.env.production` 设置 `VITE_API_BASE_URL=/trip`，实际接口请求为 `/trip/api/...`。前端环境变量在构建时写入产物，修改后必须重新构建；构建进程的同名环境变量及 `.env.production.local` 可以覆盖仓库配置，发布前应确认未携带旧地址。`VITE_*` 是公开配置，不得放入后端密钥。
+生产前端部署在 `/trip/`，API 基址为同域 `/trip`；本地开发仍使用 `/`。前端配置在构建时写入，修改后必须重新构建。Nginx 转发、数据库隔离和迁移步骤见[运行手册](docs/runtime-guide.md#生产部署)。
 
-服务器拉取源码后，在 `frontend` 执行 `npm ci` 和 `npm run build`，由 Nginx 提供 `dist` 内容。Nginx 需将 `/trip` 重定向到 `/trip/`，将 `/trip/api/...` 去掉 `/trip` 后转发至后端 `/api/...`，并为 `/trip/preview` 等前端路由回退到旅行助手的 `index.html`；若使用健康检查客户端，还需将 `/trip/health` 转发至后端 `/health`。后端环境、常驻服务和数据库目录须在服务器单独配置。本地构建不能代替服务器部署与在线验收；当前适配验证状态见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#trip-subpath-deployment)。
+## 文档入口与记录边界
 
-按日修订已接入正式v4流程，只补必需时段的真实地点缺项。已有有效候选时直接修订，不追加查询；保留其他日期和有效活动。每日期最多3个业务轮，初版不计，有限技术恢复不占业务轮；耗尽后交付可编辑草稿。未知价格、天气、营业或交通不单独触发修订，边界见[CHG-003 S05](docs/changes/CHG-003-planning-performance-observability.md#s05-light-validation-repair)。
+**README 只维护当前使用入口。** 保留项目用途、首次启动、必要配置、常用操作、验证入口和影响使用的限制。功能变化时改写对应段落，不在文末追加实施流水账。
 
-### v4预览任务接口基础
+| 内容 | 记录位置；README 的处理方式 |
+| --- | --- |
+| 按需使用的配置、部署、迁移与调试命令 | [运行手册](docs/runtime-guide.md)；README 只留常用步骤和链接 |
+| 稳定业务术语与规则 | [CONTEXT](CONTEXT.md)；README 只说明用户需要知道的限制 |
+| 需求、范围、待办、实施及验收状态 | [当前 Change](docs/changes/CHG-003-planning-performance-observability.md)；不复制进度表 |
+| 问题、原因、取舍与有日期的验证结论 | [学习日志](docs/learning-log.md)、[独立问题记录](docs/problems/README.md)；不追加单次测试数量、耗时、提交或部署流水 |
+| 学习目标 | [学习计划](docs/learning-plan.md)；不复制阶段任务 |
+| 架构与源码阅读入口 | [项目实现地图](docs/project-overview.html)、[设计参考](docs/planning-design.html)、[工程指标设计](docs/engineering-metrics-design.md)；不复制函数说明、完整字段或接口清单 |
+| 协作与文档维护规则 | [AGENTS.md](AGENTS.md)；每项事实只维护一处，其他入口链接 |
 
-`POST /api/trip/v4/tasks`接收`planning_v4.TripRequest`，立即返回task_id、plan_id和一次性返回的access_token；后端负责需求解释和规则，不接受客户端提供模型整理结果。`GET /api/trip/v4/tasks/{task_id}`及其`/preview`使用`Authorization: Bearer <access_token>`；访问标识不放URL。状态、草稿和消费摘要使用同一预览版本。
+API 参数以运行中的 `/docs` 和代码为准；历史方案、失败实验及旧接口实现留在对应 Change，不写成现行用法。密钥、真实用户数据、完整模型响应和本地生成物不写入项目文档。
 
-预览存放在`${DATABASE_SCHEMA_PREFIX}_preview`，观测存放在同前缀`_observation`；两者共用连接配置、独立清理。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
+<a id="sole-planning"></a>
+独立仅规划、真实采集 CLI 和[结果页交互原型](docs/runtime-guide.md#结果页交互原型)的入口统一见[运行手册](docs/runtime-guide.md#独立规划调试)。它们用于专项调试，验收范围见对应 Change。
 
-默认应用已注册`NativePreviewPipeline`，v4接口运行主需求整理→原生三角色采集→每日提案→地点校验与按日修订→可读预览→独立相邻交通；首页已接入新需求表单。地点先交付，交通等待或失败不阻塞查看、编辑和导出。独立测试应用未注册pipeline时返回503。实施与故障验收见[CHG-003 S07](docs/changes/CHG-003-planning-performance-observability.md#s07-place-first-pipeline)。
+项目实现地图通过根目录静态服务访问：`python3 -m http.server 8765 --bind 127.0.0.1`，然后打开 `http://127.0.0.1:8765/docs/project-overview.html`。设计参考可直接打开；图示的核对范围以页内说明为准。
 
+## 协议与致谢
 
-### v4用户预览页面
-
-前端`/preview`通过本机当前访问标识读取v4预览；`savePreviewAccess(taskId, accessToken, planId)`保存当前指针，新规划替换旧指针，不提供历史列表。Bearer标识不放URL。页面展示三种交通、每日住宿/天气、来源化消费及缺项提示；地图不可用不影响查看。页面支持全部日期导出及还原上次保存；新需求入口为`/plan`，`/`与`/plan`使用同一新表单；预览已支持按日编辑，进度见[CHG-003 F10b](docs/changes/CHG-003-planning-performance-observability.md#f10b-preview-ui)。
-
-预览与PNG导出按时段显示有序地点，不展示活动精确时刻、停留时长、总安排时长或返程可行性结论；保留已知交通耗时、三种交通方案和查询参考时刻。指定住处只展示酒店，不显示推荐住宿区域及区域地图标记；未指定住处才推荐区域与一家酒店。后端已取消活动时间契约、返程路线及备用矩阵，验证边界见[S03](docs/changes/CHG-003-planning-performance-observability.md#s03-slot-place-contract)和[S06](docs/changes/CHG-003-planning-performance-observability.md#s06-adjacent-routes-cache)。
-
-生成中会显示转圈动画和后端实际阶段，完成后自动打开预览。规划失败会说明安全原因并引导“重新规划”；网络或服务暂不可读时可“重新读取”，不会重新提交模型任务。刷新仍读取当前任务。阶段与错误分类验证：`cd frontend && node tests/v4PreviewProgress.test.mjs`。
-
-映射边界验证：`cd frontend && node tests/v4PreviewMapper.test.mjs`；同目录执行`npm run build`检查正式页面类型与生产构建。测试内的合成样本只验证展示，不代表完整旅行规划质量。
-
-
-### v4按日编辑核心
-
-`PlanningV4EditService.apply(preview, command)`是无外部调用的纯服务，返回新预览、变化活动/路段及待查路段。一个命令限一个日期，支持新增、按活动ID删除、完整顺序重排、已查到的交通方式选择；用户重复安排同一景点时，每次活动有独立ID。v4编辑API负责原子存储和路线重算；正式预览页面已接入按日编辑，进度见[编辑核心](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-core)。
-
-
-### v4最终结果保存与还原
-
-`GET /api/trip/v4/tasks/{task_id}/final`返回上次成功保存的元数据；`POST .../final/save`携带`save_id`与`source_store_version`，只复制同版本服务端草稿。`POST .../final/restore`携带`restore_id`、`expected_store_version`、`expected_plan_revision`及`expected_save_id`，原子还原成新草稿版本。均使用该任务Bearer标识，不接受客户端快照，不提供历史列表。
-
-保存过期返回`stale`；还原版本冲突或最后保存变化返回409，存储不可用返回503。只支持简化契约的新快照；损坏或不支持的旧记录明确拒绝，不转换或删除历史数据。失败不覆盖上次成功保存，图片下载与保存结果分开处理，边界见[S08](docs/changes/CHG-003-planning-performance-observability.md#s08-edit-persistence)。
-
-
-### v4预览导出与还原操作
-
-`/preview`的“导出全部日期”固定当前所见快照，生成逐日PNG，长日自动分页。文件准备完成后发起下载，再尝试保存最终结果；保存失败会单独提示，仍可使用逐张下载链接。后台已更新服务端版本时，本次图片可下载，但不会把其他版本当作本次结果保存。
-
-“还原上次保存”仅在存在可还原快照时启用。成功后显示新预览版本，失败时保留当前内容。验证命令：`cd frontend && node tests/v4PreviewExportController.test.mjs`；浏览器及存储故障证据见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-export-ui)。
-
-
-### v4规划流程与技术截止
-
-应用启动注册`NativePreviewPipeline`，复用已确认的六个参考窗口；`TripRequest.explicit_return_buffer_s`可显式覆盖默认返程1小时，未填写时沿用默认。`PLANNER_ENFORCE_TIMEOUTS`默认关闭，模型与地点采集不按项目主动期限停止；只有开启该开关时才应用对应期限配置。相邻交通worker仍使用`PLANNER_EDIT_ROUTE_DEADLINE_SECONDS`默认120秒及工具有限查询。每日期最多3个业务修订轮，耗尽后保留带缺项草稿；交通故障保留已验证活动。
-
-完整接线与独立离线验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-planning-pipeline)。最新模型、在线验收与失败记录以[CHG-003当前状态](docs/changes/CHG-003-planning-performance-observability.md#当前状态)为准；不要把离线回放当作真实旅行方案质量证据。
-
-
-### v4按日编辑API
-
-`POST /api/trip/v4/tasks/{task_id}/edits`携带`expected_store_version`和`EditCommand`，接受后返回202及同版本envelope、变化活动/路段和可选job。`GET .../edit-jobs/{calculation_id}`读取重算状态及当前预览，均使用该任务Bearer。一个命令只编辑一天，可在operations中原子删除多个活动；新增引用服务端已核实候选；搜索新地点经独立选择接口加入。
-
-网络结果不明时原样重放同一command_id；改参数必须新ID。409表示版本或幂等冲突，客户端先重新读取当前预览，不自动覆盖。后台路线失败保留已接受编辑；`PLANNER_EDIT_ROUTE_DEADLINE_SECONDS`默认120秒。重启恢复待查任务与具体故障验收见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-api)。
-
-
-### v4预览编辑
-
-`/preview`左侧拖动调整当天顺序，也可删除某一次活动、切换已查询到的交通方式；地图下方按地点批量删除关联活动，或把已有候选加入可用时段。一次请求未确认时先处理待同步编辑；路线计算期间仍可继续修改。网络响应不明时刷新会重放同一命令，版本冲突需用户明确重试。停止重试会重新读取服务器内容，已接受的编辑仍保留。
-
-验证：`node tests/v4PreviewEditController.test.mjs`、`node tests/v4PreviewAccessStorage.test.mjs`（在frontend运行）；浏览器故障回放见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-edit-ui)。地图下已支持搜索新景点和餐馆；新需求入口为`/plan`。
-
-
-### v4目的地搜索
-
-`POST /api/trip/v4/tasks/{task_id}/destinations/search`接收`keywords`、`category`（sightseeing或meal）及`page`，城市来自当前预览。结果包含名称、地址、参考cost、来源及是否可选；搜索本身不改草稿。
-
-`POST .../destinations/select`接收服务端candidate_token、day_id、slot_id、两项期望版本、command_id和client_ref，成功返回同编辑API的202响应。请求结果不明时必须原样重放；过期新候选返回`DESTINATION_CANDIDATE_UNAVAILABLE`，重新搜索后再选择。两个接口均使用任务Bearer。
-
-地点候选存放在`${DATABASE_SCHEMA_PREFIX}_destination`，与预览/观测schema分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。
-
-
-每日安排初版与单日修订的结构校验会在观测中保留安全字段路径、错误类型及固定修复指引；超出8条时保留总数和截断标记，不保存完整模型回答。初版局部修复与格式修复共用一次额度；单日修订协议及按日最多三轮业务补查保持原规则。验收见[安全校验诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-plan-validation-diagnostics)及[局部修复](docs/changes/CHG-003-planning-performance-observability.md#v4-local-plan-repair)。
-
-单日修订的观测还记录`repair.*`阶段及每轮的`repair.round_result`。按`round_id`关联采集、合并修订、交通重算、重算后校验和是否采用；错误包含安全字段位置与条件，时间不一致时记录两个时刻及是否属于同一查询分钟。记录不包含完整模型回答，也不能补回旧任务未保存的错误；当前精度问题及实现/部署边界见[修订拒绝诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-repair-rejection-diagnostics)。
-
-主派发遇到区域或偏好引用错误时，会把具体条件、可用引用和原草案交给模型纠正；后端只合并受影响的引用字段，保留其他任务、目标、日期、事实和餐次锚点。该纠正与JSON格式修复共享一次额外调用；开启超时策略时也共享原调用期限。若纠正仍失败，但经重新校验的部分结果已为本次缺项提供可用候选，F09会在同一轮继续修订，不单独为这次引用错误多占一轮；没有可用候选时保持原上限并交付缺项。其他技术错误、来源损坏或身份不一致不套用此恢复策略。观测中的`master.decision.reference_repair`记录纠正条件，`repair.collection_recovery`记录继续/跳过修订及候选覆盖数量；实现与验证见[派发引用恢复](docs/changes/CHG-003-planning-performance-observability.md#v4-dispatch-reference-recovery)。
-
-排查一份结果时，先只读导出该任务的诊断，不重新提交规划。以下命令从项目根目录运行；现行库使用`--postgres`读取私有配置；`--db /path/tasks.sqlite3`仅用于只读旧备份（未指定选项时也使用旧默认备份路径）。`--format json`可导出机器可读报告。
-
-```bash
-backend/venv/bin/python backend/scripts/diagnose_task.py <task_id> --postgres
-```
-
-新增诊断沿用任务观测记录：公共字段记录任务/父子调用标识、开始和结束时间、执行状态；输出记录`schema_version=1`、`stage`、`outcome`。阶段返回、校验通过、每轮采用及最终交付质量分别记录；`succeeded`只说明调用正常结束。`planning.v4.run`汇总初版每天实际景点、用餐、自由活动、缺失时段和补查停止原因，不代表后续编辑或数据库保存结果。错误只保留固定条件、安全字段路径及该条件所需的值，例如两个出发时刻。主派发目前细分区域/偏好引用的四种条件，其他未细分错误仍显示错误码并提示证据缺口。
-
-报告按父子调用关联日期、轮次与版本，列出首条已记录异常、阶段经过、逐轮决策、交付质量及缺失/截断提示。它不读取完整请求或模型回答，不恢复、清理或修改任务；旧记录缺失时显示未知，不能用报告替代完整响应回放。修复流程为：固定一个任务的证据 → 最小离线复现 → 单项修复 → 同一用例回归；当前执行与遗留项见上述诊断记录。
-
-v4中已查到有效天气但模型漏写出行建议时，会保留预报并显示建议尚未生成，不因此让整个规划失败；无效地点引用仍不进入草稿，可安全定位的活动错误按上述局部修复规则处理。真实失败与修复验证见[天气建议缺失](docs/changes/CHG-003-planning-performance-observability.md#v4-weather-advice-fallback)。
-
-
-### 新规划入口
-
-访问`/plan`填写需求，提交后进入`/preview`查看进度和可编辑结果；只保留当前预览访问入口，无历史列表。默认首页`/`与`/plan`使用同一新表单。日期按中国标准时间输入，预算指全程旅费；返程预留留空采用1小时，另算实际返程交通。
-
-如果浏览器暂时无法保存访问信息，当前页面仍可继续查看预览，但刷新/关闭后可能无法恢复。页面提供重试保存，重试不会重新创建规划任务。验证：`cd frontend && node tests/v4TripRequest.test.mjs`；边界与证据见[新需求填写入口](docs/changes/CHG-003-planning-performance-observability.md#v4-home)。
-
-
-`/preview`地图下的“搜索其他地点”可按景点或餐馆搜索当前城市，查看来源与参考消费，选定时段后加入当天。缺少可靠位置的结果不可加入；候选失效时重新搜索。网络结果不明时保留待同步选择，刷新会安全核对同一命令。验证和浏览器故障回放见[搜索页面](docs/changes/CHG-003-planning-performance-observability.md#v4-destination-ui)。
-
-
-初始采集提前结束时，v4会重新校验已收集信息，并在信息有效时继续生成带提示的草稿；身份或事实引用损坏仍终止。规则与验收边界见[初始采集降级](docs/changes/CHG-003-planning-performance-observability.md#v4-initial-dispatch-recovery)。
-
-
-### 默认用户流程
-
-打开`/`或`/plan`填写需求，提交后进入`/preview`。预览支持编辑、搜索添加地点、导出和还原上次成功保存；工作台仍单独访问`/observability`，用户页面不提供入口。旧`/result`与v3 API继续保留兼容。
-
-上海三日真实阶段续验及页面导出通过，但本例仍缺住宿候选、消费数据和部分交通/天气信息，活动时刻未全部核实。验收不代表每次模型规划均完整，也不是新的全程耗时基准。证据与剩余边界见[默认入口交付](docs/changes/CHG-003-planning-performance-observability.md#v4-default-entry)。
-
-诊断报告补充：backend/scripts/diagnose_task.py 会按直接模型失败、异常结束和校验拒绝统计分布，并沿父链排除重复传播；新任务同时展示模型接口安全摘要、结束原因及具体拒绝条件。历史缺失字段保持未知，不回填猜测值。实现与离线验收见[日志补齐](docs/changes/CHG-003-planning-performance-observability.md#v4-complete-error-logging)。
-
-
-### 人均预算与指定酒店
-
-正式规划表单的预算为“人均预算（元/全程）”，新请求显式传入 `budget.amount_basis=per_person`；旧请求缺少该字段时保留 `whole_party` 原总预算语义，不重解释已保存行程。已知cost小计仍不代表完整旅费。
-
-已订酒店位于目的地城市下方；先填写城市才能输入酒店名称，输入停顿350毫秒会自动查询，下拉最多展示5个酒店（含地址），支持鼠标或键盘选择；修改城市或酒店文本后需重新选择。`GET /api/poi/hotels?city=...&keywords=...` 通过现有高德MCP查询同城住宿。新表单提交 `lodging_poi_id` 和名称，后端按ID详情核实位置并生成有来源的住宿候选，浏览器坐标不作为可信事实。查不到可换关键词或清空酒店，由系统推荐；旧版纯文本请求暂保留兼容。查询成功不承诺营业或有房。
-
-局部验证与部署状态见[预算及酒店修复](docs/changes/CHG-003-planning-performance-observability.md#v4-budget-hotel-selection)。
-
-到达、离开地点为选填项：留空不显示核实提示；填写后查不到、存在歧义或查询失败时显示对应提示。旧预览按原请求过滤空地点提示。
+CC BY-NC-SA 4.0。感谢 [HelloAgents 教程](https://github.com/datawhalechina/Hello-Agents)、[HelloAgents 框架](https://github.com/jjyaoao/HelloAgents)、[高德地图](https://lbs.amap.com/) 和 [amap-mcp-server](https://github.com/sugarforever/amap-mcp-server)。
