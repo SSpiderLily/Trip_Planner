@@ -1,5 +1,5 @@
 <template>
-  <section class="map-card" aria-label="当天地图">
+  <section class="map-card" aria-label="当天地图" :style="{ '--transit-color': routeColors.transit, '--cycling-color': routeColors.bicycling, '--walking-color': routeColors.walking }">
     <div class="map-heading">
       <div>
         <span class="eyebrow">DAY MAP</span>
@@ -20,7 +20,7 @@
       <span v-if="locations.some((location) => location.kind === 'area')"><i class="area-dot"></i>住宿区域参考点</span>
       <span><i class="transit-line"></i>公共交通</span>
       <span><i class="cycling-line"></i>骑行</span>
-      <span><i class="walking-line"></i>步行</span>
+      <span><i class="walking-line"></i>步行（含换乘）</span>
     </div>
     <p class="map-note" role="status">{{ mapNote }}</p>
   </section>
@@ -40,6 +40,8 @@ const mapElement = ref<HTMLElement | null>(null)
 const mapState = ref<'loading' | 'ready' | 'failed'>('loading')
 const mapNote = ref('地图底图加载后，将显示有真实坐标的地点和路线。')
 const locatedCount = computed(() => props.locations.filter((location) => location.coordinate).length)
+// 路径和图例共用配色；公交、地铁、铁路统一归入公共交通。
+const routeColors = { transit: '#2563eb', bicycling: '#0d9488', walking: '#ea580c' }
 let map: any = null
 let AMap: any = null
 let disposed = false
@@ -71,12 +73,16 @@ function drawMap(): void {
       overlays.push(new AMap.Polyline({
         path: path.coordinates,
         strokeColor: pathColor(path.mode),
-        strokeWeight: 5,
+        strokeWeight: path.mode === 'walking' ? 5 : 7,
         strokeStyle: path.mode === 'walking' ? 'dashed' : 'solid',
+        strokeDasharray: path.mode === 'walking' ? [6, 5] : undefined,
+        strokeOpacity: 0.95,
         isOutline: true,
         outlineColor: '#fffdf8',
         borderWeight: 2,
         lineJoin: 'round',
+        lineCap: 'round',
+        zIndex: path.mode === 'walking' ? 120 : 110,
         showDir: path.mode !== 'walking',
       }))
     }
@@ -105,9 +111,9 @@ function drawMap(): void {
 }
 
 function pathColor(mode: string): string {
-  if (mode === 'walking') return '#b77755'
-  if (mode === 'bicycling') return '#477d9c'
-  return '#355c46'
+  if (mode === 'walking') return routeColors.walking
+  if (mode === 'bicycling') return routeColors.bicycling
+  return routeColors.transit
 }
 
 onMounted(async () => {
@@ -166,13 +172,13 @@ h2 { margin: 7px 0 0; color: #254130; font: 24px 'Songti SC', 'Noto Serif SC', s
 .map-overlay span { color: #718173; font-size: 11px; line-height: 1.7; }
 .map-legend { display: flex; flex-wrap: wrap; gap: 9px 17px; padding: 13px 0 4px; color: #657667; font-size: 10px; }
 .map-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.map-legend i { display: inline-block; width: 14px; height: 10px; }
+.map-legend i { display: inline-block; width: 24px; height: 10px; }
 .activity-dot, .hotel-dot, .area-dot { width: 11px !important; height: 11px !important; border: 2px solid white; border-radius: 50%; background: #355c46; box-shadow: 0 1px 4px #2224; }
 .hotel-dot { border-radius: 3px; background: #586c8a; }
 .area-dot { background: transparent; border: 2px dashed #8a8060; }
-.transit-line, .cycling-line, .walking-line { height: 0 !important; border-top: 3px solid #355c46; }
-.cycling-line { border-color: #477d9c; }
-.walking-line { border-color: #b77755; border-top-style: dashed; }
+.transit-line, .cycling-line, .walking-line { height: 0 !important; border-top: 4px solid var(--transit-color); }
+.cycling-line { border-color: var(--cycling-color); }
+.walking-line { border-color: var(--walking-color); border-top: 3px dashed var(--walking-color); }
 .map-note { margin: 7px 0 0; color: #718173; font-size: 11px; line-height: 1.7; }
 :deep(.preview-marker) { display: grid; place-items: center; width: 28px; height: 28px; border: 3px solid #fffdf8; border-radius: 50%; background: #355c46; color: white; box-shadow: 0 2px 7px #25453266; font: 12px sans-serif; }
 :deep(.hotel-marker) { width: 31px; height: 31px; border-radius: 5px; background: #586c8a; }
