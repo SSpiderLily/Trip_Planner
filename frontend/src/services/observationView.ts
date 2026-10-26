@@ -1,5 +1,20 @@
 import type { SpanSummary, TaskStatus } from '@/types'
 
+export function observationErrorText(error: unknown): string {
+  const value = error as { code?: string; response?: { status?: number; data?: { detail?: { code?: string } } } }
+  const code = value?.response?.data?.detail?.code ?? value?.code
+  if (code === 'PREVIEW_ACCESS_REQUIRED') return '缺少这份行程的访问凭据，请使用创建行程的原浏览器，从行程预览进入规划过程。'
+  if (code === 'TASK_ACCESS_DENIED') return '无法访问此任务，凭据可能已失效或与任务不匹配。请从有权访问的行程预览进入。'
+  if (code === 'TASK_NOT_FOUND') return '任务不存在。请确认规划过程链接中的任务编号。'
+  if (code === 'OBSERVATION_NOT_FOUND') return '此行程可访问，但观测记录不存在或已被清理。'
+  if (code === 'SPAN_NOT_FOUND') return '此任务中没有这条调用记录，可能尚未保存或已被清理。'
+  if (code === 'OBSERVATION_UNAVAILABLE' || code === 'METRICS_UNAVAILABLE') return '观测接口暂不可用，请稍后重新读取。'
+  if (value?.response?.status === 401) return '缺少有效的访问凭据，请从原行程预览重新进入。'
+  if (value?.response?.status === 403) return '无法访问此任务，服务器拒绝了访问。'
+  if (value?.response?.status === 404) return '观测接口访问失败（404），请检查服务器接口转发；这不表示任务已被清理。'
+  return '观测接口访问失败，请检查网络或服务状态后重试。'
+}
+
 export const isActive = (task: Pick<TaskStatus, 'status'>) => task.status === 'accepted' || task.status === 'running'
 export const isCall = (span: SpanSummary) => span.operation_type === 'llm' || span.operation_type === 'tool'
 export const time = (value: string | null | undefined): number | null => {

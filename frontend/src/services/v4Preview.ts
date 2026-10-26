@@ -1,4 +1,5 @@
 import axios from 'axios'
+import type { SpanSummary, SpanDetail, TaskMetrics, TaskStatus } from '@/types'
 import { mapV4DestinationSelectFailure } from '@/utils/v4DestinationSearchMapper'
 import type {
   V4FinalSaveRequest,
@@ -108,6 +109,21 @@ export async function getV4TaskStatus(access: V4PreviewAccess): Promise<V4TaskSt
     { headers: authorizationHeader(access) },
   )
   return response.data as V4TaskStatus
+}
+
+export async function getV4ObservationMetrics(access: V4PreviewAccess): Promise<TaskMetrics & { task: TaskStatus }> {
+  return (await previewClient.get(`/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/metrics`,
+    { headers: authorizationHeader(access) })).data
+}
+
+export async function getV4ObservationSpans(access: V4PreviewAccess): Promise<SpanSummary[]> {
+  return (await previewClient.get(`/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/spans`,
+    { headers: authorizationHeader(access) })).data
+}
+
+export async function getV4ObservationSpan(access: V4PreviewAccess, spanId: string): Promise<SpanDetail> {
+  return (await previewClient.get(`/api/trip/v4/tasks/${encodeURIComponent(access.taskId)}/spans/${encodeURIComponent(spanId)}`,
+    { headers: authorizationHeader(access) })).data
 }
 
 export async function getV4Preview(access: V4PreviewAccess): Promise<V4PreviewEnvelope> {

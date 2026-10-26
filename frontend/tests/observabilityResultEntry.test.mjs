@@ -7,6 +7,7 @@ const source = await readFile(new URL('../src/views/Observability.vue', import.m
 const action = source.slice(source.indexOf('async function showResult()'), source.indexOf('watch(() => [route.query.task'))
 const compiled = ts.transpileModule(`export function create(deps) {
   const { selectedId, resultError, getTaskResult, getPreviewAccessForTask, recoverLocalPreviewAccess, router, sessionStorage } = deps
+  const scoped = false
   let disposed = false, taskVersion = 1
   const errorText = () => 'synthetic query error'
   ${action}

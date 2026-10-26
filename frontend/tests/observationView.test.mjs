@@ -81,3 +81,10 @@ const legacyAgent = { ...span('legacy-agent', 'agent'), name: 'agent.collect_sig
 const legacyCall = span('legacy-call', 'llm', 0, 1, 'legacy-agent')
 assert.equal(v.spanRole(v.buildForest([legacyAgent, legacyCall]), legacyCall, () => '候选搜集'), '候选搜集')
 assert.equal(v.spanRole(v.buildForest([span('unknown-role', 'llm')]), span('unknown-role', 'llm'), n => n), '未归属')
+
+assert.match(v.observationErrorText({ code: 'PREVIEW_ACCESS_REQUIRED' }), /缺少.*凭据/)
+assert.match(v.observationErrorText({ response: { status: 403, data: { detail: { code: 'TASK_ACCESS_DENIED' } } } }), /无法访问/)
+assert.match(v.observationErrorText({ response: { status: 404, data: '<html>nginx 404</html>' } }), /接口/)
+assert.match(v.observationErrorText({ response: { status: 404, data: { detail: { code: 'TASK_NOT_FOUND' } } } }), /任务不存在/)
+assert.match(v.observationErrorText({ response: { status: 404, data: { detail: { code: 'OBSERVATION_NOT_FOUND' } } } }), /观测记录/)
+assert.match(v.observationErrorText({ response: { status: 404, data: { detail: { code: 'SPAN_NOT_FOUND' } } } }), /调用记录/)

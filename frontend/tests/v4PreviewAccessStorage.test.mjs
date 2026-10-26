@@ -84,3 +84,8 @@ assert.match(service.v4FinalErrorMessage(unsupported, 'save'), /保存未完成.
 assert.equal(service.isV4EditConflict({
   isAxiosError: true, response: { status: 409, data: { detail: { code: 'PREVIEW_VERSION_CONFLICT' } } },
 }), true)
+
+// 观测使用原任务凭据及独立客户端，不把令牌放入URL。
+assert.equal(typeof service.getV4ObservationMetrics, 'function')
+assert.equal(typeof service.getV4ObservationSpans, 'function')
+assert.equal(typeof service.getV4ObservationSpan, 'function')

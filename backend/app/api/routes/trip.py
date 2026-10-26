@@ -129,6 +129,69 @@ async def v4_preview(task_id: str, request: Request, authorization: str | None =
     return payload
 
 
+async def _authorize_v4_observation(task_id: str, request: Request, authorization: str | None):
+    """每次读取独立验证任务凭据；不要求草稿已生成，也不恢复或轮换凭据。"""
+    try:
+        token = _v4_bearer(authorization)
+        job = await request.app.state.preview_task_service.status(task_id, token)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except TaskError as exc:
+        raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)},
+                            headers={"Cache-Control": "no-store"}) from exc
+    if job is None:
+        raise HTTPException(403, detail={"code": "TASK_ACCESS_DENIED", "message": "无法访问此任务，请确认使用原浏览器中的行程凭据"},
+                            headers={"Cache-Control": "no-store"})
+    try:
+        await service(request).status(task_id)
+    except TaskError as exc:
+        code = "OBSERVATION_NOT_FOUND" if exc.code == "TASK_NOT_FOUND" else exc.code
+        message = "任务可访问，但观测记录不存在或已被清理" if code == "OBSERVATION_NOT_FOUND" else str(exc)
+        raise HTTPException(exc.status, detail={"code": code, "message": message},
+                            headers={"Cache-Control": "no-store"}) from exc
+
+
+@router.get("/v4/tasks/{task_id}/metrics")
+async def v4_observation_metrics(task_id: str, request: Request, response: Response,
+                                 authorization: str | None = Header(default=None)):
+    await _authorize_v4_observation(task_id, request, authorization)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await service(request).metrics(task_id, include_running=True)
+    except TaskError as exc:
+        raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)},
+                            headers={"Cache-Control": "no-store"}) from exc
+
+
+@router.get("/v4/tasks/{task_id}/spans")
+async def v4_observation_spans(task_id: str, request: Request, response: Response,
+                               authorization: str | None = Header(default=None)):
+    await _authorize_v4_observation(task_id, request, authorization)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await asyncio.to_thread(service(request).repository.spans, task_id)
+    except Exception as exc:
+        raise HTTPException(503, detail={"code": "OBSERVATION_UNAVAILABLE", "message": "观测记录暂不可用"},
+                            headers={"Cache-Control": "no-store"}) from exc
+
+
+@router.get("/v4/tasks/{task_id}/spans/{span_id}")
+async def v4_observation_detail(task_id: str, span_id: str, request: Request, response: Response,
+                                authorization: str | None = Header(default=None)):
+    await _authorize_v4_observation(task_id, request, authorization)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        row = await asyncio.to_thread(service(request).repository.span, task_id, span_id)
+    except Exception as exc:
+        raise HTTPException(503, detail={"code": "OBSERVATION_UNAVAILABLE", "message": "调用详情暂不可用"},
+                            headers={"Cache-Control": "no-store"}) from exc
+    if row is None:
+        raise HTTPException(404, detail={"code": "SPAN_NOT_FOUND", "message": "该任务没有此调用记录"},
+                            headers={"Cache-Control": "no-store"})
+    return row
+
+
 @router.post(
     "/v4/tasks/{task_id}/destinations/search",
     response_model=DestinationSearchResponse,

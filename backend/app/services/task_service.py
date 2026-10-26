@@ -348,9 +348,9 @@ class TaskService:
             raise TaskError('RESULT_UNAVAILABLE', '结果不可用', 503)
         return result
 
-    async def metrics(self, task_id):
+    async def metrics(self, task_id, *, include_running=False):
         task = await self.status(task_id)
-        if task['status'] in ('accepted', 'running'):
+        if not include_running and task['status'] in ('accepted', 'running'):
             raise TaskError('METRICS_NOT_READY', '任务结束后可查看工程指标')
         try:
             spans = await asyncio.to_thread(self.repository.metric_spans, task_id)
@@ -358,7 +358,10 @@ class TaskService:
             raise TaskError('METRICS_UNAVAILABLE', '工程指标暂不可用', 503) from exc
         if spans is None:
             raise TaskError('TASK_NOT_FOUND', '任务不存在或已被清理', 404)
-        return build_metrics(task, spans)
+        metrics = build_metrics(task, spans)
+        if include_running:
+            metrics['task'] = {**task, **metrics['task']}
+        return metrics
 
     async def close(self):
         self.accepting = False
