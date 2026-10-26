@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 from threading import Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -1440,6 +1441,7 @@ class DailyPlanGeneratorTests(unittest.TestCase):
 
     def test_queued_timeout_reports_zero_calls_and_known_zero_usage(self):
         planning_input = make_input()
+        clock = [1000.0]
 
         class QueuedExecutor:
             def __init__(self):
@@ -1447,11 +1449,15 @@ class DailyPlanGeneratorTests(unittest.TestCase):
 
             def submit(self, *args, **kwargs):
                 self.future = Future()
+                # 明确在入队后超时，避免机器负载让20毫秒预算在提交前耗尽。
+                clock[0] += 1.0
                 return self.future
 
         executor = QueuedExecutor()
         fake = FakeLLM([])
-        with patch("app.agents.daily_plan_generator._MODEL_EXECUTOR", executor):
+        with patch("app.agents.daily_plan_generator._MODEL_EXECUTOR", executor), patch(
+            "app.agents.daily_plan_generator.time", SimpleNamespace(monotonic=lambda: clock[0]),
+        ):
             with self.assertRaises(PlanningError) as raised:
                 DailyPlanGenerator(llm=fake, timeout_seconds=0.02).generate(
                     planning_input,
