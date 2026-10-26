@@ -265,3 +265,16 @@ const departureCosts = mixedSyntheticEnvelope()
 departureCosts.preview.planning_input.request.departure_at = '2026-11-05T19:00:00+08:00'
 assert.equal(mapV4Preview(departureCosts).cost.knownSubtotal, '90', 'departure day has no overnight charge')
 assert.equal(mapV4Preview(departureCosts).days[0].hotel.cost.text, '¥360 / 人 / 晚', 'nightly reference remains visible')
+
+// 只隐藏独立的去重核实提示，复合要求和实际重复冲突仍须展示。
+const repeatNotices = mixedSyntheticEnvelope()
+const noticeBase = { category: 'unknown_info', severity: 'warning', scope: 'plan', day_id: null, target_id: 'requirement-repeat', evidence_refs: [], based_on_revision: repeatNotices.preview.draft.revision }
+repeatNotices.preview.validation.issues.push(
+  { ...noticeBase, issue_id: 'repeat-only', code: 'requirement_unverified', message: '无法仅根据当前结构化信息核实要求“无充分理由不要跨天重复安排同一景点。”是否落实。' },
+  { ...noticeBase, issue_id: 'repeat-with-diet', code: 'requirement_unverified', message: '无法仅根据当前结构化信息核实要求“不要跨天重复相同景点，并且所有餐次必须全程素食”是否落实。' },
+  { ...noticeBase, issue_id: 'actual-repeat', code: 'cross_day_sightseeing_repeat', category: 'known_conflict', message: '跨天重复安排同一景点，需要调整。' },
+)
+const repeatView = mapV4Preview(repeatNotices)
+assert.ok(!repeatView.planIssues.some(x => x.issue_id === 'repeat-only'))
+assert.ok(repeatView.planIssues.some(x => x.issue_id === 'repeat-with-diet'), 'a compound requirement must retain its other conditions')
+assert.ok(repeatView.planIssues.some(x => x.issue_id === 'actual-repeat'), 'an actual duplicate conflict remains visible')
