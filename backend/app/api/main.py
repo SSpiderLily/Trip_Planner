@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from ..services.task_repository import TaskRepository
+from ..services.relational_storage import StorageDatabase
 from ..services.task_service import TaskService
 from ..services.observation_service import ObservationService
 from ..services.day_edit_service import DayEditService
@@ -80,20 +81,21 @@ async def startup_event(application: FastAPI):
     
     if settings.observation_retention_days < 1 or settings.observation_content_limit < 256 or settings.observation_max_bytes < 4096:
         raise ValueError("观测存储配置必须为有效正数（内容上限至少256字节）")
-    task_db = Path(settings.task_db_path).expanduser().resolve()
-    preview_db = Path(settings.preview_db_path).expanduser().resolve()
-    destination_db = Path(settings.destination_candidate_db_path).expanduser().resolve()
-    if task_db == preview_db:
-        raise ValueError("preview_db_path 必须与 task_db_path 分开，以隔离预览体积与观测清理")
-    if destination_db in {task_db, preview_db}:
-        raise ValueError("destination_candidate_db_path 必须与任务观测和预览数据库分开")
-    repository = TaskRepository(settings.task_db_path, settings.observation_retention_days, settings.observation_max_bytes)
+    if settings.storage_backend == 'sqlite':
+        task_db = Path(settings.task_db_path).expanduser().resolve()
+        preview_db = Path(settings.preview_db_path).expanduser().resolve()
+        destination_db = Path(settings.destination_candidate_db_path).expanduser().resolve()
+        if task_db == preview_db:
+            raise ValueError("preview_db_path 必须与 task_db_path 分开，以隔离预览体积与观测清理")
+        if destination_db in {task_db, preview_db}:
+            raise ValueError("destination_candidate_db_path 必须与任务观测和预览数据库分开")
+    repository = TaskRepository(StorageDatabase(settings.storage_source('observation'), 'observation', schema_prefix=settings.database_schema_prefix), settings.observation_retention_days, settings.observation_max_bytes)
     await asyncio.to_thread(repository.initialize)
     observation = ObservationService(repository, settings.observation_content_limit)
     application.state.task_service = TaskService(repository, observation, get_trip_planner_agent)
     application.state.day_edit_service = DayEditService(repository)
     destination_repository = DestinationCandidateRepository(
-        settings.destination_candidate_db_path,
+        StorageDatabase(settings.storage_source('destination'), 'destination', schema_prefix=settings.database_schema_prefix),
         ttl_seconds=settings.destination_candidate_ttl_seconds,
     )
     await asyncio.to_thread(destination_repository.initialize)
@@ -105,7 +107,7 @@ async def startup_event(application: FastAPI):
         tool_timeout_seconds=settings.planner_tool_timeout_seconds,
     )
     application.state.destination_search_service = destination_search_service
-    preview_repository = PreviewRepository(settings.preview_db_path)
+    preview_repository = PreviewRepository(StorageDatabase(settings.storage_source('preview'), 'preview', schema_prefix=settings.database_schema_prefix))
     await asyncio.to_thread(preview_repository.initialize)
     await asyncio.to_thread(preview_repository.recover_jobs)
     application.state.task_service.preview_completion_resolver = preview_repository.ready_task_completion

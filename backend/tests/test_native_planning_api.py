@@ -43,7 +43,7 @@ class NativePlanningApiTests(unittest.TestCase):
     @contextmanager
     def application(self, *, fail_routes=False, broken_planner=False):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
-            config = Settings(_env_file=None, task_db_path=str(Path(folder)/'tasks.db'),
+            config = Settings(_env_file=None, storage_backend="sqlite", task_db_path=str(Path(folder)/'tasks.db'),
                 preview_db_path=str(Path(folder)/'previews.db'), destination_candidate_db_path=str(Path(folder)/'destinations.db'),
                 planner_enforce_timeouts=False)
             route_map = RouteMap(fail_routes); routes = CurrentRouteService(adapter=AmapContractAdapter(route_map))

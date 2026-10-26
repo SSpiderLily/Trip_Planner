@@ -8,12 +8,12 @@ import hashlib
 import json
 from pathlib import Path
 import secrets
-import sqlite3
 import time
-from typing import Iterator
+from typing import Any, Iterator
 
 from app.models.planning_v4.destination_search import DestinationCategory
 from app.models.planning_v4.facts import FactSource, PlaceFact
+from app.services.relational_storage import StorageDatabase
 
 
 _SCHEMA = """
@@ -60,24 +60,16 @@ class DestinationCandidateRepository:
             raise ValueError("ttl_seconds 必须至少为60秒")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds 必须大于0")
-        self.path = Path(path)
+        self._database = StorageDatabase(path, "destination", timeout_seconds=timeout_seconds)
+        self.path = self._database.path
         self.ttl_seconds = ttl_seconds
         self.timeout_seconds = float(timeout_seconds)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=self.timeout_seconds, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute(f"PRAGMA busy_timeout={int(self.timeout_seconds * 1000)}")
-        return conn
+    def _connect(self):
+        return self._database.connect()
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = self._connect()
-        try:
-            conn.executescript(_SCHEMA)
-        finally:
-            conn.close()
+        self._database.initialize(_SCHEMA)
 
     @classmethod
     def validate_owner_binding(cls, *, task_id: str, plan_id: str, access_token: str) -> None:
@@ -183,7 +175,7 @@ class DestinationCandidateRepository:
             raise ValueError(f"{name} 必须为1到256个字符")
 
     @contextmanager
-    def _write_transaction(self) -> Iterator[sqlite3.Connection]:
+    def _write_transaction(self) -> Iterator[Any]:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")

@@ -29,6 +29,7 @@ def main():
     from app.config import settings
     from app.services.observation_service import ObservationService
     from app.services.task_repository import TaskRepository
+    from app.services.relational_storage import StorageDatabase
     phase = {'name': 'requirements'}
 
     class Measured(MeasuredModel):
@@ -45,7 +46,7 @@ def main():
         phase['name'] = phases[value.stage]
 
     with open('/dev/null', 'w') as quiet, redirect_stdout(quiet), redirect_stderr(quiet):
-        repository = TaskRepository(args.observation_db or settings.task_db_path,
+        repository = TaskRepository(args.observation_db or StorageDatabase(settings.storage_source('observation'), 'observation', schema_prefix=settings.database_schema_prefix),
             retention_days=settings.observation_retention_days, max_bytes=settings.observation_max_bytes)
         # CLI挂接共享仓库，不执行服务启动时的进程恢复/历史清理。
         observation = ObservationService(repository, settings.observation_content_limit)

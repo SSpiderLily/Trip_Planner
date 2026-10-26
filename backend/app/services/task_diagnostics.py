@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
 
 from app.services.observation_service import sanitize
+from app.services.relational_storage import StorageDatabase
 
 
 def _object(value):
@@ -51,12 +52,28 @@ def _details(output):
     return result
 
 
-def build_task_report(database: Path, task_id: str) -> dict:
+@contextmanager
+def _read_connection(source):
+    database = StorageDatabase(source, 'observation')
+    if database.is_postgres:
+        with closing(database.connect(autocommit=True)) as connection:
+            # 同一只读快照；不初始化表、不恢复任务、不获取仓库写锁。
+            connection.execute('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            try:
+                yield connection, 'span_sequence'
+            finally:
+                connection.rollback()
+    else:
+        with closing(sqlite3.connect(database.path.resolve().as_uri() + '?mode=ro', uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute('PRAGMA query_only=ON')
+            connection.execute('BEGIN')
+            yield connection, 'rowid'
+
+
+def build_task_report(database: Path | str, task_id: str) -> dict:
     """不加载项目配置，不初始化仓库，不恢复/清理任务，也不调用模型或地图。"""
-    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
-        connection.execute("BEGIN")  # 同一快照，避免生成中任务前后状态混读。
+    with _read_connection(database) as (connection, span_order):
         task = connection.execute(
             "SELECT task_id,status,started_at,finished_at,error_code,error_step,observation_incomplete "
             "FROM tasks WHERE task_id=?", (task_id,),
@@ -65,7 +82,7 @@ def build_task_report(database: Path, task_id: str) -> dict:
             raise LookupError("TASK_NOT_FOUND")
         rows = [dict(row) for row in connection.execute(
             "SELECT span_id,parent_span_id,name,operation_type,status,started_at,finished_at,input_data,output_data,error,"
-            "input_truncated,output_truncated FROM spans WHERE task_id=? ORDER BY started_at,rowid", (task_id,),
+            f"input_truncated,output_truncated FROM spans WHERE task_id=? ORDER BY started_at,{span_order}", (task_id,),
         )]
 
     by_id = {row["span_id"]: row for row in rows}

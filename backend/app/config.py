@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
 
     # 本地任务与观测存储
+    storage_backend: Literal["postgresql", "sqlite"] = "postgresql"
+    database_url: str = Field(default="", repr=False)
+    database_schema_prefix: str = Field(default="trip", pattern=r"^[a-z][a-z0-9_]{0,31}$")
     task_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "tasks.sqlite3")
     # 预览快照可能很大，必须与受200MiB限制的任务观测库分开。
     preview_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "previews.sqlite3")
@@ -84,6 +87,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=False, extra="ignore"
     )
+
+    def storage_source(self, namespace: str) -> str:
+        paths = {"observation": self.task_db_path, "preview": self.preview_db_path,
+                 "destination": self.destination_candidate_db_path}
+        if namespace not in paths:
+            raise ValueError("未知数据库命名空间")
+        if self.storage_backend == "postgresql":
+            if not self.database_url.startswith(("postgresql://", "postgres://")):
+                raise ValueError("正式PostgreSQL存储需要有效的DATABASE_URL；不会回退到SQLite")
+            return self.database_url
+        return paths[namespace]
 
     def get_cors_origins_list(self) -> List[str]:
         """获取CORS origins列表"""

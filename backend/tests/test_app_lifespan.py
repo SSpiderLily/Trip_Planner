@@ -19,7 +19,7 @@ class AppLifespanTest(unittest.TestCase):
             preview_database = Path(folder) / 'previews.sqlite3'
             destination_database = Path(folder) / 'destination-candidates.sqlite3'
             settings = Settings(
-                _env_file=None,
+                _env_file=None, storage_backend="sqlite",
                 task_db_path=str(database),
                 preview_db_path=str(preview_database),
                 destination_candidate_db_path=str(destination_database),
@@ -66,7 +66,7 @@ class AppLifespanTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / 'tasks.sqlite3'
             preview_database = Path(folder) / 'previews.sqlite3'
-            settings = Settings(_env_file=None, task_db_path=str(database), preview_db_path=str(preview_database))
+            settings = Settings(_env_file=None, storage_backend="sqlite", task_db_path=str(database), preview_db_path=str(preview_database))
             with patch.object(main, 'settings', settings), patch.object(main, 'print_config'), \
                     patch.object(main, 'validate_config', side_effect=ValueError('invalid config')), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -79,7 +79,7 @@ class AppLifespanTest(unittest.TestCase):
     def test_observation_and_preview_databases_cannot_share_a_path(self):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / 'tasks.sqlite3'
-            settings = Settings(_env_file=None, task_db_path=str(database), preview_db_path=str(database))
+            settings = Settings(_env_file=None, storage_backend="sqlite", task_db_path=str(database), preview_db_path=str(database))
             with patch.object(main, 'settings', settings), patch.object(main, 'validate_config'), \
                     patch.object(main, 'print_config'), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(ValueError, 'preview_db_path 必须与 task_db_path 分开'):
@@ -92,7 +92,7 @@ class AppLifespanTest(unittest.TestCase):
             database = Path(folder) / 'tasks.sqlite3'
             preview_database = Path(folder) / 'previews.sqlite3'
             settings = Settings(
-                _env_file=None,
+                _env_file=None, storage_backend="sqlite",
                 task_db_path=str(database),
                 preview_db_path=str(preview_database),
                 destination_candidate_db_path=str(database),

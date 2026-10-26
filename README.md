@@ -94,6 +94,7 @@ python3 dev.py
 - Node.js 16+
 - 高德地图API密钥 (Web服务API和Web端(JS API))
 - LLM API密钥 (OpenAI/DeepSeek等)
+- 可访问的PostgreSQL实例及已有数据库账号；运行环境缺少连接配置时启动失败，不回退SQLite
 
 ### 后端安装
 
@@ -193,7 +194,7 @@ PYTHONPATH=. venv/bin/python scripts/run_collected_planning.py --live --request-
 
 该入口使用现有主/子模型与高德配置，保留有限连接重试和超时策略，输出分阶段耗时、各角色物理请求与usage、规范化快照、草稿、后端报告和独立评估。`null`仍表示未知；生成失败时保留已完成的需求/快照，失败请求用量不补零。CLI已接入P4按日修订：有候选直接修订，无候选通过同一采集会话补查目标日；每日期最多3个业务轮，技术恢复独立计数。输出`initial_result`、最终`result`及`repair`；技术故障或取消时`delivered=false`，普通缺项耗尽保留partial草稿。该研究CLI不执行路线查询或预览保存；正式API使用下述P5装配。Python装配函数仍允许省略`revision_generator`运行P3研究边界。快照的executions是经适配器规范化的工具证据，不含完整供应商回复或模型推理；文件只应用于公开/合成资料的研究，运行时避免传入真实用户资料。当前技术验证、真实样本及独立评审状态见[唯一计划](docs/changes/CHG-003-planning-performance-observability.md#p4-implementation-20261022)。 最新[P4真实专项结果](docs/changes/CHG-003-planning-performance-observability.md#p4-real-validation-20261022)区分受控补查/修订通过与完整初版模型流程失败。
 
-独立入口现已接入现有任务观测库（默认`TASK_DB_PATH`），输出`identity.task_id`和`observation`状态，可通过原任务列表、spans、metrics接口和观测页查询。`--observation-db /tmp/research.sqlite3`可指定独立研究库；挂接已有库不会执行进程恢复，也不会把其他活动任务标为中断。`app/services/collected_planning_service.py`负责装配需求、采集、生成、每次提交校验及独立评估；生成和纯校验核心不依赖仓库。生成耗时包含其内部提交校验，校验另有子span，不能将父子耗时相加。
+独立入口现已接入配置的PostgreSQL任务观测schema，输出`identity.task_id`和`observation`状态，可通过原任务列表、spans、metrics接口和观测页查询。`--observation-db /tmp/research.sqlite3`可指定独立研究库；挂接已有库不会执行进程恢复，也不会把其他活动任务标为中断。`app/services/collected_planning_service.py`负责装配需求、采集、生成、每次提交校验及独立评估；生成和纯校验核心不依赖仓库。生成耗时包含其内部提交校验，校验另有子span，不能将父子耗时相加。
 
 每次物理模型请求的输出记录`model_configuration`（SDK发送前解析的model、temperature、reasoning_effort和`output_limits`参数名/数值）及`model_call`安全诊断（结束原因、异常类型链、HTTP状态、供应商码和可用请求ID）。这些参数表示实际发送值，不证明网关执行了请求额度或模型最大能力。无供应商信息时仍为null，不保存异常原文、完整响应、消息或推理。任务失败时CLI还输出相应`failure_details`，未知usage不补零；观测写入失败标记`incomplete`，不改业务结果。独立任务只登记观测状态，不生成正式预览或旧TripPlan结果；行程文件仍由CLI输出，旧`/result`接口不承载该研究结果。真实及离线证据见[分层观测补齐](docs/changes/CHG-003-planning-performance-observability.md#modular-observation-20261021)。
 
@@ -229,6 +230,29 @@ PYTHONPATH=. venv/bin/python scripts/run_collected_planning.py --live --request-
 ```bash
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+### PostgreSQL配置与旧数据迁移
+
+三个仓库共用`DATABASE_URL`，分别使用前缀加`_observation`、`_preview`、`_destination`的schema。账号需要在已有库内创建这些schema及表/函数/触发器的权限，不需要超级用户、建库或建角色权限。本机与生产必须使用不同前缀；仍只运行单个后端进程。SQLite路径配置仅保留给显式离线测试和旧数据备份。
+
+本机复用服务器开发库时，先建立SSH隧道，再启动后端；私有连接配置使用本机端口15432。隧道停止后数据库不可用，不自动改用本地旧库。生产连接服务器本机5432，不依赖这条隧道。
+
+```bash
+ssh -N -L 127.0.0.1:15432:127.0.0.1:5432 centos-cloud
+```
+
+迁移前停止所有写入并退出旧后端，用SQLite backup API制作三个一致性备份，保留代码、私有配置及回滚副本。以下命令从项目根目录运行，连接串和schema前缀预先配置在私有环境中；不在参数里传密码。
+
+```bash
+backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3
+# 只读源结构检查通过、目标schema为空后，显式执行：
+backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3 --apply --report /private/migration.json
+backend/venv/bin/python backend/scripts/migrate_to_postgres.py --tasks /backup/tasks.sqlite3 --previews /backup/previews.sqlite3 --candidates /backup/destination_candidates.sqlite3 --verify-only --report /private/verification.json
+```
+
+迁移拒绝非空目标，逐表核对数量和内容哈希，保留凭据哈希、版本、历史字段及序列高水位。复制失败回滚业务数据，可能保留预先准备的空结构；源备份不删除。核对通过后才切换正式配置。若新库已接收用户写入，不得直接回退旧SQLite而丢弃新数据，应先停写并保全PostgreSQL。当前实际切换与验证状态见[唯一Change](docs/changes/CHG-003-planning-performance-observability.md#postgresql-migration-20261026)。
+
+真实PostgreSQL回归通过私有`TRIP_TEST_DATABASE_URL`连接开发库，测试创建并清理随机schema；无配置时跳过不能算PG验收。专项模块为`test_postgres_tasks`、`test_postgres_preview`、`test_postgres_candidates`、`test_postgres_migration`、`test_postgres_observation_api`。数据库中断、坏JSON、事务回滚、跨任务凭据及迁移一致性均有覆盖；不触发真实模型或地图调用。
 
 ### 前端安装
 
@@ -297,7 +321,7 @@ npm run dev
 
 v3增加首尾到离约束及当天编辑。普通活动窗口默认为09:00—19:00，到达后和离开前各预留系统缓冲；晚到、早离不强行填满。路线或开放信息缺失时明确提示；初次生成没有已核实景点不能交付，但用户编辑后可保留空白日期。
 
-创建任务仍独立于HTTP连接在线程池执行，SQLite保留任务、结果和Span。局部编辑基于服务端签发的快照和操作列表，不接受客户端改写全局条件、金额或参考时长。连续操作合并处理，旧响应不覆盖新列表，重排失败可重试且不会恢复过期路线。
+创建任务仍独立于HTTP连接在线程池执行，PostgreSQL保留任务、结果和Span。局部编辑基于服务端签发的快照和操作列表，不接受客户端改写全局条件、金额或参考时长。连续操作合并处理，旧响应不覆盖新列表，重排失败可重试且不会恢复过期路线。
 
 地图查询保留数量限制；新规划的超时由 `PLANNER_ENFORCE_TIMEOUTS` 控制，默认关闭。免费数据不可用时保留缺失状态，不自动启用付费服务。天气只按查询覆盖日期展示；住宿区域不冒充具体酒店，地图顺序示意不冒充实际道路导航。营业预约、酒店房价等内容以供应商实际返回为限，不保证全面覆盖。费用只汇总可解析的明确数值；价格区间或无法解释的单位保留为缺失，不取均值估算。
 
@@ -348,14 +372,16 @@ Token逐次调用与角色汇总统一显示“主智能体、景点子智能体
 
 | 配置 | 默认值 |
 | --- | --- |
-| `TASK_DB_PATH` | `backend/data/tasks.sqlite3`（默认解析为绝对路径） |
+| `STORAGE_BACKEND` | `postgresql`；仅离线测试显式使用`sqlite` |
+| `DATABASE_URL` | 必填；PostgreSQL连接串，仅放私有配置，不写命令行或Git |
+| `DATABASE_SCHEMA_PREFIX` | `trip`；本机`trip_local`、生产`trip_prod`隔离 |
 | `OBSERVATION_RETENTION_DAYS` | 7 天 |
-| `OBSERVATION_MAX_BYTES` | 209715200（200 MiB 治理目标，包含 WAL/SHM） |
+| `OBSERVATION_MAX_BYTES` | 209715200（200 MiB 观测逻辑内容治理目标，不是整个数据库物理大小） |
 | `OBSERVATION_CONTENT_LIMIT` | 65536（单步骤输入、输出各 64 KiB） |
 
 启动及接收新任务前清理过期/超容量的已结束任务，连同行程和步骤一起删除；活动任务保留。无法腾出空间时停止保存观测详情并提示不完整。内容先脱敏后限长；截断有标记，未知温度与未知用量不填零。数据库及辅助文件不入 Git。
 
-观测记录缺失时，后端控制台输出`[observation]`分类、异常类型及SQLite数值错误码，不输出异常原文。历史缺失记录没有原因日志时，不能倒推出确定根因。观测写入失败不改变业务判定；任务结果保存失败不能显示为成功。数据库无法写入时，当前进程仅保留有界错误摘要，重启后无法还原未落盘内容。输入校验拒绝仍返回 422，拒绝记录展示后置；第一版不提供自动重试、取消或重放。Token 只统计供应商实际返回的用量，不估算、不计价；历史用量与供应商未返回的字段保持未知，缺失用量与步骤记录不完整分别提示。工程指标不代表行程质量或所有价格信息都经过核验。
+观测记录缺失时，后端控制台输出`[observation]`分类、异常类型及可用的数据库错误分类，不输出异常原文。历史缺失记录没有原因日志时，不能倒推出确定根因。观测写入失败不改变业务判定；任务结果保存失败不能显示为成功。数据库无法写入时，当前进程仅保留有界错误摘要，重启后无法还原未落盘内容。输入校验拒绝仍返回 422，拒绝记录展示后置；第一版不提供自动重试、取消或重放。Token 只统计供应商实际返回的用量，不估算、不计价；历史用量与供应商未返回的字段保持未知，缺失用量与步骤记录不完整分别提示。工程指标不代表行程质量或所有价格信息都经过核验。
 
 优化前基准及R1—R3的合成请求、源码归档、调用用量、失败和质量复核均保留在不入Git的 `backend/data/`。性能实验采集和运行脚本已随代码回滚撤回，历史快照可追溯；实验结论见[学习日志](docs/learning-log.md#不限思考预算实验r32026-10-09)，当前回滚与重新规划状态见CHG-003。历史实验数据库保留新增元数据列，恢复后的代码继续使用原有Token统计；不删除数据或改写旧报告。
 
@@ -410,7 +436,7 @@ PYTHONPATH=. venv/bin/python scripts/query_current_routes.py --live --input-file
 
 已知人均消费纯函数为`aggregate_reference_costs(planning_input, draft, facts)`：返回`ReferenceCostSummary`和按日明细，后台明细保留景点同日去重、餐次分别计及酒店参考事实；结果页和导出汇总已知景点、餐饮及住宿明细（住宿按每日一晚，离开日不计住宿），各地点独立展示已知消费（酒店按人均每晚），三类地点未知均显示“未查询到可供参考的人均消费”。原生候选搜索请求高德扩展字段，消费缺失仍保留未知；不另查入住日期报价，不自动乘旅行天数。调用方按覆盖状态显示未知/部分已知，不能把全未知的小计0显示为“免费”或“总旅费0”；只使用cost已有值，不推算人数或全程预算是否足够。范围见[CHG-003消费汇总](docs/changes/CHG-003-planning-performance-observability.md#reference-cost)。
 
-独立预览存储模块为`PreviewRepository`：初始化专用SQLite路径后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。完整PreviewSnapshot校验来源、引用图与版本；单独ItineraryPreview只验证模型结构和存储身份/版本。新快照不读写timing；保存失败不覆盖上次成功保存，待查交通仍可保存和还原。损坏或不支持的数据明确拒绝，不转换历史数据。v4任务API和浏览器已单独接入，默认首页已使用新需求表单；范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
+独立预览存储模块为`PreviewRepository`：初始化独立的PostgreSQL预览schema后，使用`create/get_preview/replace_preview`维护完整草稿快照，`save_final`按当前存储版本保存最终结果，`read_final`读取最近成功保存。完整PreviewSnapshot校验来源、引用图与版本；单独ItineraryPreview只验证模型结构和存储身份/版本。新快照不读写timing；保存失败不覆盖上次成功保存，待查交通仍可保存和还原。损坏或不支持的数据明确拒绝，不转换历史数据。v4任务API和浏览器已单独接入，默认首页已使用新需求表单；范围见[CHG-003预览存储](docs/changes/CHG-003-planning-performance-observability.md#preview-storage)。
 
 每日检查使用`validate_daily_plan(planning_input, draft, facts, candidates)`，保留地点覆盖、需求与来源/引用检查；`build_day_summaries(planning_input, draft, facts)`仅汇总已查到的交通耗时及未知路段。旧F07活动时间服务已删除，不再检查营业或推算返程可行性。只因必需时段缺真实地点启动按日补查，技术恢复不占业务轮；规则与专项证据见[CHG-003 S05](docs/changes/CHG-003-planning-performance-observability.md#s05-light-validation-repair)。地点修订只做轻量校验；独立交通交付及任务状态规则见[CHG-003 S07](docs/changes/CHG-003-planning-performance-observability.md#s07-place-first-pipeline)。
 
@@ -477,7 +503,7 @@ CC BY-NC-SA 4.0
 
 `POST /api/trip/v4/tasks`接收`planning_v4.TripRequest`，立即返回task_id、plan_id和一次性返回的access_token；后端负责需求解释和规则，不接受客户端提供模型整理结果。`GET /api/trip/v4/tasks/{task_id}`及其`/preview`使用`Authorization: Bearer <access_token>`；访问标识不放URL。状态、草稿和消费摘要使用同一预览版本。
 
-预览库通过`PREVIEW_DB_PATH`配置，默认`backend/data/previews.sqlite3`，必须与`TASK_DB_PATH`分开。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
+预览存放在`${DATABASE_SCHEMA_PREFIX}_preview`，观测存放在同前缀`_observation`；两者共用连接配置、独立清理。观测清理不处理预览库；草稿生成不自动更新最终结果。进程退出后未完成任务标中断，已ready草稿可恢复。旧`/tasks/{id}/result`对v4任务返回明确的预览接口提示。
 
 默认应用已注册`NativePreviewPipeline`，v4接口运行主需求整理→原生三角色采集→每日提案→地点校验与按日修订→可读预览→独立相邻交通；首页已接入新需求表单。地点先交付，交通等待或失败不阻塞查看、编辑和导出。独立测试应用未注册pipeline时返回503。实施与故障验收见[CHG-003 S07](docs/changes/CHG-003-planning-performance-observability.md#s07-place-first-pipeline)。
 
@@ -539,7 +565,7 @@ CC BY-NC-SA 4.0
 
 `POST .../destinations/select`接收服务端candidate_token、day_id、slot_id、两项期望版本、command_id和client_ref，成功返回同编辑API的202响应。请求结果不明时必须原样重放；过期新候选返回`DESTINATION_CANDIDATE_UNAVAILABLE`，重新搜索后再选择。两个接口均使用任务Bearer。
 
-`DESTINATION_CANDIDATE_DB_PATH`默认`backend/data/destination_candidates.sqlite3`，必须与预览/观测库分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。
+地点候选存放在`${DATABASE_SCHEMA_PREFIX}_destination`，与预览/观测schema分开；`DESTINATION_CANDIDATE_TTL_SECONDS`默认1800秒。校验及验收边界见[CHG-003](docs/changes/CHG-003-planning-performance-observability.md#v4-destinations)。
 
 
 每日安排初版与单日修订的结构校验会在观测中保留安全字段路径、错误类型及固定修复指引；超出8条时保留总数和截断标记，不保存完整模型回答。初版局部修复与格式修复共用一次额度；单日修订协议及按日最多三轮业务补查保持原规则。验收见[安全校验诊断](docs/changes/CHG-003-planning-performance-observability.md#v4-plan-validation-diagnostics)及[局部修复](docs/changes/CHG-003-planning-performance-observability.md#v4-local-plan-repair)。
@@ -548,13 +574,13 @@ CC BY-NC-SA 4.0
 
 主派发遇到区域或偏好引用错误时，会把具体条件、可用引用和原草案交给模型纠正；后端只合并受影响的引用字段，保留其他任务、目标、日期、事实和餐次锚点。该纠正与JSON格式修复共享一次额外调用；开启超时策略时也共享原调用期限。若纠正仍失败，但经重新校验的部分结果已为本次缺项提供可用候选，F09会在同一轮继续修订，不单独为这次引用错误多占一轮；没有可用候选时保持原上限并交付缺项。其他技术错误、来源损坏或身份不一致不套用此恢复策略。观测中的`master.decision.reference_repair`记录纠正条件，`repair.collection_recovery`记录继续/跳过修订及候选覆盖数量；实现与验证见[派发引用恢复](docs/changes/CHG-003-planning-performance-observability.md#v4-dispatch-reference-recovery)。
 
-排查一份结果时，先只读导出该任务的诊断，不重新提交规划。以下命令从项目根目录运行；`--db`可指定观测库，默认`backend/data/tasks.sqlite3`，`--format json`可导出机器可读报告。
+排查一份结果时，先只读导出该任务的诊断，不重新提交规划。以下命令从项目根目录运行；现行库使用`--postgres`读取私有配置；`--db /path/tasks.sqlite3`仅用于只读旧备份（未指定选项时也使用旧默认备份路径）。`--format json`可导出机器可读报告。
 
 ```bash
-backend/venv/bin/python backend/scripts/diagnose_task.py <task_id>
+backend/venv/bin/python backend/scripts/diagnose_task.py <task_id> --postgres
 ```
 
-新增诊断沿用SQLite观测：公共字段记录任务/父子调用标识、开始和结束时间、执行状态；输出记录`schema_version=1`、`stage`、`outcome`。阶段返回、校验通过、每轮采用及最终交付质量分别记录；`succeeded`只说明调用正常结束。`planning.v4.run`汇总初版每天实际景点、用餐、自由活动、缺失时段和补查停止原因，不代表后续编辑或数据库保存结果。错误只保留固定条件、安全字段路径及该条件所需的值，例如两个出发时刻。主派发目前细分区域/偏好引用的四种条件，其他未细分错误仍显示错误码并提示证据缺口。
+新增诊断沿用任务观测记录：公共字段记录任务/父子调用标识、开始和结束时间、执行状态；输出记录`schema_version=1`、`stage`、`outcome`。阶段返回、校验通过、每轮采用及最终交付质量分别记录；`succeeded`只说明调用正常结束。`planning.v4.run`汇总初版每天实际景点、用餐、自由活动、缺失时段和补查停止原因，不代表后续编辑或数据库保存结果。错误只保留固定条件、安全字段路径及该条件所需的值，例如两个出发时刻。主派发目前细分区域/偏好引用的四种条件，其他未细分错误仍显示错误码并提示证据缺口。
 
 报告按父子调用关联日期、轮次与版本，列出首条已记录异常、阶段经过、逐轮决策、交付质量及缺失/截断提示。它不读取完整请求或模型回答，不恢复、清理或修改任务；旧记录缺失时显示未知，不能用报告替代完整响应回放。修复流程为：固定一个任务的证据 → 最小离线复现 → 单项修复 → 同一用例回归；当前执行与遗留项见上述诊断记录。
 

@@ -1,4 +1,4 @@
-"""独立的 SQLite 预览草稿与最近成功保存仓库。
+"""独立的关系数据库预览草稿与最近成功保存仓库。
 
 完整 PreviewSnapshot 验证来源与引用图；单独 ItineraryPreview 只验证模型结构和存储身份。
 每条草稿和最终结果均以一个完整 JSON snapshot 保存，避免事实、候选、报告和行程跨版本混写。
@@ -17,6 +17,7 @@ import hmac
 
 from pydantic import ValidationError
 
+from app.services.relational_storage import StorageDatabase
 from app.models.planning_v4.plan import ItineraryPreview
 from app.models.planning_v4.cost import ReferenceCostSummary
 from app.models.planning_v4_preview import PreviewSnapshot
@@ -147,16 +148,13 @@ class PreviewRepository:
             raise ValueError("receipt_limit 必须大于 0")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds 必须大于 0")
-        self.path = Path(path)
+        self.database = StorageDatabase(path, namespace="preview", timeout_seconds=timeout_seconds)
+        self.path = self.database.path
         self.receipt_limit = int(receipt_limit)
         self.timeout_seconds = float(timeout_seconds)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=self.timeout_seconds, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute(f"PRAGMA busy_timeout={int(self.timeout_seconds * 1000)}")
-        return conn
+        return self.database.connect()
 
     @contextmanager
     def _write_transaction(self) -> Iterator[sqlite3.Connection]:
@@ -182,17 +180,17 @@ class PreviewRepository:
 
     def initialize(self) -> None:
         """创建独立表；不恢复或清理任务表，也不依赖 tasks 外键。"""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.database.initialize(SCHEMA)
         conn = self._connect()
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(SCHEMA)
+            if not self.database.is_postgres:
+                conn.execute("PRAGMA journal_mode=WAL")
             for table in ("preview_drafts", "preview_finals"):
-                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                existing = self.database.columns(conn, table)
                 for field in ("cost_json",):
                     if field not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
-            job_fields = {row["name"] for row in conn.execute("PRAGMA table_info(preview_jobs)")}
+            job_fields = self.database.columns(conn, "preview_jobs")
             if "generation_finished_at" not in job_fields:
                 # 老任务无法可靠还原首屏完成时间，保留 NULL；不使用会被补齐/重启更新的 updated_at 猜测。
                 conn.execute("ALTER TABLE preview_jobs ADD COLUMN generation_finished_at TEXT")
@@ -487,7 +485,7 @@ class PreviewRepository:
             PreviewSnapshot, tuple[str, ...], tuple[str, ...]
         ]],
     ) -> PreviewEditWriteResult:
-        """在一个 SQLite 写事务内检查收据、CAS、改稿、收据和路线任务。"""
+        """在一个写事务内检查收据、CAS、改稿、收据和路线任务。"""
         command_id = self._required_id(command.command_id, "command_id")
         expected_store_version = self._positive_version(expected_store_version, "expected_store_version")
         request_hash = self._fingerprint({
@@ -773,7 +771,7 @@ class PreviewRepository:
         with self._write_transaction() as conn:
             job_row = conn.execute(
                 """SELECT * FROM preview_route_jobs WHERE plan_id=? AND state='pending'
-                   AND (? IS NULL OR calculation_id=?)
+                   AND (CAST(? AS TEXT) IS NULL OR calculation_id=?)
                    ORDER BY created_at DESC LIMIT 1""",
                 (plan_id, calculation_id, calculation_id),
             ).fetchone()
@@ -1319,8 +1317,8 @@ class PreviewRepository:
 
     def _prune_receipts(self, conn: sqlite3.Connection, plan_id: str) -> None:
         expired = conn.execute(
-            """SELECT mutation_seq FROM preview_mutations WHERE plan_id=?
-               ORDER BY mutation_seq DESC LIMIT -1 OFFSET ?""",
+            f"""SELECT mutation_seq FROM preview_mutations WHERE plan_id=?
+                ORDER BY mutation_seq DESC {'OFFSET ?' if self.database.is_postgres else 'LIMIT -1 OFFSET ?'}""",
             (plan_id, self.receipt_limit),
         ).fetchall()
         if expired:
@@ -1331,8 +1329,8 @@ class PreviewRepository:
 
     def _prune_restore_receipts(self, conn: sqlite3.Connection, plan_id: str) -> None:
         expired = conn.execute(
-            """SELECT restore_seq FROM preview_restore_receipts WHERE plan_id=?
-               ORDER BY restore_seq DESC LIMIT -1 OFFSET ?""",
+            f"""SELECT restore_seq FROM preview_restore_receipts WHERE plan_id=?
+                ORDER BY restore_seq DESC {'OFFSET ?' if self.database.is_postgres else 'LIMIT -1 OFFSET ?'}""",
             (plan_id, self.receipt_limit),
         ).fetchall()
         if expired:
@@ -1343,8 +1341,8 @@ class PreviewRepository:
 
     def _prune_edit_receipts(self, conn: sqlite3.Connection, plan_id: str) -> None:
         expired = conn.execute(
-            """SELECT edit_seq FROM preview_edit_receipts WHERE plan_id=?
-               ORDER BY edit_seq DESC LIMIT -1 OFFSET ?""",
+            f"""SELECT edit_seq FROM preview_edit_receipts WHERE plan_id=?
+                ORDER BY edit_seq DESC {'OFFSET ?' if self.database.is_postgres else 'LIMIT -1 OFFSET ?'}""",
             (plan_id, self.receipt_limit),
         ).fetchall()
         if expired:
