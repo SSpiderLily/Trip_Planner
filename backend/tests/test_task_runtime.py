@@ -246,3 +246,33 @@ class HttpLifecycleTest(unittest.TestCase):
                 repo.create('failed',{});repo.fail('failed','TEST_FAILURE','测试失败')
                 self.assertEqual(client.get('/api/trip/tasks/failed').status_code,200)
                 self.assertEqual(client.get('/api/trip/tasks/failed/result').json()['detail']['code'],'TASK_FAILED')
+
+class TaskServiceShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_removes_completed_snapshot_without_waiting_for_queued_callbacks(self):
+        from unittest.mock import AsyncMock
+        service=TaskService(None,None,None)
+        done=asyncio.get_running_loop().create_future();done.set_result(None)
+        service.background.add(done)
+        # 模拟任务已完成，但hold的移除回调仍排在事件循环队列中。
+        handle=asyncio.get_running_loop().call_soon(service.background.discard,done)
+        gather=AsyncMock(side_effect=[None,AssertionError('close repeated an already-completed snapshot')])
+        try:
+            with patch('app.services.task_service.asyncio.gather',gather):await service.close()
+        finally:handle.cancel()
+        gather.assert_awaited_once()
+        self.assertFalse(service.background)
+        self.assertFalse(service.accepting)
+
+    async def test_close_waits_for_child_tasks_added_while_waiting(self):
+        service=TaskService(None,None,None)
+        finished=[]
+        async def child():
+            await asyncio.sleep(0)
+            finished.append('child')
+        async def parent():
+            service.hold(child())
+            finished.append('parent')
+        service.hold(parent())
+        await service.close()
+        self.assertEqual(finished,['parent','child'])
+        self.assertFalse(service.background)

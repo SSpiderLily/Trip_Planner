@@ -363,4 +363,8 @@ class TaskService:
     async def close(self):
         self.accepting = False
         while self.background:
-            await asyncio.gather(*list(self.background), return_exceptions=True)
+            pending = tuple(self.background)
+            await asyncio.gather(*pending, return_exceptions=True)
+            # gather已确认这批任务完成；不等待可能尚未调度的移除回调。
+            # 等待期间新加入的任务不在pending内，下一轮继续等待。
+            self.background.difference_update(pending)
