@@ -2,6 +2,8 @@
 
 ## 当前状态
 
+- 本轮Git发布（2026-10-26）：5cd1f2c关闭等待修复、23d51c0按任务鉴权观测、9753240三个仓库PostgreSQL迁移已推送至origin/codex/task-scoped-observability；远端refs/heads/codex/task-scoped-observability精确核对为9753240f2e8a56ec5c11a46b9c46b6c9367e919a。未合并或推送main，未创建PR。该实现代码已在生产部署并按上文迁移验收；本条随后作为文档提交同步。工作区原有空库方案草案保留未暂存，不夹带本轮提交。
+
 - PostgreSQL当前执行（2026-10-26）：按用户后续确认，三个库全部替换并迁移历史数据，复用已有开发库账号。本机11表1820行已迁移并逐表核对；完整禁网回归与真实PG专项通过。生产11表292行已迁移并在重启后再次核对，后端健康、公网鉴权与旧接口拦截通过，181份运行源码哈希匹配。生产发布已完成；Git发布结果以分支核对为准。当前范围与证据见[迁移执行](#postgresql-migration-20261026)；此前空库草案已被后续决定替代。
 
 - 生产观测404只读诊断（2026-10-26）：用户提供`http://124.223.69.7/trip/observability?view=trace`。实测页面200；生产前端api-Dd5XEgC5.js使用baseURL=/trip，观测路径/api/trip/tasks正确。`/trip/health`返回healthy JSON，`GET /trip/api/trip/v4/tasks`返回405 JSON、无参数`GET /trip/api/poi/hotels`返回422 JSON，说明这些路径可达应用。`GET /trip/api/trip/tasks?limit=1&offset=0`及其尾斜杠路径均返回Nginx HTML 404，区别于FastAPI任务不存在的JSON。随后按用户要求通过现有centos-cloud连接只读核对实际配置：`/etc/nginx/conf.d/personal-web.conf`中的`location ~ ^/trip/api/trip/(tasks(?:/|$)|v4/tasks/[^/]+/recover-local-access/?$)`明确return 404，同时保留普通/trip/api/到127.0.0.1:8001/api/的转发。服务器本机GET /api/trip/tasks?limit=1返回200且返回1条记录（未导出任务内容），/health为healthy；根因为明确屏蔽观测路径的Nginx规则，而非后端无路由或任务为空。规则也屏蔽本机凭据恢复路径，不能为开放观测而一并删除保护；若需访问，优先SSH通道或另行设计带身份验证的入口。未核实生产部署版本或直接读取生产数据库；未修改服务器、重启服务、提交规划或调用模型/地图，未提交或推送。本次仅同步诊断状态；本条线上响应证据不等于最新main部署验收。响应头与有限诊断产物保存在/tmp/trip-prod-*。
