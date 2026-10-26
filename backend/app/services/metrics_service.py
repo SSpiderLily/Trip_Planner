@@ -3,6 +3,8 @@ from datetime import datetime
 
 
 ROLE_NAMES = {
+    'master': '主智能体', 'attractions': '景点子智能体',
+    'dining': '餐饮子智能体', 'lodging': '住宿子智能体',
     'collect_sights': '候选搜集', 'collect_support': '候选搜集',
     'arrange_layout': '行程安排', 'arrange_final': '行程安排',
     'repair_layout': '行程安排', 'repair_final': '行程安排',
@@ -62,6 +64,9 @@ def call_summary(rows):
 
 
 def role_for(row, by_id):
+    recorded_role = row.get('role')
+    if recorded_role in ROLE_NAMES:
+        return ROLE_NAMES[recorded_role]
     parent = row['parent_span_id']
     visited = set()
     while parent and parent not in visited:
@@ -70,7 +75,7 @@ def role_for(row, by_id):
         if ancestor is None:
             break
         if ancestor['operation_type'] == 'agent':
-            name = ancestor['name'].removeprefix('agent.')
+            name = ancestor['name'].removeprefix('native.').removeprefix('agent.')
             return ROLE_NAMES.get(name, ancestor['name'])
         parent = ancestor['parent_span_id']
     return '未归属'

@@ -50,6 +50,33 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual([item['name'] for item in metrics['tool_details']], ['amap_maps_weather', 'custom'])
         self.assertEqual(metrics['tool']['unknown'], 1)
 
+    def test_native_roles_use_recorded_role_and_legacy_parent_names(self):
+        spans = [row('parent', None, 'native.agent.attractions', 'agent')]
+        for role in ('master', 'attractions', 'dining', 'lodging'):
+            spans.append({**row(role, 'parent', 'llm.native_tool_loop', 'llm'), 'role': role})
+        spans.append(row('legacy', 'parent', 'llm.native_tool_loop', 'llm'))
+        spans.append({**row('unknown', None, 'llm.native_tool_loop', 'llm'), 'role': 'future_role'})
+        metrics = build_metrics({'status': 'succeeded'}, spans)
+        self.assertEqual([(x['name'], x['total']) for x in metrics['model_details']], [
+            ('主智能体', 1), ('景点子智能体', 2), ('餐饮子智能体', 1), ('住宿子智能体', 1), ('未归属', 1)])
+
+    def test_repository_projects_only_known_roles_for_metrics_and_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = TaskRepository(Path(directory) / 'roles.sqlite3')
+            repo.initialize()
+            repo.create('task', {})
+            for index, payload in enumerate(('{"role":"master","messages":["private"]}',
+                                             '{"role":"dining"}', '{"role":"private"}',
+                                             'broken json', 'null', '["master"]')):
+                repo.begin_span((str(index), 'task', None, 'llm.native_tool_loop', 'llm',
+                                 '2026-01-01T00:00:00+00:00', payload, 0))
+            metrics = repo.metric_spans('task')
+            self.assertEqual([x.get('role') for x in metrics], ['master', 'dining', None, None, None, None])
+            summaries = repo.spans('task')
+            self.assertEqual([x.get('role_name') for x in summaries],
+                             ['主智能体', '餐饮子智能体', '未归属', '未归属', '未归属', '未归属'])
+            self.assertTrue(all({'input_data', 'output_data', 'error'}.isdisjoint(x) for x in summaries + metrics))
+
     def test_zero_denominator_and_total_derived_only_from_both_fields(self):
         metrics = build_metrics({'status': 'failed'}, [
             row('one', None, 'llm.invoke', 'llm', status='interrupted', input_tokens=0, output_tokens=2),

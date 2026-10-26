@@ -32,7 +32,7 @@
 import { computed, ref } from 'vue'
 import type { SpanSummary, TaskMetrics, CallMetrics } from '@/types'
 import { stepName } from '@/services/api'
-import { ancestors, buildForest, durationMs, isCall, milliseconds, spanState, tokenText, tokenTotal, toolRows } from '@/services/observationView'
+import { spanRole, buildForest, durationMs, isCall, milliseconds, spanState, tokenText, tokenTotal, toolRows } from '@/services/observationView'
 const props = defineProps<{ view: 'tokens' | 'tools' | 'errors'; spans: SpanSummary[]; metrics: TaskMetrics; selectedId: string }>()
 defineEmits<{ select: [id: string]; locate: [id: string] }>()
 const sort = ref<'total' | 'failed' | 'duration'>('total'), openTool = ref('')
@@ -40,7 +40,7 @@ const forest = computed(() => buildForest(props.spans))
 const models = computed(() => forest.value.ordered.filter(s => s.operation_type === 'llm'))
 const maximum = computed(() => Math.max(1, ...models.value.map(s => (s.input_tokens ?? 0) + (s.output_tokens ?? 0))))
 const height = (value: number) => `${value / maximum.value * 160}px`
-function role(span: SpanSummary) { const agent = ancestors(forest.value, span.span_id).reverse().map(id => forest.value.nodes.get(id)!.span).find(s => s.operation_type === 'agent'); return agent ? stepName(agent.name) : '未归属' }
+function role(span: SpanSummary) { return spanRole(forest.value, span, stepName) }
 const errors = computed(() => forest.value.ordered.filter(s => isCall(s) && ['failed', 'interrupted'].includes(s.status)))
 const tools = computed(() => toolRows(forest.value.ordered).sort((a, b) => (b[sort.value] ?? -1) - (a[sort.value] ?? -1) || a.name.localeCompare(b.name)))
 const rate = (value: number | null) => value === null ? '暂无数据' : `${(value * 100).toFixed(1)}%`

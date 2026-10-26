@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from .metrics_service import role_for
 
 
 def now():
@@ -44,6 +45,10 @@ CREATE INDEX IF NOT EXISTS tasks_by_created ON tasks(created_at);
 """
 SUMMARY = 'task_id,status,created_at,started_at,finished_at,interruption_detected_at,error_code,error_message,error_step,observation_incomplete'
 SPAN_SUMMARY = 'span_id,task_id,parent_span_id,name,operation_type,status,started_at,finished_at,input_truncated,output_truncated,input_tokens,output_tokens,total_tokens'
+# 仅投影已知角色标识，不把完整输入载入列表或指标；兼容损坏/截断的历史JSON。
+SPAN_ROLE = """CASE WHEN json_valid(input_data) THEN
+ CASE WHEN json_extract(input_data, '$.role') IN ('master','attractions','dining','lodging')
+ THEN json_extract(input_data, '$.role') END END AS role"""
 
 
 class TaskRepository:
@@ -174,15 +179,17 @@ class TaskRepository:
 
     def spans(self, task_id):
         with self.connection() as conn:
-            return [dict(row) for row in conn.execute(f'SELECT {SPAN_SUMMARY} FROM spans WHERE task_id=? ORDER BY started_at', (task_id,))]
+            rows = [dict(row) for row in conn.execute(f'SELECT {SPAN_SUMMARY},{SPAN_ROLE} FROM spans WHERE task_id=? ORDER BY started_at', (task_id,))]
+        by_id = {row['span_id']: row for row in rows}
+        return [{**row, 'role_name': role_for(row, by_id)} for row in rows]
 
     def metric_spans(self, task_id):
         """指标查询不读取完整输入、输出或异常内容。"""
         with self.connection() as conn:
             if conn.execute('SELECT 1 FROM tasks WHERE task_id=?', (task_id,)).fetchone() is None:
                 return None
-            return [dict(row) for row in conn.execute('''SELECT span_id,parent_span_id,name,operation_type,status,
-                started_at,finished_at,input_tokens,output_tokens,total_tokens
+            return [dict(row) for row in conn.execute(f'''SELECT span_id,parent_span_id,name,operation_type,status,
+                started_at,finished_at,input_tokens,output_tokens,total_tokens,{SPAN_ROLE}
                 FROM spans WHERE task_id=? ORDER BY started_at''', (task_id,))]
 
     def span(self, task_id, span_id):

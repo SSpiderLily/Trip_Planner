@@ -62,6 +62,12 @@ export function ancestors(forest: TraceForest, id: string) {
   while (parent && !visited.has(parent)) { visited.add(parent); ids.push(parent); parent = forest.nodes.get(parent)?.parent }
   return ids.reverse()
 }
+export function spanRole(forest: TraceForest, span: SpanSummary, label: (name: string) => string): string {
+  if (span.role_name) return span.role_name
+  const agent = ancestors(forest, span.span_id).reverse()
+    .map(id => forest.nodes.get(id)!.span).find(row => row.operation_type === 'agent')
+  return agent ? label(agent.name) : '未归属'
+}
 export type TraceFilter = 'all' | 'model' | 'errors' | 'slow'
 export function traceRows(forest: TraceForest, expanded: Set<string>, filter: TraceFilter, query: string, label: (name: string) => string) {
   const search = query.trim().toLocaleLowerCase(), filtering = filter !== 'all' || !!search

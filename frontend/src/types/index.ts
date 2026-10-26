@@ -116,6 +116,7 @@ export interface TaskStatus {
   current_step?: { span_id: string; name: string; started_at: string } | null
 }
 export interface SpanSummary {
+  role_name?: string
   span_id: string
   task_id: string
   parent_span_id: string | null

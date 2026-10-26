@@ -72,3 +72,12 @@ const childOfCycle = v.buildForest([span('child', 'tool', 0, 1, 'cycle-a'), span
 assert.equal(childOfCycle.nodes.get('child').parent, 'cycle-a', 'break the cycle itself, preserve innocent child links')
 assert.equal(v.traceRows(childOfCycle, new Set(childOfCycle.nodes.keys()), 'all', '', n => n).length, 3)
 console.log('observationView: 53 boundary assertions passed')
+
+const nativeMaster = { ...span('master-call', 'llm'), role_name: '主智能体' }
+assert.equal(v.spanRole(v.buildForest([nativeMaster]), nativeMaster, n => n), '主智能体')
+const nativeChild = { ...span('child-call', 'llm'), role_name: '餐饮子智能体' }
+assert.equal(v.spanRole(v.buildForest([nativeChild]), nativeChild, n => n), '餐饮子智能体')
+const legacyAgent = { ...span('legacy-agent', 'agent'), name: 'agent.collect_sights' }
+const legacyCall = span('legacy-call', 'llm', 0, 1, 'legacy-agent')
+assert.equal(v.spanRole(v.buildForest([legacyAgent, legacyCall]), legacyCall, () => '候选搜集'), '候选搜集')
+assert.equal(v.spanRole(v.buildForest([span('unknown-role', 'llm')]), span('unknown-role', 'llm'), n => n), '未归属')
