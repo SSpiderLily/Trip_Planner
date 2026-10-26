@@ -1,6 +1,8 @@
 """单次餐饮子任务；共用 F03 的限时、取消、重试、观测和事实写入循环。"""
 from __future__ import annotations
 
+from app.planning.fact_policy import _dining_category
+
 from dataclasses import dataclass
 import json
 import math
@@ -114,18 +116,6 @@ def _haversine_meters(left: MapCoordinate, right: MapCoordinate) -> float:
     return earth_radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1 - value)))
 
 
-def _dining_category(place: PlaceFact) -> Literal["dining", "excluded", "unknown"]:
-    typecode = re.sub(r"\D", "", place.typecode or "")
-    type_name = _normalize(place.type_name or "")
-    if typecode:
-        return "dining" if typecode.startswith("05") else "excluded"
-    if any(word in type_name for word in (
-        "餐饮服务", "中餐厅", "外国餐厅", "快餐厅", "小吃店", "餐厅", "餐馆", "饭店", "饮品店",
-    )):
-        return "dining"
-    return "unknown"
-
-
 def eligible_dining_slot_ids(
     place: PlaceFact,
     *,
@@ -185,7 +175,7 @@ def _is_specific_restaurant_name(name: str, requirement: HardRequirement) -> boo
         "餐厅", "餐馆", "饭店", "餐饮",
     }:
         return False
-    evidence = _normalize(requirement.source.quote)
+    evidence = _normalize(requirement.source.quote if requirement.source else requirement.text)
     # The caller supplies this explicit name-to-requirement binding. Do not
     # reinterpret user intent from marker words such as “must eat”.
     return normalized in evidence
@@ -559,7 +549,8 @@ class DiningSubtaskRunner(AttractionSubtaskRunner):
                 "meal_scopes": scoped_meals,
                 "hard_requirements": [
                     {"requirement_id": req_id, "kind": requirement.kind,
-                     "source_quote": requirement.source.quote,
+                     "source_quote": requirement.source.quote if requirement.source else None,
+                     "text": requirement.text,
                      "restaurant_name": bindings.get(req_id),
                      "verifiable_as_named_restaurant": req_id in bindings}
                     for req_id, requirement in requirements.items()

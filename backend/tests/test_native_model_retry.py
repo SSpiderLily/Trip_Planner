@@ -93,6 +93,22 @@ class NativeModelRetryTests(unittest.TestCase):
         for sdk in (client, child_client):
             self.assertTrue(all(c.kwargs['max_retries'] == 0 for c in sdk.with_options.call_args_list))
 
+    def test_acceptance_after_connection_retry_counts_only_real_attempts(self):
+        llm, client, requests = model(connection_error(), response('submit'),
+                                      AssertionError('confirmation forbidden'))
+        saved = []
+        def submit(_):
+            saved.append('accepted')
+            return {'status': 'accepted'}
+        result = NativeToolLoop(llm, [tool('submit', submit)],
+            accepted_submission_tools=frozenset({'submit'})).run([])
+        self.assertEqual((len(requests), result.model_calls, len(result.completions)), (2, 2, 1))
+        self.assertEqual((saved, result.tool_calls, result.termination_reason),
+                         (['accepted'], 1, 'submission_accepted'))
+        self.assertEqual(result.completions[0].finish_reason, 'tool_calls')
+        self.assertEqual(result.completions[0].usage.total_tokens, 15)
+        self.assertEqual(requests[0], requests[1])
+
     def test_exhaustion_stops_after_three_attempts_without_reexecuting_tool(self):
         handler = Mock(return_value={'candidate': 'mock'})
         llm, client, requests = model(response('query'), *(connection_error() for _ in range(3)), response())
@@ -177,7 +193,7 @@ class NativeModelRetryTests(unittest.TestCase):
         def fail(_):
             raise connection_error()
         # 重现主采集第3次请求失败；各子智能体也在完成地图查询之后失败一次。
-        master.responses.insert(4, fail)
+        master.responses.insert(3, fail)
         for child in children:
             child.responses.insert(1, fail)
         maps = Mock(wraps=planner.collector.adapter._tool_runner)
@@ -190,7 +206,7 @@ class NativeModelRetryTests(unittest.TestCase):
                 result = asyncio.run(pipeline.run(req, task_id='mock', plan_id='mock-plan'))
             rows = [repo.span('mock', s['span_id']) for s in repo.spans('mock')]
             self.assertEqual(result.snapshot.preview.draft.revision, 2)
-            self.assertEqual([m.calls for m in models], [10, 4, 4, 4])
+            self.assertEqual([m.calls for m in models], [7, 3, 3, 3])
             self.assertEqual(maps.call_count, 3)  # 景点1、餐饮同址两餐复用1、住宿1。
             self.assertEqual(len([r for r in rows if r['name'] == 'native.master.task']), 3)
             self.assertEqual(len([r for r in rows if r['name'] == 'native.child.result']), 3)

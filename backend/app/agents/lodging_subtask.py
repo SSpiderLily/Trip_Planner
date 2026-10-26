@@ -1,6 +1,8 @@
 """单次住宿子任务；复用 F03 执行生命周期与来源化 planning_v4 事实。"""
 from __future__ import annotations
 
+from app.planning.fact_policy import _is_region_or_business_area, _is_specific_residence, _lodging_category, _matches_original_query
+
 from dataclasses import dataclass
 import json
 import math
@@ -97,43 +99,6 @@ def _haversine_meters(left: MapCoordinate, right: MapCoordinate) -> float:
     dlng = math.radians(right.lng - left.lng)
     value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
     return earth_radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1 - value)))
-
-
-def _lodging_category(place: PlaceFact) -> Literal["lodging", "excluded"]:
-    """推荐模式只接受供应商明确标成住宿服务的类别。"""
-    typecode = re.sub(r"\D", "", place.typecode or "")
-    if typecode:
-        return "lodging" if typecode.startswith("10") else "excluded"
-    type_name = _normalize(place.type_name or "")
-    return "lodging" if any(label in type_name for label in (
-        "酒店", "宾馆", "旅馆", "民宿", "住宿服务", "青年旅舍",
-    )) else "excluded"
-
-
-def _matches_original_query(place: PlaceFact, query: str) -> bool:
-    normalized_query = _normalize(query)
-    return bool(normalized_query) and normalized_query in {
-        _normalize(place.name), _normalize(place.address or ""),
-    }
-
-
-def _is_specific_residence(place: PlaceFact) -> bool:
-    typecode = re.sub(r"\D", "", place.typecode or "")
-    type_name = _normalize(place.type_name or "")
-    return typecode.startswith("12") or any(label in type_name for label in (
-        "住宅", "小区", "公寓", "楼宇", "居民楼", "商务住宅",
-    ))
-
-
-def _is_region_or_business_area(place: PlaceFact) -> bool:
-    """供应商地名/商圈类别表示区域位置，不是用户的具体住处。"""
-    if _is_specific_residence(place):
-        return False
-    typecode = re.sub(r"\D", "", place.typecode or "")
-    type_name = _normalize(place.type_name or "")
-    return typecode.startswith("19") or any(label in type_name for label in (
-        "行政区划", "行政区", "普通地名", "地名地址信息", "商圈名", "商圈", "区域名",
-    ))
 
 
 class LodgingSubtaskRunner(AttractionSubtaskRunner):

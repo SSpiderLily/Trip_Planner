@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from dotenv import load_dotenv
@@ -49,7 +49,15 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", repr=False)
     llm_base_url: str = ""
     master_llm_model_id: str = Field(default="kimi-k3", min_length=1)
-    subagent_llm_model_id: str = Field(default="glm-5.3-flash", min_length=1)
+    subagent_llm_model_id: str = Field(default="sub_agent", min_length=1)
+    # 模型调用参数集中在此；None表示省略，绝不表示模型最大值。
+    llm_temperature: float = Field(default=0.01, ge=0, le=2)
+    master_llm_reasoning_effort: Literal["low", "medium", "high", "max"] | None = None
+    subagent_llm_reasoning_effort: Literal["low", "medium", "high", "max"] | None = "low"
+    master_llm_max_output_tokens: int | None = Field(default=1_000_000, gt=0)
+    subagent_llm_max_output_tokens: int | None = Field(default=1_000_000, gt=0)
+    llm_output_token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+
 
     # 本地任务与观测存储
     task_db_path: str = str(Path(__file__).resolve().parents[1] / "data" / "tasks.sqlite3")

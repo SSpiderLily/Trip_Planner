@@ -1102,3 +1102,167 @@
 ## TypeScript `baseUrl` 弃用迁移（2026-10-20）
 
 问题：编辑器报告 `baseUrl` 在 TypeScript 6 中弃用、7 中移除。这是配置选项迁移提示，不是 JSON 语法错误。项目只需 `@/*` 别名，故删除 `baseUrl: "."`，把 `paths` 目标改为 `./src/*`，继续相对 `frontend/tsconfig.json` 定位源码；Vite 的 `@` 别名保持一致。采用[官方迁移方式](https://devblogs.microsoft.com/typescript/announcing-typescript-6-0/#deprecated-baseurl)，不使用仅隐藏提示的 `ignoreDeprecations`。修改位于 `frontend/tsconfig.json`，验证与未确认边界见[CHG-003 当前状态](changes/CHG-003-planning-performance-observability.md#当前状态)。文档路径和用途未变，INDEX 现有导航无需调整。
+
+
+## 提交接受后结束：公共策略与业务回执（2026-10-21）
+
+额外确认请求的前提是结构化结果已经保存，公共循环仍等待模型的普通文字结束。因此先增加默认关闭的提交结束策略，只检查本轮整批已回填回执，业务接入留到后续小步执行；保留真实模型响应、完整协议历史、取消和调用额度。
+
+不能用工具执行的 completed 或外层 ok=true 判断业务成功。实际地图 handler 用 result_status/query_status 和 error 表示查询失败，初版策略仅检查 status 会漏拦同批地图错误。先以失败测试复现，再补齐阻止提前结束的判定；partial、如实缺项及提交后的查询关闭回执仍允许当前提交阶段结束。注册策略的业务 handler 必须保证先保存、再返回 accepted，公共循环不推断业务状态。
+
+代码位于 `backend/app/services/native_tool_loop.py`、`native_observation.py`，回归位于 `test_native_tool_loop.py`、`test_native_model_retry.py`、`test_native_observation.py`。P0/P1时业务阶段尚未启用；后续六种业务接入与单次真实专项见[本轮验收](changes/CHG-003-planning-performance-observability.md#native-submit-completion-live-results-20261021)，不从模拟测试推断提速；公共机制验证证据见[CHG-003](changes/CHG-003-planning-performance-observability.md#native-submit-completion-p0-p1-results-20261021)。
+
+
+## 六种提交接入：保留决策，移除结束确认（2026-10-21）
+
+需求整理、景点/餐饮/住宿候选、每日初版和单日修订已显式启用公共结束策略。提交handler仍先保存再返回accepted；搜索后的选择、主采集追加派发、无效引用纠正和按日三轮修订保持原规则。移除确认会改变后续历史，因此原来按固定请求序号投放确认的测试替身也必须调整，取消测试改到真实提交边界，不能删除取消断言。
+
+受控同请求对照保留其他决策步骤，模型请求从17次降为12次；含修订的公共测试继续验证应用、重验及原活动保留。这只证明省掉确认请求。真实耗时、调用变化与质量边界统一记录在[CHG-003本轮验收](changes/CHG-003-planning-performance-observability.md#native-submit-completion-live-results-20261021)。
+
+
+本轮只跑一次真实任务，需求整理3次业务拒绝后触发原工具额度上限，未进入地点采集；4次模型响应成功不等于需求已接受。因为没有accepted，不存在可归因于本优化的实测省时，不能拿失败耗时对比历史成功耗时。保留严格校验和额度，未追加第二趟；具体拒绝码、统计与证据边界见上述本轮验收。
+
+
+## 需求来源校验：可见原文与校验表示必须一致（2026-10-21）
+
+只读诊断发现，主模型看到的预算JSON带空格，来源检查却对紧凑JSON做字符串匹配；照抄可见的`"amount": null`也会被拒绝。该问题在提速改动前已存在，已用禁网最小探针复现，尚未修复。来源错误还合并普通引用与住宿日期/名称校验，且现有失败日志只有错误码，无法定位两次真实失败的具体条目。不要从单个SOURCE_INVALID推断模型整体能力不足，也不要把可复现的预算误拒直接认作真实任务根因。流程、触发条件与验证证据统一见[CHG-003诊断](changes/CHG-003-planning-performance-observability.md#native-requirement-source-diagnosis-20261021)。
+
+
+## 需求整理仅保留必要校验（2026-10-21）
+
+用户选择只保留原始输入基本合法、结果结构/类型/类别、原始输入及后端ID保护、住宿日期范围与冲突。新原生摘要不再声明文字来源，取消原文引用、偏好完整重述等阻断；原始请求完整传给后续模型，真实地点事实与草稿引用规则不变。可选来源必须同时调整消费者，不能只删除提交handler校验，否则下游仍会误拒或解引用空值。
+
+独立审查又发现派发Schema的文字长度与新契约不一致，以及重复条目匹配首ID造成派发失败。先用失败回归复现，再取消派发文字长度限制并逐个匹配不同后端ID，保留重复内容。实现、验证和唯一一次真实任务结果统一见[CHG-003本轮实施](changes/CHG-003-planning-performance-observability.md#minimal-requirement-validation-20261021)。上述预算JSON误拒的旧校验表示本身未修补；新原生流程已取消该来源检查。
+
+
+## 子模型降低思考强度：按角色设置请求默认值（2026-10-21）
+
+用户选择三个子角色使用reasoning_effort=low，主模型保持现状。把默认值绑定到角色客户端，避免只在第一次调用附加参数而漏掉工具后的请求、补查或重试；主/旧入口省略该参数，不能用显式none替代“不传”并假定供应商行为相同。SDK边界替身验证四角色隔离，既有span只记录非敏感强度值；这能证明参数已传，不证明网关一定执行或质量不下降。实现位于llm_service.py与native_tool_loop.py，回归位于test_native_llm_service.py，实际耗时/质量与验证边界统一见[本轮Change](changes/CHG-003-planning-performance-observability.md#subagent-low-reasoning-20261021)。
+
+<a id="travelplanner-research-20261021"></a>
+## TravelPlanner源码对照：隔离资料、决策与评估（2026-10-21）
+
+上游核对版本为[OSU-NLP-Group/TravelPlanner `e52c87f`](https://github.com/OSU-NLP-Group/TravelPlanner/tree/e52c87f4ac348a3410c46dc3553c519db5ec5e23)。本地对照当前工作区原生流程，包含已有未提交修改；不是只看main或旧SimpleAgent。以下是静态研究结论，不是已确认改造要求。
+
+- **实际执行**：默认two-stage由一个ReAct采集智能体调用普通查询工具，再通过Planner工具调用独立规划模型；不是景点、餐饮、住宿三个子智能体。采集每步分别请求Thought和Action，NotebookWrite也占动作步骤；Planner使用Notebook全部资料及该次动作携带的query，不接收采集scratchpad。默认入口加载普通Planner；direct/cot/react/reflexion策略选择在sole-planning入口。见[采集源码](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/agents/tool_agents.py)、[规划策略入口](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/tools/planner/sole_planning.py)。
+- **Notebook边界**：只是内存列表，保存最近一次查询的原始表格与模型给出的描述；list_all把全部资料转成文本交给Planner。没有检索排序、持久化或自动摘要；遮蔽旧Observation时也不先证明已入Notebook，忘记写入可能丢失规划所需资料。应借鉴阶段输入隔离，不能照搬额外的模型存储动作或字符串替换。我们的事实由后端存储、候选引用有校验，应继续保留。见[Notebook](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/tools/notebook/apis.py)。
+- **本地明确差异**：[native_trip_planner.py](../backend/app/agents/native_trip_planner.py)初版及修订都将完整主历史与新阶段messages拼接；[daily_plan_generator.py](../backend/app/agents/daily_plan_generator.py)虽已筛选单日修订候选和来源，旧阶段事实仍可能从history进入。子智能体完整对话并未直接拼入主历史，主历史承接的是tool_payload中的已选候选/事实/来源；[native_attraction_agent.py](../backend/app/agents/native_attraction_agent.py)已经精简单次地图返回，但不裁剪历史。候选建议是确定性构建阶段输入，仅传原需求、有效摘要、所需事实、失败原因和保留约束；调试历史与业务事实保留，不通过额外摘要模型重写事实。尚未测量Token节省或质量影响。
+- **评估方法优先于加角色**：sole-planning直接提供reference_information，能隔离资料收集问题与规划问题。我们已有[模拟规划测试](../backend/tests/test_native_trip_planner.py)及可注入collector，但模拟回答不能证明真实模型质量。建议以后以公开/合成需求、固定且核对过的事实做真实规划模型对照，再单独验证真实地图链路；本轮未执行。固定资料缺少酒店时，不能把未安排酒店全部归因于规划模型。
+- **完成与质量分开**：上游[评估脚本](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/evaluation/eval.py)分别统计有无非空方案、逐约束通过率、整份方案通过率；硬约束评估先要求信息完整且存在于沙箱。可借鉴统计方式，不照搬固定样本分母或业务规则。本地当前[校验](../backend/app/services/planning_v4_validation.py)与[补查范围](../backend/app/services/day_repair_service.py)仅因必需餐次/游览时段缺真实地点启动修订；必去已取消机器绑定判定，预算不做够用判断。若做离线质量评估，应保留独立人工核对项及未知状态，不偷偷恢复线上拒绝规则。
+- **不照搬预算、反思和数据假设**：上游餐馆/住宿及默认距离查询读取固定CSV；距离工具主要为城市间交通，不是我们的市内相邻POI路线。ReactPlanner的CostEnquiry按单日计划查库计算，ReactReflectPlanner主要在费用环境连续失败后追加反思，不是全约束自动评审。默认two-stage规划后没有接上全部评估再修复。我们已经有结构化提交即结束、查询去重、并发及保留有效活动的单日修订；无需再增加通用反思智能体。缺费用仍应保持未知，不能用已知小计认定预算满足。见[规划源码](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/tools/planner/apis.py)、[费用环境](https://github.com/OSU-NLP-Group/TravelPlanner/blob/e52c87f4ac348a3410c46dc3553c519db5ec5e23/tools/planner/env.py)。
+
+候选研究顺序：固定事实与质量评估口径 → 对照完整历史和阶段输入 → 必要时再讨论采集结束的覆盖摘要。采集目前以普通文本总结结束，可研究显式记录哪些角色已查、未查或失败，但这是我们的派生建议，不是TravelPlanner已有覆盖保证，不改变现有额度或缺项交付规则。源码与文档入口已核对；未运行上游、未新增模型/地图调用、未执行性能对照。范围状态见[CHG-003当前状态](changes/CHG-003-planning-performance-observability.md#当前状态)。
+
+
+<a id="sole-planning-core-20261021"></a>
+## 2026-10-21：固定资料的仅规划核心
+
+问题：原生成器把模型调用、提示词、引用校验和草稿构建放在一起；直接复用它会让离线核心间接加载模型配置。仅按目录拆分仍会漏掉住宿规则中的函数内智能体导入。
+
+取舍：借鉴TravelPlanner sole-planning的“需求＋参考资料”输入，保留本项目结构化工具提交和后端校验。提取共享纯规则及事实判断，旧路径转发；核心通过生成端口与接受回调隔离模型实现。fake模式只回放固定提案，原生调用另用替身模型验证，不把回放成功当作真实规划质量证据。
+
+证据：提取前保存六例合成资料的草稿和报告作为固定基线；最终完整后端禁网回归1020项通过，独立审阅的两项问题已修复。回调失败测试发现通用工具循环会吞掉业务handler异常并继续请求模型，适配器因此记录运行故障并在下一次取消检查时停止；核心将回调异常单独归类，防止ValidationError被当作模型提交错误。天气投影按日期排序，使相同资料跨进程保持一致。最终验证和未验收范围以[CHG-003](changes/CHG-003-planning-performance-observability.md#modular-planning-20261021)为准；入口用法见[README](../README.md#sole-planning)。
+
+
+## 2026-10-21：仅规划真实模型单样本
+
+使用固定合成资料执行一次真实规划，第一次提交即被后端接受。复核表明“时段完整”只证明必要时段有有效候选引用，不证明景点多样性、早餐适配性或交通可行性；后续质量评估需要更丰富的固定候选和人工检查。实际行程、耗时、用量与报告证据统一见[CHG-003](changes/CHG-003-planning-performance-observability.md#sole-planning-live-20261021)。未接真实采集，未修改实现或配置。
+
+
+## 2026-10-21：P2固定资料质量对照与生成层优化
+
+问题：旧单样本虽然9/9覆盖，只有1景点/1餐馆，无法分辨资料不足、机械重复和早餐用途错误。P2在保留六例兼容golden的同时新增七例多候选/边界合成资料；评估器把确定性覆盖、引用、住宿绑定与人工五项结论分开。真实语义判断默认unknown，不能由结构覆盖推断质量通过。独立runner记录失败流程和每次物理模型请求；usage缺失保留未知。
+
+实现与取舍：context保留营业时间原文和来源，提示词建议按用途选餐、避免机械重复、留灵活休息空间、不保证返程时刻。没有新增线上语义拒绝规则。自检复现评估器把错种类活动计为覆盖，改用既有纯校验器的必需地点缺项结果；为quality各例分配独立身份，防止跨案例套用人工审阅。测试先失败后修复，未改旧validator。
+
+验证：在backend以unittest执行P2定向28项通过；完整后端封锁网络1045项通过（19.367秒）；七例fake回放交付、旧六例golden保持，git diff --check通过。相关入口为`tests/test_planning_quality_fixtures.py`、`test_planning_evaluation.py`、`test_planning_context.py`、`test_planning_runner.py`及`test_planning_import_boundaries.py`。fake结果不证明真实模型效果改善；第三方依赖仍有Pydantic弃用警告。真实模型未追加调用，最终独立评审与质量验收交回原会话；范围及交付记录见[唯一计划](changes/CHG-003-planning-performance-observability.md#modular-planning-20261021)。用法见README，不接P3采集，未提交/推送。
+
+
+## 2026-10-21：P2原会话独立评审与验证
+
+独立审阅发现评估器仅核对草稿结构会漏掉所选地点城市；已复用接受路径的纯规则，避免另写业务判定。同一固定样本多次生成沿用相同身份和revision，人工评价因此增加具体结果内容指纹，评估与评价契约显式升级v2，防止把旧评价套到新文本。两项均先复现失败再修复，最终1047项后端禁网回归和七例fake通过；真实模型质量仍未验收。范围、证据与未完成项统一见[CHG-003](changes/CHG-003-planning-performance-observability.md#modular-planning-20261021)。
+
+## 2026-10-21：P3需求和真实采集的独立边界
+
+需求整理、资料采集和行程生成需要独立的上下文。P3复用原解释器、三角色采集和缓存，只把原请求/有效摘要及规范化快照传到下一阶段。天气和到离地点仍需保留完整结构化executions，消费者必须重新投影验证，不能用verified标记替代证据。为此显式升级PlanningSnapshot至v2，旧查询导入继续转发到同一纯实现，避免两套校验逐渐分叉。
+
+边界验证区分未派发、无结果、技术失败与已有候选；取消/失败不发布会话状态。旧validator的28组差分结果一致，抽出的31个类型/函数与开始基线的AST一致；自检另发现薄包装遗漏了非法结果的诊断阶段，已以失败测试复现并恢复原step。完整测试及真实样本的耗时、用量、结果和未验收项统一见[CHG-003 P3](changes/CHG-003-planning-performance-observability.md#p3-implementation-20261021)。尚未接回按日修订或正式预览，独立评审由原会话承担。
+
+
+### 2026-10-21：模型调用参数集中配置
+
+主/子角色原先依赖客户端默认temperature=0.7、工厂硬编码推理强度，输出额度省略。用户要求统一温度0.01并使用最大输出；已将角色参数集中到config.py，由llm_service读取，离线验证实际SDK参数以及两种输出字段不会由默认配置同时注入。先确认新测试失败，再完成接线；完整禁网1063项通过。当前网关最大输出未确认，不能将省略额度视为max，也不能把reasoning_effort=max视为输出额度。范围及未完成项见CHG-003文末；未调用真实模型。
+
+用户随后明确指定1M额度：主/子角色默认值已设为1,000,000，66项相关测试通过，实际配置解析一致；服务端接受情况仍未实测，不能用配置成功代替P3真实验收。
+
+
+## 2026-10-21：重启加载1M输出额度后单次真实复验
+
+重启主目录前后端后，用同一公开上海样本再运行一次P3。需求及三角色采集成功，初版请求在既有3次连接尝试后失败，未交付行程；因此不能把参数被部分请求接受解释成截断已修复。已完成的规范化采集资料仍能离线复核，失败请求usage保持未知。配置、分阶段耗时、候选、失败边界和本机证据统一见[CHG-003文末真实复验](changes/CHG-003-planning-performance-observability.md#当前状态)。本次只重启、运行和同步记录，未修改应用代码或配置。
+
+## 2026-10-22：新分层链路接入原观测仓库
+
+独立脚本仅记录耗时/用量不足以定位SDK内部失败。现在由装配服务创建同一task/plan的阶段树，模型调用边界保存实际发送参数及安全异常链，生成核心和纯校验继续不依赖仓库。输出额度用参数名/数值对表示，避免通用token脱敏误遮；失败usage仍未知。CLI挂接共享库时不执行进程恢复，防止把后端其他任务误标为中断。
+
+独立审阅发现评估阶段迟到取消、观测库初始化异常阻断业务两项缺口；均先复现失败再修复，完整禁网1077项及前端构建通过。真实调用、实际记录与交付边界以[CHG-003分层观测](changes/CHG-003-planning-performance-observability.md#modular-observation-20261021)为准。既有task_notes投影及住宿理解问题未在本轮修复。
+
+
+## 2026-10-22：观测接线后重启的单例成功
+
+用户再次授权重启并运行同一公开样本。P3独立流程第一次提交即接受，8/8必需时段覆盖，需求/采集/生成/校验/评估均有持久化成功记录；离线重算报告一致。该结果证明这次流程可用，不能反推此前连接异常已修复，未知消费、天气建议和推荐质量仍需区分。耗时、用量、行程及证据见[CHG-003本次结果](changes/CHG-003-planning-performance-observability.md#observed-restart-success-20261022)。未改应用代码或配置，未接正式预览。
+
+
+### 2026-10-22：关闭P3采集说明交接遗漏
+
+去掉采集历史后，快照虽保留task_notes，通用上下文却未读取，导致具体缺项说明丢失。现按task_id投影到task_results.unmet_needs并区分说明与事实。实际模型输入回归先失败后通过，独立复审通过；完整禁网1078项及七例fake通过。代码位置planning/context.py，回归test_native_collection_adapter.TaskNotesDeliveryTests。子模型按用户要求改sub_agent，本机覆盖已同步；旧真实单例不代表新模型已实测。验收边界见CHG-003文末，不进入P4。
+
+
+## 2026-10-22：修正环境模型名后的真实复验
+
+用户首次指定sub_agent时，网关返回404/model_not_found；用户确认环境模型名填错并修正，重启后实际解析为kimi-k3/glm-5.3-flash。单例在一次生成连接失败后重试成功，8/8必需时段覆盖。对实际规划请求只保存采集说明的哈希与数量，确认三个任务的unmet_needs逐项与快照一致，独立上下文仍为两条消息；task_notes修复的真实交接验证通过。实际参数、耗时、用量、报告及质量限制见[CHG-003](changes/CHG-003-planning-performance-observability.md#corrected-model-live-20261022)。没有修改应用代码或配置，未接P4/P5。
+
+
+## 2026-10-22：P4单日修订与补查边界
+
+去掉共享历史后，按日修订需要自己的输入与接受边界。复用DayRepairService业务判断，将旧生成器纯投影/候选判断迁入planning层，单日模型只提交replacement_day；后端绑定版本和保留约束，从可信草稿复制原有效活动。补查状态和缓存留在NativeCollectionSession，核对身份、范围、既有事实及取消后才发布规范化值。测试覆盖两个日期隔离、三轮业务额度、技术恢复、来源闭合和取消晚到结果。
+
+旧DayRepairService将技术耗尽返回partial；为保持旧调用方兼容，P4装配按technical_error修订状态保留技术终态，独立入口拒绝普通成功交付。实施自检不代替原会话独立评审，真实P4与人工质量未验收；命令、结果及本次基线差异见[唯一Change](changes/CHG-003-planning-performance-observability.md#p4-implementation-20261022)。未进入P5、未提交或推送。
+
+
+## 2026-10-22：P4评审修复——保留说明并校验补查范围
+
+单日上下文使用裸slot_id匹配带slot:前缀的覆盖记录，误删无候选任务及缺项说明；现统一匹配格式，原目标ID保持不变。补查适配层新增候选原先只校验全局引用，缺少本次范围检查；现餐馆严格绑定目标餐次，拒绝后不发布快照。景点本来是不绑定时段的地点池，只在存在景点补查目标时接受，不能套用餐馆规则；已有候选复用保持。独立复查发现并纠正了初稿误拒绝空时段景点的问题。
+
+新增8项回归，覆盖缺项说明、覆盖信息、越界补查、事务状态和真实Agent配替身模型的景点契约。独立复查与离线技术验收结果见[CHG-003唯一状态](changes/CHG-003-planning-performance-observability.md#p4-implementation-20261022)。真实P4效果仍未验收，不进入P5。
+
+
+## 2026-10-22：P4真实补查暴露天气投影字段错误
+
+真实首轮初版因TOOL_CALL_LIMIT未交付。为分离P4故障范围，复用同次真实资料构造缺早餐草稿：真实补查新增5候选，但有效目标日天气触发KeyError。原因是修订投影误把WeatherFact.source当成地点的source_refs；此前天气为空的回归没有覆盖这条路径。新增有同日预报和嵌入source的失败用例后修复，74项相关及1103项完整禁网回归通过。
+
+修复后复用补查资料，真实单日模型首次提交即接受，原有效活动与其他日期保持，说明哈希和来源核对通过。只代表分步P4补查/修订专项，不代表完整初版模型流程或人工推荐质量通过。分步失败、用量、草稿和未验证项统一见[唯一Change](changes/CHG-003-planning-performance-observability.md#p4-real-validation-20261022)。不进入P5，未提交或推送。
+
+
+## 2026-10-22：P5正式链路只消费公开规划结果
+
+预览原先依赖NativeTripPlanResult及采集器内部collection，修改采集实现可能影响交付。现通过PlanningOutcome v1交接初版、最终修订值与验证资料；预览重新核对身份、版本、事实和报告，技术失败不能因携带草稿而交付。修订结果类型移到models层，服务保留旧导入兼容；正式编排使用公开采集端口，删除迁移私有绑定。最终DraftResult从同一修订值派生，避免复制两份最终事实。
+
+编辑、导出、存储格式及保存后相邻交通不变。旧测试替身补齐天气/端点证据，未放宽真实适配器。独立复查与验证证据、真实专项状态统一见[CHG-003 P5](changes/CHG-003-planning-performance-observability.md#p5-implementation-20261022)。研究CLI仍承担回归用途，保留；不将一次技术成功当作多案例质量通过。
+
+## 2026-10-22：评审修复——保留参数拒绝诊断与端点资料
+
+工具参数校验发生在业务handler前，因此handler的拒绝事件无法覆盖结构错误。现公共循环直接记录安全字段路径、错误类型、工具调用关联及截断信息，保留原有模型回执与调用额度；工作台按真实output_data形状展示角色和阶段。回归覆盖连续参数拒绝至额度终止、未知字段脱敏、超8项截断及无效JSON。
+
+初版移除历史后显式传递了端点证据，单日修订迁移时却遗漏。现修订装配沿用公开EndpointEvidence及同一纯投影，不恢复历史、不重查地图，也不把车站当成活动候选。真实修订端口配替身模型覆盖verified、ambiguous、not_found、error、missing及来源闭合。代码位于native_tool_loop、native_observation、planning/context和planning_repair_service；回归位于test_native_observation、test_planning_repair_boundary及前端nativeObservation。离线与独立复查结果、真实验收边界见[CHG-003](changes/CHG-003-planning-performance-observability.md#modular-review-20261022)。
+
+## 2026-10-23：两项修复的一次真实规划验证
+
+重启后用真实模型和高德执行一次上海两日正式API任务，成功生成预览并完成相邻交通。模型自然提交的住宿参数枚举错误触发新拒绝事件，数据库与正式观测HTTP接口均可定位安全字段路径和工具调用。初版已覆盖必需时段，未发出单日修订请求；整趟成功不能替代未触发分支的验证。
+
+用户随后授权一次受控单日专项：复用真实资料，在研究副本留一个早餐缺项并保留原候选；因预览没有完整端点证据，只重查到离车站。生产修订模型实际收到的端点投影与领域证据哈希一致，早餐补齐，其他日期、已有活动和正式预览保持。禁网独立重算通过，两项修复均取得对应真实证据；受控缺项不代表自然漏项或推荐质量验收。具体任务、请求恢复、未知信息及专项边界见[唯一Change](changes/CHG-003-planning-performance-observability.md#review-fixes-live-20261022)。没有提交或推送。
+
+## 2026-10-26：当前代码整趟真实复验与观测核对
+
+后端启动后，用正式API只提交一次公开上海两日需求。预览、交通和观测持久化成功，模型与工具详情可读取，指标用量与SQLite一致。技术成功仍有价格未知和可行性未验证；外滩与万国建筑博览群也可能形成游览内容重叠，必需时段齐全不能代替推荐质量验收。
+
+角色汇总按父级agent识别，因此主模型五次调用显示“未归属”，子角色显示内部名称；详情仍保存master和阶段信息，不属于记录丢失。本次只记录展示缺口，不扩大修改范围。任务、验证数字与证据统一见[CHG-003当前状态](changes/CHG-003-planning-performance-observability.md#当前状态)。后端保持运行，没有提交或推送。

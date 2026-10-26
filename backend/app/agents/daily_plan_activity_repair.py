@@ -11,12 +11,8 @@ from ..models.planning_v4 import PlanningInput, ProposalActivity, ProposalDay
 from ..models.planning_v4.base import ContractModel
 
 
-class DailyPlanModelOutput(ContractModel):
-    """模型只输出每日安排；区域事实和请求版本由后端注入。"""
-
-    days: tuple[ProposalDay, ...] = Field(min_length=1)
-    missing_notes: tuple[str, ...] = ()
-
+# 旧导入路径保留；提交数据结构由模型契约统一拥有。
+from app.models.planning_execution import ProposalSubmission as DailyPlanModelOutput
 
 class ActivityReplacement(ContractModel):
     """修复只选择已核实候选与需求引用，不含日期、时段或任意说明字段。"""

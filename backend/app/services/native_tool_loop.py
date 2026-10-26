@@ -14,13 +14,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .llm_service import NativeLLMCompletion
 from .observation_service import span, token_usage
-from .native_observation import native_metadata
+from .native_observation import native_metadata, native_event_emitter
 from .native_model_retry import MAX_MODEL_ATTEMPTS, is_connection_failure, retry_delay_seconds
 from .model_diagnostics import provider_error_diagnostics
 
 
 class NativeToolArguments(BaseModel):
-    """工具参数须显式建模；拒绝未知字段和隐式类型转换。"""
+    """工具参数须显式建模；默认拒绝未知字段，始终拒绝隐式类型转换。"""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -39,9 +39,9 @@ class NativeTool:
             raise ValueError("工具必须有明确说明")
         if not issubclass(self.arguments_model, NativeToolArguments):
             raise ValueError("工具参数模型必须继承 NativeToolArguments")
-        if (self.arguments_model.model_config.get("extra") != "forbid"
+        if (self.arguments_model.model_config.get("extra") not in {"forbid", "ignore"}
                 or not self.arguments_model.model_config.get("strict")):
-            raise ValueError("工具参数模型必须拒绝未知字段和类型转换")
+            raise ValueError("工具参数模型必须拒绝类型转换，未知字段只能拒绝或忽略")
         if (not callable(self.handler) or inspect.iscoroutinefunction(self.handler)
                 or inspect.iscoroutinefunction(getattr(self.handler, "__call__", None))):
             raise ValueError("当前工具循环只接受同步执行函数")
@@ -73,6 +73,7 @@ class NativeToolLoopResult:
     completions: tuple[NativeLLMCompletion, ...] = field(repr=False)
     tool_calls: int
     model_attempts: int | None = None
+    termination_reason: str = "model_stop"
 
     @property
     def model_calls(self) -> int:
@@ -121,7 +122,8 @@ class NativeToolLoop:
 
     def __init__(self, llm: NativeModel, tools: Sequence[NativeTool], *,
                  max_model_calls: int = 8, max_tool_calls: int = 24,
-                 batch_executor=None, observation_role=None, observation_stage=None):
+                 batch_executor=None, observation_role=None, observation_stage=None,
+                 accepted_submission_tools: frozenset[str] = frozenset()):
         if (type(max_model_calls) is not int or max_model_calls < 1
                 or type(max_tool_calls) is not int or max_tool_calls < 1):
             raise ValueError("模型及工具调用上限必须是正整数")
@@ -129,6 +131,9 @@ class NativeToolLoop:
         self.tools = {tool.name: tool for tool in tools}
         if len(self.tools) != len(tools):
             raise ValueError("工具名称必须唯一")
+        self.accepted_submission_tools = frozenset(accepted_submission_tools)
+        if not self.accepted_submission_tools.issubset(self.tools):
+            raise ValueError("提交结束工具必须来自本循环的注册表")
         self.max_model_calls = max_model_calls
         self.max_tool_calls = max_tool_calls
         self.batch_executor = batch_executor
@@ -151,6 +156,9 @@ class NativeToolLoop:
                     "request_number": request_number, "model_request_id": uuid4().hex,
                     "model": getattr(self.llm, "model", None), "tool_names": list(self.tools),
                     "max_attempts": MAX_MODEL_ATTEMPTS}
+        effort = model_options.get("reasoning_effort", getattr(self.llm, "reasoning_effort", None))
+        if isinstance(effort, str) and effort in {"low", "medium", "high", "max"}:
+            metadata["reasoning_effort"] = effort
         declarations = [tool.declaration() for tool in self.tools.values()] or None
         # SDK重试保持关闭，由本层记录所有物理请求，避免叠加隐式重试。
         options = {**model_options, "max_retries": 0}
@@ -215,6 +223,13 @@ class NativeToolLoop:
             batch_ids.add(call_id)
         return calls
 
+    def _record_argument_rejection(self, call, tool, issues, issue_count):
+        native_event_emitter()("tool.arguments_rejected", {
+            **self.observation_metadata, "tool_name": tool.name, "tool_call_id": call["id"],
+            "code": "INVALID_TOOL_ARGUMENTS", "issues": issues,
+            "issue_count": issue_count, "issues_truncated": issue_count > len(issues),
+        })
+
     def _execute(self, call):
         function = call["function"]
         tool = self.tools.get(function["name"])
@@ -240,11 +255,14 @@ class NativeToolLoop:
                         collect(child)
             collect(schema)
             # 只回传声明中的字段名与稳定错误类型，不回传输入、未知字段名或异常原文。
+            errors = exc.errors(include_input=False, include_context=False, include_url=False)
             issues = [{"path": [part if isinstance(part, int) or part in fields else "unknown_field"
                                  for part in issue["loc"]], "type": issue["type"]}
-                      for issue in exc.errors(include_input=False, include_context=False, include_url=False)[:8]]
+                      for issue in errors[:8]]
+            self._record_argument_rejection(call, tool, issues, len(errors))
             return _error_content("INVALID_TOOL_ARGUMENTS", issues=issues, expected_parameters=schema)
         except (ValueError, TypeError):
+            self._record_argument_rejection(call, tool, [{"path": [], "type": "invalid_json_or_object"}], 1)
             return _error_content("INVALID_TOOL_ARGUMENTS")
 
         # 只记录工具名和结果分类，不保存参数、供应商推理或异常原文。
@@ -267,6 +285,33 @@ class NativeToolLoop:
                 return _error_content("INVALID_TOOL_RESULT")
             record.output = {"status": "completed"}
             return content
+
+    def _accepted_submission(self, calls, contents):
+        """只检查本批已编码回执；业务 handler 须在保存结构化结果后返回 accepted。"""
+        if not self.accepted_submission_tools:
+            return None
+        accepted = None
+        for call, content in zip(calls, contents):
+            try:
+                receipt = json.loads(content, object_pairs_hook=_reject_duplicate_keys,
+                                     parse_constant=_reject_constant)
+            except (ValueError, TypeError):
+                return None
+            if not isinstance(receipt, dict) or receipt.get("ok") is not True or "data" not in receipt:
+                return None
+            data = receipt["data"]
+            status = data.get("status") if isinstance(data, dict) else None
+            # 地图 handler 用 result_status/query_status 和 error 表示失败，
+            # 外层 ok=true 只证明 handler 正常返回，不能掩盖这些执行错误。
+            if isinstance(data, dict) and (
+                    any(data.get(key) in ("rejected", "error", "failed")
+                        for key in ("status", "result_status", "query_status"))
+                    or data.get("error") is not None):
+                return None
+            if (accepted is None and call["function"]["name"] in self.accepted_submission_tools
+                    and status == "accepted"):
+                accepted = call
+        return accepted
 
     def run(self, messages: Sequence[dict[str, Any]], *,
             cancel_event: Event | None = None, **model_options) -> NativeToolLoopResult:
@@ -326,4 +371,13 @@ class NativeToolLoop:
                 history.append({"role": "tool", "tool_call_id": call["id"], "content": content})
                 seen_ids.add(call["id"])
                 tool_count += 1
+            accepted = self._accepted_submission(calls, contents)
+            self._check_cancelled(cancel_event)
+            if accepted is not None:
+                native_event_emitter()("loop.submission_accepted", {
+                    **self.observation_metadata, "tool_name": accepted["function"]["name"],
+                    "tool_call_id": accepted["id"], "termination_reason": "submission_accepted"})
+                self._check_cancelled(cancel_event)
+                return NativeToolLoopResult("", tuple(history), tuple(completions), tool_count,
+                                            model_attempts, "submission_accepted")
         raise NativeToolLoopError("MODEL_CALL_LIMIT")

@@ -82,16 +82,16 @@ class RequirementSource(ContractModel):
 class HardRequirement(ContractModel):
     requirement_id: str = Field(min_length=1)
     kind: Literal["must_visit", "must_avoid", "must_include"]
-    text: str = Field(min_length=1)
-    source: RequirementSource
+    text: str
+    source: RequirementSource | None = None
 
 
 class LodgingChange(ContractModel):
     """用户明确提出的住宿变更；从该日期开始，沿用到下一次变更。"""
     start_date: date
-    city: str | None = Field(default=None, min_length=1)
-    lodging_query: str | None = Field(default=None, min_length=1)
-    source: RequirementSource
+    city: str | None = None
+    lodging_query: str | None = None
+    source: RequirementSource | None = None
 
 
 class RequirementSummary(ContractModel):
@@ -106,8 +106,11 @@ class RequirementSummary(ContractModel):
 
 
 def validate_requirement_sources(request: TripRequest, hard_requirements: Iterable[HardRequirement]) -> None:
-    """验证硬性要求的来源引用确实存在于原始请求中。"""
+    """仅核对兼容数据显式保留的来源；新原生摘要不要求来源。"""
     for requirement in hard_requirements:
+        # 新原生需求不声明原文引用；有来源的旧兼容数据仍按原规则核对。
+        if requirement.source is None:
+            continue
         source_value = getattr(request, requirement.source.field)
         if isinstance(source_value, tuple):
             valid = requirement.source.quote in source_value

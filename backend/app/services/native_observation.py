@@ -11,6 +11,8 @@ _run = ContextVar("native_observation_run", default=None)
 
 # 只接受已声明的业务事件及顶层字段；未知事件不落盘。
 EVENT_FIELDS = {
+    "loop.submission_accepted": "role stage tool_name tool_call_id termination_reason",
+    "tool.arguments_rejected": "role stage tool_name tool_call_id code issues issue_count issues_truncated",
     "requirements.start": "request_id",
     "requirements.accepted": "requirements",
     "requirements.submission_rejected": "code",
@@ -106,12 +108,20 @@ def native_agent_scope(role, subtask_id, round_number):
         _scope.reset(token)
 
 
+@contextmanager
+def native_run_scope(identity):
+    """同步/异步装配共享运行身份；线程通过现有copy_context传播。"""
+    token = _run.set(({"task_id": identity.task_id, "plan_id": identity.plan_id}, Lock(), [0]))
+    try:
+        yield
+    finally:
+        _run.reset(token)
+
+
 def observe_native_run(function):
     @wraps(function)
     async def observed(self, request, *, task_id, plan_id, progress=None):
-        token = _run.set(({"task_id": task_id, "plan_id": plan_id}, Lock(), [0]))
-        try:
+        from app.models.planning_runtime import PlanningRunIdentity
+        with native_run_scope(PlanningRunIdentity(task_id=task_id, plan_id=plan_id)):
             return await function(self, request, task_id=task_id, plan_id=plan_id, progress=progress)
-        finally:
-            _run.reset(token)
     return observed

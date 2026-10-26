@@ -1,4 +1,6 @@
 """原生规划的天气事实边界：按已确认城市查询，逐日覆盖，未知不补造。"""
+from app.models.planning_evidence import WeatherEvidence
+from app.planning.collection_evidence import weather_scopes as _scopes, _merge_weather, validate_weather_evidence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event
@@ -11,13 +13,6 @@ from app.services.planning_lodging_policy import city_for_days
 from app.services.weather_query_service import (
     WeatherQueryContext, WeatherQueryExecution, WeatherQueryService, _project_result, _validate_context,
 )
-
-
-def _scopes(planning):
-    cities = {}
-    for day in planning.days:
-        cities.setdefault(city_for_days(planning, (day.day_id,)), []).append(day.day_id)
-    return tuple((city, tuple(day_ids)) for city, day_ids in cities.items())
 
 
 @dataclass(frozen=True)
@@ -44,44 +39,14 @@ class NativeWeatherResult:
         }
 
 
-def _merge_weather(executions):
-    sources, weather = {}, {}
-    for execution in executions:
-        for rows, values, key_name in ((sources, execution.fact_store.sources, "tool_call_id"),
-                                       (weather, execution.fact_store.weather, "fact_id")):
-            for value in values:
-                key = getattr(value, key_name)
-                if key in rows and rows[key] != value:
-                    raise ValueError("天气事实标识冲突")
-                rows[key] = value
-    return FactStore(sources=tuple(sources.values()), weather=tuple(weather.values()))
-
-
 def validate_native_weather_result(planning, run_id, result):
-    """消费者再次核对身份、城市/日期、投影与来源，拒绝外部注入错误状态。"""
+    if not isinstance(result, NativeWeatherResult):
+        raise PlanningError("WEATHER_RESULT_INVALID", "天气事实结果无效", step="weather_projection")
     try:
-        if not isinstance(result, NativeWeatherResult) or result.run_id != run_id or result.planning_input != planning:
-            raise ValueError("天气运行身份不一致")
-        scopes = _scopes(planning)
-        if len(result.executions) != len(scopes):
-            raise ValueError("天气城市范围不完整")
-        for (city, day_ids), execution in zip(scopes, result.executions):
-            context = WeatherQueryContext.from_planning_input(planning, run_id=run_id,
-                context_revision=1, day_ids=day_ids)
-            dates = tuple(day.day_date for day in planning.days if day.day_id in day_ids)
-            diagnostic = execution.diagnostic_tool_result
-            if (diagnostic.source.tool_name != "maps_weather"
-                    or diagnostic.source.tool_call_id != diagnostic.tool_call_id
-                    or (diagnostic.data is not None and diagnostic.data.source != diagnostic.source)):
-                raise ValueError("天气来源不一致")
-            expected = _project_result(context, city, dates, diagnostic)
-            if execution != expected:
-                raise ValueError("天气投影与原始结果不一致")
-        if result.fact_store != _merge_weather(result.executions):
-            raise ValueError("天气合并事实不一致")
-    except (AttributeError, TypeError, ValueError, KeyError):
+        evidence = WeatherEvidence.model_validate({key: getattr(result, key) for key in ('run_id', 'planning_input', 'executions', 'fact_store')})
+    except (AttributeError, TypeError, ValueError):
         raise PlanningError("WEATHER_RESULT_INVALID", "天气事实结果无效", step="weather_projection") from None
-
+    validate_weather_evidence(planning, run_id, evidence)
 
 class NativeWeatherService:
     def __init__(self, *, adapter=None, tool_executor=None, query_service=None, emit=None):

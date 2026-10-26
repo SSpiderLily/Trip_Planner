@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal
 from uuid import uuid4
 from pydantic import ValidationError, model_validator
-from app.agents.master_reference_repair import RECOVERABLE_REFERENCE_CODES
+from app.planning.repair_policy import RECOVERABLE_REFERENCE_CODES
 
 from app.models.planning_v4 import (
     AreaHint,
@@ -31,8 +31,7 @@ from app.models.planning_v4.base import ContractModel
 from app.services.planning_candidate_policy import candidate_allows_slot
 from app.services.planning_lodging_policy import city_for_days
 from app.services.planning_v4_validation import is_required_place_gap
-from app.agents.attraction_subtask import _category_status, _city_matches
-from app.agents.dining_subtask import _dining_category
+from app.planning.fact_policy import _category_status, _city_matches, _dining_category
 from app.services.planning_diagnostics import repair_stage, safe_error_code
 from app.services.observation_service import span
 from app.services.planning_v4_validator import ContractValidationError, validate_day_revision
@@ -43,8 +42,7 @@ MAX_TECHNICAL_FAILURES_PER_DAY = 3
 RECOVERABLE_COLLECTION_CODES = RECOVERABLE_REFERENCE_CODES | {
     "MASTER_LLM_FAILED", "MODEL_CALL_FAILED", "REPAIR_COLLECTION_TIMEOUT", "REPAIR_MAP_FAILED",
 }
-RepairStop = Literal["complete", "round_limit", "deadline", "technical_error"]
-CollectionStop = Literal["target_met", "no_progress", "deadline", "technical_error"]
+from app.models.planning_repair import (RepairStop, CollectionStop, IssueDayAssignment, DayRepairAttempt, DayRepairResult)
 
 
 class DayRepairError(RuntimeError):
@@ -67,18 +65,6 @@ class DayRepairError(RuntimeError):
 
 class DayRepairInputError(ValueError):
     """修正输入与当前规划版本不匹配。"""
-
-
-class IssueDayAssignment(ContractModel):
-    issue_id: str
-    assigned_day_id: str | None
-    reason: Literal[
-        "issue_day",
-        "candidate_applicable_day",
-        "first_schedulable_sightseeing_day",
-        "no_eligible_sightseeing_day",
-    ]
-    candidate_id: str | None = None
 
 
 class DayRepairCollectionTarget(ContractModel):
@@ -179,35 +165,6 @@ class DayRepairRecalculation(ContractModel):
     draft: PlanDraft
     facts: FactStore
     report: ValidationReport
-
-
-class DayRepairAttempt(ContractModel):
-    day_id: str
-    round_id: str
-    round_number: int = 1
-    issue_ids: tuple[str, ...] = ()
-    outcome: Literal["applied", "no_progress", "invalid_revision", "deadline", "technical_error"]
-    collection_stop_reason: CollectionStop = "target_met"
-    preserve_activity_ids: tuple[str, ...] = ()
-    modifiable_activity_ids: tuple[str, ...] = ()
-    removable_activity_ids: tuple[str, ...] = ()
-    error_code: str | None = None
-
-
-class DayRepairResult(ContractModel):
-    status: Literal["complete", "partial", "technical_error"]
-    draft: PlanDraft
-    facts: FactStore
-    candidates: tuple[CandidateRef, ...] = ()
-    area_hints: tuple[AreaHint, ...] = ()
-    task_results: tuple[TaskResult, ...] = ()
-    report: ValidationReport
-    repair_states: tuple[RepairState, ...] = ()
-    assignments: tuple[IssueDayAssignment, ...] = ()
-    attempts: tuple[DayRepairAttempt, ...] = ()
-    unassigned_issue_ids: tuple[str, ...] = ()
-    stop_reason: RepairStop | None = None
-    error_code: str | None = None
 
 
 CollectCallback = Callable[[DayRepairCollectionRequest], Awaitable[DayRepairCollectionResult]]

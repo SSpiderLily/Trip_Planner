@@ -1,6 +1,8 @@
 """运行一个景点 Subtask；本模块不调度其他角色或生成整趟行程。"""
 from __future__ import annotations
 
+from app.planning.fact_policy import _NON_ATTRACTION_LABELS, _SPACE, _VISITOR_CULTURE_LABELS, _category_status, _city_matches, _normalize
+
 from app.services.planning_lodging_policy import city_for_days
 from app.services.planning_timeout_policy import deadline_after, wait_timeout, timeouts_enabled
 import asyncio
@@ -158,49 +160,7 @@ SYSTEM_PROMPT = """你是旅行规划中的景点信息子智能体。你只为�
 - 当候选足够时使用 finish；已没有新增有效地点或有用字段时也使用 finish。
 """
 
-_SPACE = re.compile(r"\s+")
 _FORBIDDEN_QUERY = re.compile(r"(?i)(https?://|api.?key|authorization|bearer|token=|secret=)")
-_NON_ATTRACTION_LABELS = (
-    "餐饮", "中餐厅", "西餐厅", "快餐", "咖啡厅", "酒吧", "酒店", "宾馆", "旅馆", "住宿",
-    "购物", "商店", "超市", "便利店", "汽车服务", "银行", "医疗保健",
-)
-_VISITOR_CULTURE_LABELS = (
-    "博物馆", "纪念馆", "美术馆", "展览馆", "科技馆", "天文馆", "陈列馆", "遗址", "古迹",
-    "历史建筑", "名人故居", "文化遗产", "文化宫",
-)
-
-
-def _normalize(value: str) -> str:
-    return _SPACE.sub("", unicodedata.normalize("NFKC", value)).casefold()
-
-
-def _city_matches(expected: str, actual: str | None) -> bool:
-    if not actual:
-        return False
-    left, right = _normalize(expected), _normalize(actual)
-    for suffix in ("特别行政区", "自治州", "地区", "市"):
-        if left.endswith(_normalize(suffix)):
-            left = left[:-len(_normalize(suffix))]
-        if right.endswith(_normalize(suffix)):
-            right = right[:-len(_normalize(suffix))]
-    return left == right
-
-
-def _category_status(place: PlaceFact) -> Literal["sightseeing", "excluded", "unknown"]:
-    """只根据供应商类型证据认定景点，不采信模型或 POI 名称。"""
-    type_name = _normalize(place.type_name or "")
-    typecode = re.sub(r"\D", "", place.typecode or "")
-    if any(_normalize(label) in type_name for label in _NON_ATTRACTION_LABELS):
-        return "excluded"
-    # AMap 的 11 类是风景名胜；文化场馆用供应商返回的具体类别名识别，
-    # 不把整个科教类别都放行，避免学校、培训机构等进入景点候选。
-    if typecode.startswith("11"):
-        return "sightseeing"
-    if any(_normalize(label) in type_name for label in _VISITOR_CULTURE_LABELS):
-        return "sightseeing"
-    if any(_normalize(label) in type_name for label in ("公园", "动物园", "植物园", "游乐园", "风景名胜")):
-        return "sightseeing"
-    return "unknown"
 
 
 def _all_fact_ids(facts: FactStore) -> set[str]:
@@ -224,7 +184,7 @@ def _requirement_matches_name(requirement: HardRequirement, name: str) -> bool:
         return False
     return any(
         normalized_name in _normalize(text)
-        for text in (requirement.text, requirement.source.quote)
+        for text in (requirement.text, requirement.source.quote if requirement.source else "")
         if text
     )
 
@@ -946,7 +906,7 @@ class AttractionSubtaskRunner:
                 ],
                 "requirement_ids": [
                     {"requirement_id": item.requirement_id, "kind": item.kind,
-                     "text": item.text, "source_quote": item.source.quote}
+                     "text": item.text, "source_quote": item.source.quote if item.source else None}
                     for item in requirements.values()
                 ],
                 "candidate_target": subtask.candidate_target,

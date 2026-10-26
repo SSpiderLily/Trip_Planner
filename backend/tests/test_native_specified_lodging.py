@@ -350,7 +350,7 @@ class LodgingIntegrationTests(unittest.TestCase):
                 output.append({"day_id":day["day_id"],"day_date":day["day_date"],"theme":"测试","activities":activities,
                     "lodging":{"candidate_ref":hotel["candidate_id"]}})
             return tool_call("submit_daily_plan",{"days":output},"daily-plan")
-        master=Model(tool_call("submit_requirements",empty,"requirements"),final(),
+        master=Model(tool_call("submit_requirements",empty,"requirements"),
             tool_call("find_attractions",sight_args(),"sights"),dining_task,final(),daily_plan,final())
         sight=Model(tool_call("maps_text_search",{"city":"上海","keywords":"测试公园"},"sight-query"),
             tool_call("submit_attractions",{"selections":[{"poi_id":"park","recommendation_reason":"测试景点"}]},"sight-submit"),final())

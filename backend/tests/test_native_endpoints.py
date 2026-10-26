@@ -423,7 +423,7 @@ class NativeEndpointIntegrationTests(unittest.TestCase):
                             "activities": activities, "lodging": {"candidate_ref": hotel["candidate_id"]}})
                     return tool_call("submit_daily_plan", {"days": output}, "daily")
                 empty = {key: [] for key in ("core_goals", "preferences", "hard_requirements", "lodging_changes", "unknowns", "assumptions")}
-                master = Model(tool_call("submit_requirements", empty, "requirements"), final(), batch(
+                master = Model(tool_call("submit_requirements", empty, "requirements"), batch(
                     tool_call("verify_endpoints", {}, "endpoints"), tool_call("query_weather", {}, "weather"),
                     tool_call("find_attractions", {"city": "上海", "dates": ["2026-10-20", "2026-10-21", "2026-10-22"],
                         "objective": "测试公园", "candidate_target": 1}, "sights")), dining_task, final(), daily, final())
@@ -443,7 +443,7 @@ class NativeEndpointIntegrationTests(unittest.TestCase):
                     adapter=AmapContractAdapter(maps), emit=trace.emit).run(request(), task_id="task", plan_id="plan")
                 self.assertEqual(result.draft.plan_id, "plan")
                 self.assertEqual(result.draft.source_run_id, "task")
-                self.assertEqual(result.collection.endpoints.run_id, "task")
+                self.assertEqual(result.snapshot.endpoint_evidence.run_id, "task")
                 self.assertEqual(len(result.repair.attempts), 0)
                 self.assertFalse({"station", "station2", "departure"} & {a.poi_id for d in result.draft.days for a in d.activities})
                 self.assertTrue(any(e["event"] == "endpoints.result" for e in trace.events))

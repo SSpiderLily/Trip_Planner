@@ -71,6 +71,7 @@ class Span:
         self.output = None
         self.usage = None
         self.model_diagnostics = None
+        self.model_configuration = None
 
 
 def token_usage(value):
@@ -89,6 +90,13 @@ def record_model_diagnostics(value):
     item = _active_model_span.get()
     if item is not None:
         item.model_diagnostics = value
+
+
+def record_model_configuration(value):
+    """只由SDK请求边界传入已解析的白名单配置，不保存客户端或凭据。"""
+    item = _active_model_span.get()
+    if item is not None:
+        item.model_configuration = value
 
 
 def mark_observation_missing(reason, error=None):
@@ -110,6 +118,9 @@ def span(name, kind, input_data=None):
             if item.model_diagnostics is not None:
                 output = item.output if isinstance(item.output, dict) else {"result": item.output}
                 item.output = {**output, "model_call": item.model_diagnostics}
+            if item.model_configuration is not None:
+                output = item.output if isinstance(item.output, dict) else {"result": item.output}
+                item.output = {**output, "model_configuration": item.model_configuration}
 
 
 @contextmanager

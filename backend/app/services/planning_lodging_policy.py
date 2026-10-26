@@ -26,6 +26,8 @@ def validate_lodging_changes(request, changes):
     if len(dates) != len(set(dates)) or any(day < start or day > end for day in dates):
         raise ValueError("住宿变更日期必须在旅行范围内且唯一")
     for change in changes:
+        if change.source is None:
+            continue  # 原生需求只检查日期范围/冲突，不检查引用和名称逐字关系。
         if change.source.field not in {"remarks", "preferences", "lodging_query"}:
             raise ValueError("住宿变更必须引用用户的住宿要求")
         validate_requirement_sources(request, (HardRequirement(
@@ -76,8 +78,8 @@ def city_for_days(planning_input, day_ids):
 
 
 def candidate_for_stay(stay, candidates, facts, area_hints, *, excluded_poi_ids=()):
-    from app.agents.attraction_subtask import _city_matches
-    from app.agents.lodging_subtask import _lodging_category, _matches_original_query, _is_region_or_business_area
+    from app.planning.fact_policy import _city_matches
+    from app.planning.fact_policy import _lodging_category, _matches_original_query, _is_region_or_business_area
     places = {place.fact_id: place for place in facts.places}
     sources = {source.tool_call_id for source in facts.sources}
     areas = {hint.area_hint_id for hint in area_hints}

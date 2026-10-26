@@ -58,8 +58,9 @@ def fixture_state(req, *, run_id="native-fixture"):
     child = NativeCandidateExecution(task_result=TaskResult(task_id="fixture-child", run_id=run_id,
         context_revision=1, request_id=req.request_id, status="complete", stop_reason="target_met",
         candidates=tuple(candidates)), fact_store=facts)
-    return NativeMultiagentCollectionResult(run_id, "", tuple(candidates), facts, (child,), (), 0, 1,
-        planning, NativeToolLoopResult("", (), (), 0))
+    from planning_collection_fixtures import normalized_collection
+    return normalized_collection(NativeMultiagentCollectionResult(run_id, "", tuple(candidates), facts, (child,), (), 0, 1,
+        planning, NativeToolLoopResult("", (), (), 0)))
 
 
 def tool_call(name, arguments, identifier="fixture-call"):
@@ -156,8 +157,8 @@ class RuntimeContractTests(unittest.TestCase):
                 self.assertEqual(result.initial_draft.plan_id, "plan-formal")
                 self.assertEqual(result.draft.plan_id, "plan-formal")
                 self.assertEqual(result.draft.source_run_id, "trip-formal")
-                self.assertEqual(result.collection.run_id, "trip-formal")
-                self.assertTrue(all(c.task_result.run_id == "trip-formal" for c in result.collection.children))
+                self.assertEqual(result.snapshot.identity.task_id, "trip-formal")
+                self.assertTrue(all(c.run_id == "trip-formal" for c in result.snapshot.task_results))
                 self.assertEqual(collector.run.call_args.kwargs["run_id"], "trip-formal")
                 self.assertEqual(result.draft.revision, 2 if missing else 1)
 
@@ -182,9 +183,9 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_standalone_entry_keeps_generated_identity_without_progress(self):
         result = planner()[0].run(request())
-        self.assertEqual(result.collection.run_id, "native-fixture")
+        self.assertTrue(result.snapshot.identity.task_id.startswith("run_"))
         self.assertTrue(result.draft.plan_id.startswith("plan"))
-        self.assertEqual(result.draft.source_run_id, "native-fixture")
+        self.assertEqual(result.draft.source_run_id, result.snapshot.identity.task_id)
 
     def test_no_submission_cannot_report_planning_finished(self):
         updates = []
@@ -225,7 +226,7 @@ class RuntimeContractTests(unittest.TestCase):
                 child = replace(state.children[0], task_result=state.children[0].task_result.model_copy(update={
                     "task_id": "fixture-repair-child", "candidates": (breakfast,)}))
                 return replace(seed, candidates=(*seed.candidates, breakfast), children=(*seed.children, child),
-                    protocol=NativeToolLoopResult("", tuple(kwargs["messages"]), (), 0))
+                    protocol=NativeToolLoopResult("", tuple(kwargs.get("messages", ())), (), 0))
             candidates = tuple(c.model_copy(update={"slot_ids": tuple(s for s in c.slot_ids
                 if s != "slot-2026-10-21-breakfast")}) if c.category == "meal" else c for c in state.candidates)
             child = replace(state.children[0], task_result=state.children[0].task_result.model_copy(update={"candidates": candidates}))

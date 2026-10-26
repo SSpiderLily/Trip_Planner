@@ -56,7 +56,7 @@ def main():
                 dining_llm=children["dining"], lodging_llm=children["lodging"], emit=trace.emit).run(request)
         places = {place.fact_id: place for place in result.fact_store.places}
         trace.emit("planner.result", {
-            "status": result.repair.status, "run_id": result.collection.run_id,
+            "status": result.repair.status, "run_id": result.snapshot.identity.task_id,
             "master_model_calls": master.requests,
             "child_model_calls": {role: model.requests for role, model in children.items()},
             "initial_revision": result.initial_draft.revision, "revision": result.draft.revision,

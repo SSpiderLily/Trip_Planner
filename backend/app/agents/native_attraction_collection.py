@@ -25,9 +25,9 @@ from app.services.planning_v4_rules import default_planning_v4_rules
 
 class AttractionRequirement(NativeToolArguments):
     kind: Literal["must_visit", "must_avoid"]
-    text: str = Field(min_length=2, max_length=200)
-    source_field: Literal["remarks", "preferences"]
-    source_quote: str = Field(min_length=2, max_length=300)
+    text: str
+    source_field: Literal["remarks", "preferences"] | None = None
+    source_quote: str | None = None
 
 
 class FindAttractionsArguments(NativeToolArguments):
@@ -98,7 +98,8 @@ class NativeAttractionCollection:
                 return {"status": "rejected", "code": "TASK_SCOPE_INVALID"}
             requirements = tuple(HardRequirement(
                 requirement_id=f"requirement_{uuid4().hex}", kind=item.kind, text=item.text,
-                source=RequirementSource(field=item.source_field, quote=item.source_quote),
+                source=RequirementSource(field=item.source_field, quote=item.source_quote)
+                    if item.source_field and item.source_quote else None,
             ) for item in args.hard_requirements)
             try:
                 validate_requirement_sources(request, requirements)

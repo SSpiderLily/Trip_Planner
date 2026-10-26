@@ -28,12 +28,19 @@ class AgentModelConfigTests(unittest.TestCase):
         self.assertEqual(master.model, "kimi-k3")
         for role in ("attractions", "dining", "lodging"):
             profile = resolve_agent_model_config(role, config)
-            self.assertEqual(profile.model, "glm-5.3-flash")
+            self.assertEqual(profile.model, "sub_agent")
             self.assertEqual(profile.api_key, "fixture-shared")
             self.assertEqual(profile.base_url, "https://shared.invalid/v1")
         self.assertEqual(master.api_key, "fixture-shared")
         self.assertNotIn("fixture-shared", repr(master))
         self.assertNotIn("fixture-shared", repr(config))
+
+    def test_only_three_child_profiles_have_low_reasoning_default(self):
+        config = settings_fixture()
+        self.assertIsNone(resolve_agent_model_config("master", config).reasoning_effort)
+        for role in ("attractions", "dining", "lodging"):
+            with self.subTest(role=role):
+                self.assertEqual(resolve_agent_model_config(role, config).reasoning_effort, "low")
 
     def test_role_models_override_defaults_and_share_gateway_before_openai_fallback(self):
         config = settings_fixture(
@@ -52,7 +59,7 @@ class AgentModelConfigTests(unittest.TestCase):
                                   openai_model="legacy-model")
         profile = resolve_agent_model_config("lodging", config)
         self.assertEqual((profile.model, profile.api_key, profile.base_url),
-                         ("glm-5.3-flash", "fixture-openai", "https://fallback.invalid/v1"))
+                         ("sub_agent", "fixture-openai", "https://fallback.invalid/v1"))
 
     def test_environment_role_settings_are_loaded_without_touching_real_env(self):
         env = {"MASTER_LLM_MODEL_ID": "master-env", "SUBAGENT_LLM_MODEL_ID": "sub-env",
@@ -80,12 +87,47 @@ class AgentModelConfigTests(unittest.TestCase):
         self.assertEqual(factory.call_args_list[0].kwargs, {
             "model": "kimi-k3", "api_key": "fixture-key",
             "base_url": "https://gateway.invalid/v1", "provider": "custom",
+            "temperature": 0.01, "output_token_limit": 1_000_000, "output_token_parameter": "max_tokens",
         })
-        self.assertEqual(factory.call_args_list[1].kwargs["model"], "glm-5.3-flash")
+        self.assertEqual(factory.call_args_list[1].kwargs["model"], "sub_agent")
         self.assertEqual(factory.call_args_list[1].kwargs, {
-            **factory.call_args_list[0].kwargs, "model": "glm-5.3-flash",
+            **factory.call_args_list[0].kwargs, "model": "sub_agent", "reasoning_effort": "low",
         })
         self.assertEqual(dict(os.environ), before)
+
+    def test_central_role_parameters_reach_actual_sdk_requests(self):
+        config = settings_fixture(master_llm_max_output_tokens=40000,
+            subagent_llm_max_output_tokens=20000, master_llm_reasoning_effort="high",
+            subagent_llm_reasoning_effort="low", llm_output_token_parameter="max_completion_tokens",
+            llm_api_key="fixture", llm_base_url="https://fixture.invalid/v1")
+        def initialize(instance, *, model, temperature, **kwargs):
+            instance.model, instance.temperature = model, temperature
+            instance._client = Mock()
+            instance._client.with_options.return_value = instance._client
+            instance._client.chat.completions.create.return_value = SimpleNamespace(
+                choices=[SimpleNamespace(message={"role":"assistant", "content":"done"}, finish_reason="stop")],
+                usage=None)
+        with patch.object(llm_service, "get_settings", return_value=config), \
+                patch.object(llm_service.HelloAgentsLLM, "__init__", initialize):
+            for role in ("master", "attractions", "dining", "lodging"):
+                with self.subTest(role=role):
+                    model = llm_service.get_agent_llm(role)
+                    model.invoke_native([], tools=[])
+                    args = model._client.chat.completions.create.call_args.kwargs
+                    self.assertEqual(args["temperature"], 0.01)
+                    self.assertEqual(args["max_completion_tokens"], 40000 if role == "master" else 20000)
+                    self.assertNotIn("max_tokens", args)
+                    self.assertEqual(args["reasoning_effort"], "high" if role == "master" else "low")
+                    # 单次显式参数不同时发送两种互斥的输出上限字段。
+                    model.invoke_native([], tools=[], max_tokens=10000)
+                    args = model._client.chat.completions.create.call_args.kwargs
+                    self.assertEqual(args["max_tokens"], 10000)
+                    self.assertNotIn("max_completion_tokens", args)
+
+    def test_output_limit_requires_positive_integer_not_max_string(self):
+        for value in ("max", 0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                settings_fixture(master_llm_max_output_tokens=value)
 
     def test_missing_credentials_and_unknown_role_never_create_client(self):
         with patch.object(llm_service, "get_settings", return_value=settings_fixture()), \
@@ -138,6 +180,44 @@ class NativeCompletionTests(unittest.TestCase):
         self.assertEqual(client.chat.completions.create.call_args.kwargs["tools"], tools)
         self.assertEqual(client.with_options.call_args.kwargs["max_retries"], 0)
         self.assertNotIn("max_tokens", client.chat.completions.create.call_args.kwargs)
+
+    def test_real_role_factory_sends_low_to_sdk_only_for_children(self):
+        config = settings_fixture(llm_api_key="fixture", llm_base_url="https://fixture.invalid/v1")
+        def initialize(instance, *, model="legacy", **kwargs):
+            prepared, _, _ = self.make_llm(ChatCompletionMessage(role="assistant", content="done"), "stop")
+            instance.model, instance.temperature, instance._client = model, prepared.temperature, prepared._client
+        llm_service.reset_llm()
+        self.addCleanup(llm_service.reset_llm)
+        with patch.object(llm_service, "get_settings", return_value=config), \
+                patch.object(llm_service.HelloAgentsLLM, "__init__", initialize):
+            for role in ("attractions", "dining", "lodging", "master"):
+                with self.subTest(role=role):
+                    llm = llm_service.get_agent_llm(role)
+                    for _ in range(2):
+                        llm.invoke_native([], tools=[])
+                    requests = llm._client.chat.completions.create.call_args_list
+                    self.assertTrue(all(call.kwargs.get("max_tokens") == 1_000_000 for call in requests))
+                    if role == "master":
+                        self.assertTrue(all("reasoning_effort" not in call.kwargs for call in requests))
+                    else:
+                        self.assertEqual([call.kwargs.get("reasoning_effort") for call in requests], ["low", "low"])
+            legacy = UsageAwareLLM()
+            legacy.invoke_native([])
+            self.assertNotIn("reasoning_effort", legacy._client.chat.completions.create.call_args.kwargs)
+
+    def test_low_is_preserved_across_tool_round_and_connection_retry(self):
+        from test_native_model_retry import connection_error, response, tool
+        from app.services.native_tool_loop import NativeToolLoop
+        llm, client, _ = self.make_llm(ChatCompletionMessage(role="assistant", content="done"), "stop")
+        llm.reasoning_effort = "low"
+        client.chat.completions.create.side_effect = [response("query"), connection_error(), response()]
+        with patch.object(NativeToolLoop, "_wait_before_retry"), patch("app.services.native_tool_loop.span") as observed:
+            result = NativeToolLoop(llm, [tool("query", lambda _: {"status": "ok"})]).run([])
+        self.assertEqual(result.model_calls, 3)
+        self.assertEqual([call.kwargs.get("reasoning_effort") for call in client.chat.completions.create.call_args_list], ["low"] * 3)
+        model_spans = [call for call in observed.call_args_list if call.args[0] == "llm.native_tool_loop"]
+        self.assertEqual(len(model_spans), 3)
+        self.assertTrue(all(call.args[2].get("reasoning_effort") == "low" for call in model_spans))
 
     def test_dictionary_message_is_copied_before_return(self):
         message = {"role": "assistant", "content": "done", "provider_field": {"state": "fixture"}}

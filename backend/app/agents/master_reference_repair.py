@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from app.models.planning_v4.decision import DelegatePayload
 
 
-RECOVERABLE_REFERENCE_CODES = frozenset({"MASTER_TASK_AREA_UNKNOWN", "MASTER_TASK_PREFERENCE_INVALID"})
+from app.planning.repair_policy import RECOVERABLE_REFERENCE_CODES
 
 
 @dataclass

@@ -10,17 +10,17 @@ from app.services.native_observation import observe_native_run
 from app.services.planning_diagnostics import observe_pipeline_run
 from uuid import uuid4
 
-from app.agents.native_trip_planner import NativeTripPlanner, NativeTripPlanResult
+from app.agents.native_trip_planner import NativeTripPlanner
+from app.models.planning_outcome import PlanningOutcome
+from app.planning.validation import validate_snapshot, validate_selected_draft
 from app.models.planning_runtime import PlanningRunIdentity
 from app.models.planning_v4 import ItineraryPreview, PreviewCalculation, TripRequest, ValidationIssue
 from app.models.planning_v4_preview import PreviewSnapshot
 from app.services.current_route_service import CurrentRouteService, build_pending_route_legs_for_day
-from app.services.native_endpoint_service import validate_native_endpoint_result
-from app.services.native_weather_service import validate_native_weather_result
 from app.services.native_planning_runtime import NativePlanningRuntime
 from app.services.native_tool_loop import NativeToolLoopError
 from app.services.planning_timeout_policy import planning_timeout_scope
-from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan
+from app.services.planning_v4_validation import build_day_summaries, validate_daily_plan, is_required_place_gap
 from app.services.preview_task_service import PreviewPipelineResult
 from app.services.preview_notice_policy import preserve_preview_notices
 from app.services.reference_cost import aggregate_reference_costs
@@ -63,34 +63,49 @@ def native_preview_deadline(function):
 
 
 def _check_result(result, request, identity):
-    if not isinstance(result, NativeTripPlanResult):
+    if not isinstance(result, PlanningOutcome):
         raise NativePreviewError("NATIVE_RESULT_INVALID", "preview_input")
-    planning, draft, collection = result.planning_input, result.draft, result.collection
-    if (planning.request != request or collection.run_id != identity.task_id
-            or collection.planning_input != planning
+    planning, draft, snapshot = result.planning_input, result.draft, result.snapshot
+    if (planning.request != request or snapshot.identity != identity
+            or result.initial_result.planning_input != planning or result.initial_result.identity != identity
             or any((item.plan_id, item.source_run_id, item.request_id, item.rule_version) !=
                    (identity.plan_id, identity.task_id, request.request_id, planning.rules.rule_version)
                    for item in (result.initial_draft, draft))
             or draft.revision < result.initial_draft.revision):
         raise NativePreviewError("NATIVE_RESULT_IDENTITY_MISMATCH", "preview_input")
-    if (result.report.plan_id, result.report.based_on_revision) != (draft.plan_id, draft.revision):
+    if ((result.report.plan_id, result.report.based_on_revision) != (draft.plan_id, draft.revision)
+            or (result.initial_result.report.plan_id, result.initial_result.report.based_on_revision)
+            != (result.initial_draft.plan_id, result.initial_draft.revision)):
         raise NativePreviewError("NATIVE_REPORT_VERSION_MISMATCH", "preview_input")
-    if result.repair.status == "technical_error":
+    if result.status == "technical_error" or result.repair.status == "technical_error":
         raise NativePreviewError("NATIVE_PLANNING_TECHNICAL_ERROR", "repair")
-    facts = result.fact_store
-    for value, validator in ((collection.weather, validate_native_weather_result),
-                             (collection.endpoints, validate_native_endpoint_result)):
-        if value is None:
+    if result.status != result.repair.status:
+        raise NativePreviewError("NATIVE_RESULT_INVALID", "preview_input")
+    if (snapshot.facts != result.fact_store or snapshot.candidates != result.repair.candidates
+            or snapshot.area_hints != result.repair.area_hints or snapshot.task_results != result.repair.task_results):
+        raise NativePreviewError("NATIVE_FACTS_MISSING", "preview_input")
+    for evidence, kinds in ((snapshot.weather_evidence, ('sources', 'weather')),
+                            (snapshot.endpoint_evidence, ('sources', 'places'))):
+        if evidence is None:
             continue
-        validator(planning, identity.task_id, value)
-        for name, key in (("sources", "tool_call_id"), ("places", "fact_id"), ("weather", "fact_id")):
-            final_rows = {getattr(row, key): row for row in getattr(facts, name)}
-            if any(final_rows.get(getattr(row, key)) != row for row in getattr(value.fact_store, name)):
+        for kind in kinds:
+            key = 'tool_call_id' if kind == 'sources' else 'fact_id'
+            rows = {getattr(row, key): row for row in getattr(snapshot.facts, kind)}
+            if any(rows.get(getattr(row, key)) != row for row in getattr(evidence.fact_store, kind)):
                 raise NativePreviewError("NATIVE_FACTS_MISSING", "preview_input")
+    # 重验公开快照及已选地点，不能信任生产者传来的有效标志。
+    validate_snapshot(snapshot)
+    validate_selected_draft(snapshot, draft)
+    expected = validate_daily_plan(planning, draft, snapshot.facts, snapshot.candidates,
+                                  repair_states=result.repair.repair_states)
+    if expected != result.report:
+        raise NativePreviewError("NATIVE_REPORT_MISMATCH", "preview_input")
+    if result.status == 'complete' and any(is_required_place_gap(planning, i) for i in expected.issues):
+        raise NativePreviewError("NATIVE_RESULT_INVALID", "preview_input")
 
 
 def _endpoint_notices(report, result):
-    endpoints = result.collection.endpoints
+    endpoints = result.snapshot.endpoint_evidence
     if endpoints is None:
         return report
     added = []
@@ -122,6 +137,7 @@ class NativePreviewAdapter:
                 raise NativePreviewError("TRIP_REQUEST_INVALID", "preview_input")
             identity = PlanningRunIdentity(task_id=task_id, plan_id=plan_id)
             _check_result(result, request, identity)
+            result = PlanningOutcome.model_validate(result.model_dump(mode="python"))
             planning = result.planning_input.model_copy(deep=True)
             facts = result.fact_store.model_copy(deep=True)
             candidates = tuple(candidate.model_copy(deep=True) for candidate in result.repair.candidates)

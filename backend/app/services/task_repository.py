@@ -62,7 +62,7 @@ class TaskRepository:
         finally:
             conn.close()
 
-    def initialize(self):
+    def initialize(self, *, recover_running=True):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
             conn.execute('PRAGMA journal_mode=WAL')
@@ -71,8 +71,9 @@ class TaskRepository:
             for field in ('input_tokens', 'output_tokens', 'total_tokens'):
                 if field not in existing:
                     conn.execute(f'ALTER TABLE spans ADD COLUMN {field} INTEGER')
-        self.recover()
-        self.cleanup()
+        if recover_running:
+            self.recover()
+            self.cleanup()
 
     def recover(self):
         with self.connection() as conn:

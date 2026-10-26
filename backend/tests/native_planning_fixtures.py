@@ -65,7 +65,7 @@ def spatial_submit(messages):
         'recommendation_reason': '模拟酒店'}]}, 'hotel-submit')
 
 
-def daily_plan(messages):
+def daily_plan(messages, *, omit_slot=True):
     data = user_data(messages); output = []
     for day in data['planning_input']['days']:
         activities = []
@@ -77,7 +77,8 @@ def daily_plan(messages):
             activities.append({'proposal_ref': 'new-'+slot, 'candidate_ref': candidate['candidate_id'],
                 'slot_id': slot, 'kind': 'meal' if candidate['category'] == 'meal' else 'sightseeing'})
         hotel = next(c for c in data['candidates'] if c['category'] == 'lodging')
-        activities.pop(0)  # 故意缺一个时段；真实DayRepairService采用已有候选修订。
+        if omit_slot:
+            activities.pop(0)  # 故意缺一个时段；真实DayRepairService采用已有候选修订。
         output.append({'day_id': day['day_id'], 'day_date': day['day_date'], 'theme': '模拟初版', 'activities': activities,
             'lodging': {'candidate_ref': hotel['candidate_id'], 'area_hint_id': hotel['area_hint_id']}})
     return call('submit_daily_plan', {'days': output}, 'plan-submit')
@@ -98,15 +99,15 @@ def revise(messages):
         if k in ('candidate_ref', 'area_hint_id')}, 'unfilled_slot_ids': []}}, 'revision-submit')
 
 
-def fixture_planner(barrier=None, reference_cost=None):
+def fixture_planner(barrier=None, reference_cost=None, *, repair=True):
     req = TripRequest(request_id='mock-observation', city='上海',
         arrival_at=datetime.fromisoformat('2026-10-20T09:00:00+08:00'), departure_at=datetime.fromisoformat('2026-10-20T20:00:00+08:00'))
     master = Model('kimi-k3', call('submit_requirements', {key: [] for key in (
-        'core_goals', 'hard_requirements', 'lodging_changes', 'preferences', 'unknowns', 'assumptions')}, 'requirements-submit'), done(),
-        call('find_attractions', task_args(), 'sights-task'), dispatch_support, done(), daily_plan, done(), revise, done())
+        'core_goals', 'hard_requirements', 'lodging_changes', 'preferences', 'unknowns', 'assumptions')}, 'requirements-submit'),
+        call('find_attractions', task_args(), 'sights-task'), dispatch_support, done(), lambda m: daily_plan(m, omit_slot=repair), *([revise] if repair else []))
     sights = Model('glm-5.3-flash', call('maps_text_search', {'city': '上海', 'keywords': '模拟景点'}, 'sights-query'),
-        call('submit_attractions', {'selections': [{'poi_id': 'p-sights', 'recommendation_reason': '模拟景点'}]}, 'sights-submit'), done())
-    dining, lodging = (Model('glm-5.3-flash', spatial_queries, spatial_submit, done()) for _ in range(2))
+        call('submit_attractions', {'selections': [{'poi_id': 'p-sights', 'recommendation_reason': '模拟景点'}]}, 'sights-submit'))
+    dining, lodging = (Model('glm-5.3-flash', spatial_queries, spatial_submit) for _ in range(2))
     seen = set()
     def maps(name, args):
         assert args["extensions"] == "all", "候选查询必须携带消费扩展字段"

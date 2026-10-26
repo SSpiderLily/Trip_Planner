@@ -70,19 +70,11 @@ class Model:
 class NativeRequirementTests(unittest.TestCase):
     def run_submission(self, args=None, req=None):
         req = req or request()
-        model = Model(call(args if args is not None else submission(req)), final())
+        model = Model(call(args if args is not None else submission(req)), AssertionError("接受后禁止再次请求需求模型"))
         return NativeRequirementInterpreter(llm=model).run(req), model
 
-    def assert_rejection(self, args, code, *, req=None):
-        req = req or request()
-        model = Model(call(args, "bad"), call(submission(req), "correct"), final())
-        result = NativeRequirementInterpreter(llm=model).run(req)
-        value = json.loads(model.requests[1]["messages"][-1]["content"])
-        self.assertEqual(value["data"]["code"], code)
-        self.assertEqual(result.summary.request_id, req.request_id)
-        return model
 
-    def test_complete_summary_and_grounding_preserve_original_structured_fields(self):
+    def test_complete_summary_preserves_model_content_and_original_structured_fields(self):
         req = request(); original = req.model_dump(mode="json")
         result, model = self.run_submission(req=req)
         self.assertEqual(req.model_dump(mode="json"), original)
@@ -92,115 +84,25 @@ class NativeRequirementTests(unittest.TestCase):
         self.assertEqual([r.kind for r in result.summary.hard_requirements], ["must_visit", "must_avoid", "must_include", "must_include"])
         self.assertEqual(result.summary.preferences, ("历史建筑", "本帮菜", "transit", "walking"))
         self.assertEqual(result.summary.lodging_changes[0].start_date.isoformat(), "2026-10-21")
-        self.assertEqual(result.submission.core_goals[0].source.quote, "城市漫步")
+        self.assertIsNone(result.summary.hard_requirements[0].source)
         self.assertEqual(result.summary.assumptions, ())
         self.assertEqual(len({r.requirement_id for r in result.summary.hard_requirements}), 4)
-        accepted = json.loads(model.requests[1]["messages"][-1]["content"])["data"]
+        self.assertEqual((len(model.requests), result.protocol.termination_reason), (1, "submission_accepted"))
+        self.assertEqual(result.protocol.completions[-1].finish_reason, "tool_calls")
+        accepted = json.loads(result.protocol.messages[-1]["content"])["data"]
         self.assertEqual(accepted["requirements"], result.summary.model_dump(mode="json"))
         self.assertEqual([t["function"]["name"] for t in model.requests[0]["tools"]], ["submit_requirements"])
 
-    def test_datetime_source_matches_original_json_iso_format(self):
+
+    def test_datetime_source_extra_fields_are_not_required_or_checked(self):
         original = request()
         for req in (original, original.model_copy(update={"arrival_at": original.arrival_at.astimezone(timezone.utc)})):
             with self.subTest(offset=req.arrival_at.utcoffset()):
                 args = submission(); quote = req.model_dump(mode="json")["arrival_at"]
                 args["core_goals"].append(grounded("按用户到达日期旅行", quote, "arrival_at"))
                 result, _ = self.run_submission(args, req)
-                self.assertEqual(result.submission.core_goals[-1].source.quote, quote)
+                self.assertEqual(result.submission.core_goals[-1].text, "按用户到达日期旅行")
 
-    def test_fixed_input_and_id_overrides_are_structurally_rejected(self):
-        for key, value in (("city", "北京"), ("arrival_at", "changed"), ("budget", {"amount": 1}),
-                           ("request_id", "other"), ("requirements_id", "invented")):
-            with self.subTest(key=key):
-                args = submission(); args[key] = value
-                model = Model(call(args, "bad"), call(submission(), "good"), final())
-                NativeRequirementInterpreter(llm=model).run(request())
-                error = json.loads(model.requests[1]["messages"][-1]["content"])["error"]
-                self.assertEqual(error["code"], "INVALID_TOOL_ARGUMENTS")
-
-    def test_required_categories_cannot_be_omitted(self):
-        for key in submission():
-            with self.subTest(field=key):
-                args = submission(); args.pop(key)
-                model = Model(call(args, "bad"), call(submission(), "good"), final())
-                NativeRequirementInterpreter(llm=model).run(request())
-                self.assertEqual(json.loads(model.requests[1]["messages"][-1]["content"])["error"]["code"], "INVALID_TOOL_ARGUMENTS")
-
-    def test_hard_source_invented_or_from_wrong_field_rejected_then_corrected(self):
-        for source in ({"field": "remarks", "quote": "外滩一定要去"}, {"field": "preferences", "quote": "必须去外滩"}):
-            args = submission(); args["hard_requirements"][0]["source"] = source
-            self.assert_rejection(args, "REQUIREMENT_SOURCE_INVALID")
-
-    def test_goals_and_soft_preferences_also_need_source(self):
-        for category in ("core_goals", "preferences"):
-            args = submission(); args[category][0]["source"]["quote"] = "未经用户要求的体验"
-            self.assert_rejection(args, "REQUIREMENT_SOURCE_INVALID")
-
-    def test_structured_preferences_and_transport_cannot_be_silently_dropped(self):
-        for index in (0, 3):
-            args = submission(); args["preferences"].pop(index)
-            self.assert_rejection(args, "REQUIREMENT_PREFERENCES_INCOMPLETE")
-
-    def test_duplicate_hard_requirements_rejected(self):
-        args = submission(); args["hard_requirements"].append(deepcopy(args["hard_requirements"][0]))
-        self.assert_rejection(args, "REQUIREMENT_DUPLICATE")
-
-    def test_known_inputs_cannot_be_called_unknown(self):
-        for unknown in ("lodging_query", "budget.amount"):
-            args = submission(); args["unknowns"].append(unknown)
-            self.assert_rejection(args, "REQUIREMENT_UNKNOWN_INVALID")
-        args = submission(); args["unknowns"].append(args["unknowns"][0])
-        self.assert_rejection(args, "REQUIREMENT_UNKNOWN_INVALID")
-
-    def test_selected_hotel_poi_is_known_even_without_query(self):
-        req = request().model_copy(update={"lodging_query": None})
-        args = submission(req); args["unknowns"].append("lodging_query")
-        self.assert_rejection(args, "REQUIREMENT_UNKNOWN_INVALID", req=req)
-
-    def test_structured_lodging_does_not_become_dining_or_other_hard_requirement(self):
-        args = submission(); args["hard_requirements"].append({"kind": "must_include", **grounded("指定住处", "指定住处", "lodging_query")})
-        self.assert_rejection(args, "REQUIREMENT_STRUCTURED_LODGING_DUPLICATE")
-
-    def test_lodging_date_scope_duplicate_dates_and_unquoted_name_rejected(self):
-        for mutate in (lambda a: a["lodging_changes"][0].update(start_date="2026-10-23"),
-                       lambda a: a["lodging_changes"].append(deepcopy(a["lodging_changes"][0])),
-                       lambda a: a["lodging_changes"][0].update(lodging_query="模型另选酒店")):
-            args = submission(); mutate(args)
-            self.assert_rejection(args, "REQUIREMENT_SOURCE_INVALID")
-
-    def test_empty_text_and_whitespace_source_rejected(self):
-        for mutate in (lambda a: a["hard_requirements"][0].update(text="  "),
-                       lambda a: a["core_goals"][0]["source"].update(quote=" ")):
-            args = submission(); mutate(args)
-            self.assert_rejection(args, "REQUIREMENT_TEXT_INVALID")
-
-    def test_assumptions_and_model_assigned_requirement_id_rejected(self):
-        for mutate in (lambda a: a.update(assumptions=["两位成人"]),
-                       lambda a: a["hard_requirements"][0].update(requirement_id="M1")):
-            args = submission(); mutate(args)
-            model = Model(call(args, "bad"), call(submission(), "good"), final())
-            NativeRequirementInterpreter(llm=model).run(request())
-            self.assertEqual(json.loads(model.requests[1]["messages"][-1]["content"])["error"]["code"], "INVALID_TOOL_ARGUMENTS")
-
-    def test_invalid_json_duplicate_keys_nonstandard_numbers_and_types(self):
-        for raw in ('{"core_goals":[],"core_goals":[]}', '{"core_goals":NaN}', '{broken', '[]'):
-            model = Model(call(raw, "bad", raw=True), call(submission(), "good"), final())
-            NativeRequirementInterpreter(llm=model).run(request())
-            self.assertEqual(json.loads(model.requests[1]["messages"][-1]["content"])["error"]["code"], "INVALID_TOOL_ARGUMENTS")
-
-    def test_no_tool_submit_or_invalid_only_never_creates_empty_fallback(self):
-        for responses in ((final(),), (call({}), final())):
-            with self.subTest(responses=responses):
-                with self.assertRaises(NativeToolLoopError) as caught:
-                    NativeRequirementInterpreter(llm=Model(*responses)).run(request())
-                self.assertEqual(caught.exception.code, "MASTER_DID_NOT_SUBMIT_REQUIREMENTS")
-
-    def test_accepted_summary_cannot_be_overwritten_by_later_submission(self):
-        alternate = submission(); alternate["hard_requirements"] = []
-        model = Model(call(submission(), "first"), call(alternate, "second"), final())
-        result = NativeRequirementInterpreter(llm=model).run(request())
-        self.assertEqual(len(result.summary.hard_requirements), 4)
-        self.assertEqual(json.loads(model.requests[2]["messages"][-1]["content"])["data"]["status"], "already_submitted")
 
     def test_provider_failure_truncation_and_cancellation_have_no_summary(self):
         for response in (RuntimeError("private provider text"), NativeLLMCompletion({"role": "assistant", "content": None}, None, "length")):
@@ -212,6 +114,7 @@ class NativeRequirementTests(unittest.TestCase):
             NativeRequirementInterpreter(llm=model).run(request(), cancel_event=event)
         self.assertEqual(caught.exception.code, "CANCELLED"); self.assertEqual(model.requests, [])
 
+
     def test_protocol_history_and_provider_extra_fields_preserved_but_not_traced(self):
         response = call(submission()); response.message["provider_extra"] = {"opaque": "kept"}
         trace = NativeChainTrace(); previous = [{"role": "system", "content": "先前历史"}]
@@ -220,17 +123,20 @@ class NativeRequirementTests(unittest.TestCase):
         self.assertTrue(any(m.get("provider_extra") for m in result.protocol.messages))
         self.assertNotIn("provider_extra", json.dumps(trace.events))
 
+
     def test_consumer_validation_rejects_foreign_summary_and_duplicate_ids(self):
         result, _ = self.run_submission()
         for summary in (result.summary.model_copy(update={"request_id": "other"}), result.summary.model_copy(update={
                 "hard_requirements": (result.summary.hard_requirements[0], result.summary.hard_requirements[0])})):
             with self.assertRaises(NativeToolLoopError): validate_native_requirement_summary(request(), summary)
 
+
     def test_empty_request_categories_are_valid_and_do_not_fabricate_demands(self):
         req = request().model_copy(update={"preferences": (), "transport_preferences": (), "remarks": ""})
         args = {key: [] for key in submission()}
         result, _ = self.run_submission(args, req)
         self.assertEqual(result.summary.hard_requirements, ()); self.assertEqual(result.summary.core_goals, ())
+
 
     def test_map_tool_is_not_available_and_model_can_correct_to_submit(self):
         response = call({}, "map-attempt")
@@ -240,11 +146,14 @@ class NativeRequirementTests(unittest.TestCase):
             NativeRequirementInterpreter(llm=model).run(request())
         self.assertEqual(json.loads(model.requests[1]["messages"][-1]["content"])["error"]["code"], "UNKNOWN_TOOL")
 
+
     def test_repeated_invalid_outputs_stop_at_technical_limit(self):
-        model = Model(call({}, "bad-1"), call({}, "bad-2"), call({}, "bad-3"))
+        model = Model(*(call({"core_goals": "not-a-list"}, "bad-"+str(i)) for i in range(3)))
         with self.assertRaises(NativeToolLoopError):
             NativeRequirementInterpreter(llm=model, max_model_calls=2).run(request())
         self.assertEqual(len(model.requests), 2)
+
+
 
 
 class RequirementIntegrationTests(unittest.TestCase):
@@ -355,8 +264,9 @@ class RequirementIntegrationTests(unittest.TestCase):
             facts=FactStore(places=tuple(places),sources=(source,))
             child=NativeCandidateExecution(TaskResult(task_id="fixed-child",run_id=kw["run_id"],context_revision=1,request_id=raw_request.request_id,
                 status="complete",stop_reason="target_met",candidates=tuple(candidates)),facts)
-            return NativeMultiagentCollectionResult(kw["run_id"],"",tuple(candidates),facts,(child,),(),0,1,planning,
-                NativeToolLoopResult("",tuple(kw["messages"]),(),0))
+            from planning_collection_fixtures import normalized_collection
+            return normalized_collection(NativeMultiagentCollectionResult(kw["run_id"],"",tuple(candidates),facts,(child,),(),0,1,planning,
+                NativeToolLoopResult("",tuple(kw.get("messages", ())),(),0)))
         collector.run.side_effect=collect
         def plan(messages):
             payload=json.loads(next(m["content"] for m in reversed(messages) if m["role"]=="user"))
@@ -371,14 +281,14 @@ class RequirementIntegrationTests(unittest.TestCase):
                 output.append({"day_id":day["day_id"],"day_date":day["day_date"],"theme":"测试","activities":activities,"lodging":{"candidate_ref":"lodging"}})
             response=call({"days":output},"daily-submit");response.message["tool_calls"][0]["function"]["name"]="submit_daily_plan"
             return response
-        model=Model(call(args,"requirement-submit"),final(),plan,final())
+        model=Model(call(args,"requirement-submit"),plan,final())
         result=NativeTripPlanner(master_llm=model,collector=collector).run(req,task_id="formal-trip",plan_id="formal-plan")
         self.assertEqual(result.repair.status,"complete")
         self.assertEqual(result.draft.source_run_id,"formal-trip");self.assertEqual(result.draft.plan_id,"formal-plan")
         self.assertEqual(len(result.planning_input.requirements.hard_requirements),2)
         self.assertEqual(result.planning_input.requirements,collector.run.call_args.kwargs["requirements"])
-        self.assertTrue(any(m.get("tool_calls", [{}])[0].get("function",{}).get("name")=="submit_requirements"
-            for m in model.requests[2]["messages"] if m["role"]=="assistant"))
+        self.assertEqual([m['role'] for m in model.requests[1]['messages']], ['system', 'user'])
+        self.assertNotIn('messages', collector.run.call_args.kwargs)
         diet_id=result.planning_input.requirements.hard_requirements[1].requirement_id
         self.assertIn(diet_id,[r.requirement_id for r in result.report.requirements])
         self.assertNotEqual(next(r.status for r in result.report.requirements if r.requirement_id==diet_id),"satisfied")

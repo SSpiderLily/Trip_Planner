@@ -1,0 +1,819 @@
+{
+  "case_id": "missing_meal",
+  "source_type": "synthetic",
+  "notice": "仅用于测试的合成资料，不代表真实核实结果。",
+  "snapshot": {
+    "schema_version": 2,
+    "identity": {
+      "task_id": "run-f06-synthetic",
+      "plan_id": "plan-sole-synthetic"
+    },
+    "planning_input": {
+      "schema_version": 4,
+      "request": {
+        "schema_version": 4,
+        "request_id": "request-f06",
+        "city": "上海",
+        "arrival_at": "2026-10-10T09:00:00+08:00",
+        "departure_at": "2026-10-11T19:00:00+08:00",
+        "timezone": "Asia/Shanghai",
+        "preferences": [
+          "城市漫步",
+          "美食"
+        ],
+        "transport_preferences": [
+          "transit",
+          "walking"
+        ],
+        "arrival_place_query": null,
+        "departure_place_query": null,
+        "lodging_query": null,
+        "lodging_poi_id": null,
+        "explicit_return_buffer_s": null,
+        "budget": {
+          "amount": null,
+          "currency": "CNY",
+          "scope": "whole_trip",
+          "amount_basis": "whole_party",
+          "party_basis": "unspecified",
+          "party_size": null
+        },
+        "remarks": "步行与公共交通结合；希望每天有灵活休息时间。"
+      },
+      "requirements": {
+        "requirements_id": "requirements-f06",
+        "request_id": "request-f06",
+        "core_goals": [
+          "城市漫步",
+          "美食"
+        ],
+        "lodging_changes": [],
+        "hard_requirements": [],
+        "preferences": [],
+        "unknowns": [],
+        "assumptions": []
+      },
+      "rules": {
+        "rule_version": "rules-f06-v1",
+        "windows": [
+          {
+            "period": "breakfast",
+            "start_minute": 480,
+            "end_minute": 540
+          },
+          {
+            "period": "morning",
+            "start_minute": 540,
+            "end_minute": 720
+          },
+          {
+            "period": "lunch",
+            "start_minute": 720,
+            "end_minute": 840
+          },
+          {
+            "period": "afternoon",
+            "start_minute": 840,
+            "end_minute": 1020
+          },
+          {
+            "period": "dinner",
+            "start_minute": 1020,
+            "end_minute": 1140
+          },
+          {
+            "period": "evening",
+            "start_minute": 1140,
+            "end_minute": 1320
+          }
+        ],
+        "meal_minimum_available_s": 3600,
+        "sightseeing_minimum_available_s": 10800,
+        "max_repair_rounds_per_day": 3,
+        "full_day_start_minute": 480,
+        "return_buffer_default_s": 3600,
+        "departure_day_minimum_usable_s": 10800,
+        "arrival_block_rules": [
+          {
+            "block": "midnight",
+            "start_minute": 0,
+            "end_minute": 360,
+            "first_visit_period": "afternoon"
+          },
+          {
+            "block": "morning",
+            "start_minute": 360,
+            "end_minute": 720,
+            "first_visit_period": "afternoon"
+          },
+          {
+            "block": "afternoon",
+            "start_minute": 720,
+            "end_minute": 1080,
+            "first_visit_period": "evening"
+          },
+          {
+            "block": "evening",
+            "start_minute": 1080,
+            "end_minute": 1440,
+            "first_visit_period": "morning"
+          }
+        ],
+        "arrival_meals_use_actual_availability": true,
+        "short_arrival_window_policy": "skip_without_missing",
+        "departure_day_activities_below_minimum": "skip_without_missing",
+        "return_buffer_priority": "explicit_user_value_then_default"
+      },
+      "days": [
+        {
+          "day_id": "day-2026-10-10",
+          "day_date": "2026-10-10",
+          "available_start": "2026-10-10T09:00:00+08:00",
+          "available_end": null,
+          "slots": [
+            {
+              "slot_id": "slot-2026-10-10-breakfast",
+              "day_id": "day-2026-10-10",
+              "period": "breakfast",
+              "eligibility": "skipped",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-10-morning",
+              "day_id": "day-2026-10-10",
+              "period": "morning",
+              "eligibility": "skipped",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-10-lunch",
+              "day_id": "day-2026-10-10",
+              "period": "lunch",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-10-afternoon",
+              "day_id": "day-2026-10-10",
+              "period": "afternoon",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-10-dinner",
+              "day_id": "day-2026-10-10",
+              "period": "dinner",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-10-evening",
+              "day_id": "day-2026-10-10",
+              "period": "evening",
+              "eligibility": "required",
+              "condition_reason": null
+            }
+          ]
+        },
+        {
+          "day_id": "day-2026-10-11",
+          "day_date": "2026-10-11",
+          "available_start": "2026-10-11T08:00:00+08:00",
+          "available_end": "2026-10-11T18:00:00+08:00",
+          "slots": [
+            {
+              "slot_id": "slot-2026-10-11-breakfast",
+              "day_id": "day-2026-10-11",
+              "period": "breakfast",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-11-morning",
+              "day_id": "day-2026-10-11",
+              "period": "morning",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-11-lunch",
+              "day_id": "day-2026-10-11",
+              "period": "lunch",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-11-afternoon",
+              "day_id": "day-2026-10-11",
+              "period": "afternoon",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-11-dinner",
+              "day_id": "day-2026-10-11",
+              "period": "dinner",
+              "eligibility": "required",
+              "condition_reason": null
+            },
+            {
+              "slot_id": "slot-2026-10-11-evening",
+              "day_id": "day-2026-10-11",
+              "period": "evening",
+              "eligibility": "skipped",
+              "condition_reason": null
+            }
+          ]
+        }
+      ],
+      "boundary_facts": {
+        "effective_return_buffer_s": 3600,
+        "return_buffer_source": "default",
+        "day_ready_at": null,
+        "arrival_start_optimistic_at": "2026-10-10T09:00:00+08:00",
+        "departure_activity_end_upper_bound_at": "2026-10-11T18:00:00+08:00"
+      }
+    },
+    "facts": {
+      "sources": [
+        {
+          "tool_call_id": "source-synthetic-map",
+          "provider": "amap",
+          "tool_name": "maps_text_search",
+          "api_version": "v4",
+          "queried_at": "2026-10-01T10:00:00+08:00",
+          "effective_params": {
+            "city": "上海"
+          }
+        }
+      ],
+      "places": [
+        {
+          "fact_id": "fact-bund",
+          "poi_id": "poi-bund",
+          "name": "外滩观景点",
+          "location": {
+            "lng": 121.49,
+            "lat": 31.24,
+            "coordinate_system": "GCJ-02"
+          },
+          "address": "上海市黄浦区中山东一路",
+          "city": "上海",
+          "adcode": null,
+          "type_name": "风景名胜",
+          "typecode": "110000",
+          "business_area": null,
+          "cost": {
+            "raw": null,
+            "value": null,
+            "unit": "per_person_reference"
+          },
+          "opening_hours_raw": null,
+          "photos": [],
+          "source_refs": [
+            "source-synthetic-map"
+          ],
+          "field_sources": {
+            "name": "source-synthetic-map",
+            "location": "source-synthetic-map"
+          },
+          "missing_fields": []
+        },
+        {
+          "fact_id": "fact-meal",
+          "poi_id": "poi-meal",
+          "name": "合成餐厅",
+          "location": {
+            "lng": 121.5,
+            "lat": 31.24,
+            "coordinate_system": "GCJ-02"
+          },
+          "address": "上海市黄浦区合成路1号",
+          "city": "上海",
+          "adcode": null,
+          "type_name": "餐饮服务",
+          "typecode": "050000",
+          "business_area": null,
+          "cost": {
+            "raw": null,
+            "value": null,
+            "unit": "per_person_reference"
+          },
+          "opening_hours_raw": null,
+          "photos": [],
+          "source_refs": [
+            "source-synthetic-map"
+          ],
+          "field_sources": {
+            "name": "source-synthetic-map"
+          },
+          "missing_fields": []
+        },
+        {
+          "fact_id": "fact-hotel",
+          "poi_id": "poi-hotel",
+          "name": "合成推荐酒店",
+          "location": {
+            "lng": 121.48,
+            "lat": 31.23,
+            "coordinate_system": "GCJ-02"
+          },
+          "address": "上海市黄浦区外滩路1号",
+          "city": "上海",
+          "adcode": null,
+          "type_name": "住宿服务",
+          "typecode": "100000",
+          "business_area": null,
+          "cost": {
+            "raw": null,
+            "value": null,
+            "unit": "per_person_reference"
+          },
+          "opening_hours_raw": null,
+          "photos": [],
+          "source_refs": [
+            "source-synthetic-map"
+          ],
+          "field_sources": {
+            "name": "source-synthetic-map"
+          },
+          "missing_fields": []
+        }
+      ],
+      "weather": [
+        {
+          "fact_id": "fact-weather",
+          "city": "上海",
+          "adcode": null,
+          "report_time": null,
+          "forecasts": [
+            {
+              "forecast_date": "2026-10-10",
+              "day_weather": "多云",
+              "night_weather": null,
+              "day_temp_c": 22.0,
+              "night_temp_c": 17.0,
+              "day_wind": null,
+              "night_wind": null,
+              "day_power": null,
+              "night_power": null
+            }
+          ],
+          "source": {
+            "tool_call_id": "source-synthetic-map",
+            "provider": "amap",
+            "tool_name": "maps_text_search",
+            "api_version": "v4",
+            "queried_at": "2026-10-01T10:00:00+08:00",
+            "effective_params": {
+              "city": "上海"
+            }
+          },
+          "missing_dates": []
+        }
+      ],
+      "routes": []
+    },
+    "candidates": [
+      {
+        "candidate_id": "candidate-bund",
+        "category": "sightseeing",
+        "poi_id": "poi-bund",
+        "place_fact_id": "fact-bund",
+        "area_hint_id": null,
+        "lodging_day_ids": [],
+        "slot_ids": [],
+        "requirement_ids": [],
+        "recommendation_reason": "已核实的城市漫步地点。"
+      },
+      {
+        "candidate_id": "candidate-hotel",
+        "category": "lodging",
+        "poi_id": "poi-hotel",
+        "place_fact_id": "fact-hotel",
+        "area_hint_id": "area-bund",
+        "lodging_day_ids": [],
+        "slot_ids": [],
+        "requirement_ids": [],
+        "recommendation_reason": ""
+      }
+    ],
+    "area_hints": [
+      {
+        "area_hint_id": "area-bund",
+        "label": "外滩区域",
+        "anchor_poi_ids": [
+          "poi-bund"
+        ],
+        "center": null,
+        "basis_fact_ids": [
+          "fact-bund"
+        ],
+        "basis": "model_recommendation"
+      },
+      {
+        "area_hint_id": "area-city-center",
+        "label": "市中心区域",
+        "anchor_poi_ids": [
+          "poi-meal"
+        ],
+        "center": null,
+        "basis_fact_ids": [
+          "fact-meal"
+        ],
+        "basis": "model_recommendation"
+      }
+    ],
+    "task_results": []
+  },
+  "submission": {
+    "days": [
+      {
+        "day_id": "day-2026-10-10",
+        "day_date": "2026-10-10",
+        "theme": "第10日城市漫步",
+        "activities": [
+          {
+            "proposal_ref": "slot-2026-10-10-afternoon",
+            "existing_activity_id": null,
+            "candidate_ref": "candidate-bund",
+            "slot_id": "slot-2026-10-10-afternoon",
+            "kind": "sightseeing",
+            "requirement_ids": [],
+            "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+          },
+          {
+            "proposal_ref": "slot-2026-10-10-evening",
+            "existing_activity_id": null,
+            "candidate_ref": "candidate-bund",
+            "slot_id": "slot-2026-10-10-evening",
+            "kind": "sightseeing",
+            "requirement_ids": [],
+            "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+          }
+        ],
+        "unfilled_slot_ids": [],
+        "lodging": null,
+        "weather_advice": "按当天预报准备轻便外套。"
+      },
+      {
+        "day_id": "day-2026-10-11",
+        "day_date": "2026-10-11",
+        "theme": "第11日城市漫步",
+        "activities": [
+          {
+            "proposal_ref": "slot-2026-10-11-morning",
+            "existing_activity_id": null,
+            "candidate_ref": "candidate-bund",
+            "slot_id": "slot-2026-10-11-morning",
+            "kind": "sightseeing",
+            "requirement_ids": [],
+            "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+          },
+          {
+            "proposal_ref": "slot-2026-10-11-afternoon",
+            "existing_activity_id": null,
+            "candidate_ref": "candidate-bund",
+            "slot_id": "slot-2026-10-11-afternoon",
+            "kind": "sightseeing",
+            "requirement_ids": [],
+            "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+          }
+        ],
+        "unfilled_slot_ids": [],
+        "lodging": null,
+        "weather_advice": "这一天阳光充足，适合户外活动。"
+      }
+    ],
+    "missing_notes": [
+      "尚未核实返程地点。"
+    ]
+  },
+  "expected": {
+    "required_slots": [
+      "slot-2026-10-10-lunch",
+      "slot-2026-10-10-afternoon",
+      "slot-2026-10-10-dinner",
+      "slot-2026-10-10-evening",
+      "slot-2026-10-11-breakfast",
+      "slot-2026-10-11-morning",
+      "slot-2026-10-11-lunch",
+      "slot-2026-10-11-afternoon",
+      "slot-2026-10-11-dinner"
+    ],
+    "allowed_unknowns": [
+      "cost",
+      "weather",
+      "opening_hours"
+    ],
+    "draft": {
+      "schema_version": 4,
+      "plan_id": "plan-sole-synthetic",
+      "request_id": "request-f06",
+      "source_run_id": "run-f06-synthetic",
+      "revision": 1,
+      "base_revision": null,
+      "rule_version": "rules-f06-v1",
+      "days": [
+        {
+          "day_id": "day-2026-10-10",
+          "day_date": "2026-10-10",
+          "theme": "第10日城市漫步",
+          "activities": [
+            {
+              "activity_id": "activity_ceb6d6ebe529570bbcfe1f88bc52f80e",
+              "candidate_ref": "candidate-bund",
+              "slot_id": "slot-2026-10-10-afternoon",
+              "kind": "sightseeing",
+              "poi_id": "poi-bund",
+              "place_fact_id": "fact-bund",
+              "activity_source": "model",
+              "requirement_ids": [],
+              "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+            },
+            {
+              "activity_id": "activity_743e50c3e43957c3ba9aa883b60b1638",
+              "candidate_ref": "candidate-bund",
+              "slot_id": "slot-2026-10-10-evening",
+              "kind": "sightseeing",
+              "poi_id": "poi-bund",
+              "place_fact_id": "fact-bund",
+              "activity_source": "model",
+              "requirement_ids": [],
+              "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+            }
+          ],
+          "unfilled_slot_ids": [
+            "slot-2026-10-10-lunch",
+            "slot-2026-10-10-dinner"
+          ],
+          "weather_fact_id": "fact-weather",
+          "weather_advice": "按当天预报准备轻便外套。",
+          "lodging": {
+            "candidate_ref": "candidate-hotel",
+            "poi_id": "poi-hotel",
+            "place_fact_id": "fact-hotel",
+            "area_hint_id": "area-bund",
+            "selection_source": "recommended"
+          }
+        },
+        {
+          "day_id": "day-2026-10-11",
+          "day_date": "2026-10-11",
+          "theme": "第11日城市漫步",
+          "activities": [
+            {
+              "activity_id": "activity_a8e4688bd6db5ad3b704365c52644ade",
+              "candidate_ref": "candidate-bund",
+              "slot_id": "slot-2026-10-11-morning",
+              "kind": "sightseeing",
+              "poi_id": "poi-bund",
+              "place_fact_id": "fact-bund",
+              "activity_source": "model",
+              "requirement_ids": [],
+              "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+            },
+            {
+              "activity_id": "activity_3688f89225c954fbb714654fb7f7c0b2",
+              "candidate_ref": "candidate-bund",
+              "slot_id": "slot-2026-10-11-afternoon",
+              "kind": "sightseeing",
+              "poi_id": "poi-bund",
+              "place_fact_id": "fact-bund",
+              "activity_source": "model",
+              "requirement_ids": [],
+              "recommendation_reason": "合成测试：按用户要求分时段继续游览同一景点。"
+            }
+          ],
+          "unfilled_slot_ids": [
+            "slot-2026-10-11-breakfast",
+            "slot-2026-10-11-lunch",
+            "slot-2026-10-11-dinner"
+          ],
+          "weather_fact_id": null,
+          "weather_advice": "该日期暂无预报，天气建议未知。",
+          "lodging": {
+            "candidate_ref": "candidate-hotel",
+            "poi_id": "poi-hotel",
+            "place_fact_id": "fact-hotel",
+            "area_hint_id": "area-bund",
+            "selection_source": "recommended"
+          }
+        }
+      ],
+      "area_hints": [
+        {
+          "area_hint_id": "area-bund",
+          "label": "外滩区域",
+          "anchor_poi_ids": [
+            "poi-bund"
+          ],
+          "center": null,
+          "basis_fact_ids": [
+            "fact-bund"
+          ],
+          "basis": "model_recommendation"
+        },
+        {
+          "area_hint_id": "area-city-center",
+          "label": "市中心区域",
+          "anchor_poi_ids": [
+            "poi-meal"
+          ],
+          "center": null,
+          "basis_fact_ids": [
+            "fact-meal"
+          ],
+          "basis": "model_recommendation"
+        }
+      ],
+      "legs": []
+    },
+    "report": {
+      "plan_id": "plan-sole-synthetic",
+      "based_on_revision": 1,
+      "issues": [
+        {
+          "issue_id": "issue-4b54bc127ae230c14efaea84",
+          "code": "missing_meal",
+          "category": "missing_arrangement",
+          "severity": "error",
+          "scope": "slot",
+          "day_id": "day-2026-10-10",
+          "target_id": "slot-2026-10-10-lunch",
+          "message": "午餐尚未安排有已核实地点依据的餐馆。",
+          "evidence_refs": [
+            "slot-2026-10-10-lunch"
+          ],
+          "triggers_repair": true,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-142c00059f1e95d9201cc33c",
+          "code": "missing_meal",
+          "category": "missing_arrangement",
+          "severity": "error",
+          "scope": "slot",
+          "day_id": "day-2026-10-10",
+          "target_id": "slot-2026-10-10-dinner",
+          "message": "晚餐尚未安排有已核实地点依据的餐馆。",
+          "evidence_refs": [
+            "slot-2026-10-10-dinner"
+          ],
+          "triggers_repair": true,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-d922fcf22829e2f4cae80679",
+          "code": "cost_unavailable",
+          "category": "unknown_info",
+          "severity": "warning",
+          "scope": "activity",
+          "day_id": "day-2026-10-10",
+          "target_id": "activity_ceb6d6ebe529570bbcfe1f88bc52f80e",
+          "message": "该地点没有可用的人均消费数据；不会据此估算价格或触发补查修正。",
+          "evidence_refs": [
+            "activity_ceb6d6ebe529570bbcfe1f88bc52f80e",
+            "fact-bund"
+          ],
+          "triggers_repair": false,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-18cacbbc021ace8576e266b4",
+          "code": "cost_unavailable",
+          "category": "unknown_info",
+          "severity": "warning",
+          "scope": "activity",
+          "day_id": "day-2026-10-10",
+          "target_id": "activity_743e50c3e43957c3ba9aa883b60b1638",
+          "message": "该地点没有可用的人均消费数据；不会据此估算价格或触发补查修正。",
+          "evidence_refs": [
+            "activity_743e50c3e43957c3ba9aa883b60b1638",
+            "fact-bund"
+          ],
+          "triggers_repair": false,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-df54535639db958800d6d006",
+          "code": "missing_meal",
+          "category": "missing_arrangement",
+          "severity": "error",
+          "scope": "slot",
+          "day_id": "day-2026-10-11",
+          "target_id": "slot-2026-10-11-breakfast",
+          "message": "早餐尚未安排有已核实地点依据的餐馆。",
+          "evidence_refs": [
+            "slot-2026-10-11-breakfast"
+          ],
+          "triggers_repair": true,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-b61de4d0639e51f079e6c922",
+          "code": "missing_meal",
+          "category": "missing_arrangement",
+          "severity": "error",
+          "scope": "slot",
+          "day_id": "day-2026-10-11",
+          "target_id": "slot-2026-10-11-lunch",
+          "message": "午餐尚未安排有已核实地点依据的餐馆。",
+          "evidence_refs": [
+            "slot-2026-10-11-lunch"
+          ],
+          "triggers_repair": true,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-defd9d5e4eb12981bf06cd87",
+          "code": "missing_meal",
+          "category": "missing_arrangement",
+          "severity": "error",
+          "scope": "slot",
+          "day_id": "day-2026-10-11",
+          "target_id": "slot-2026-10-11-dinner",
+          "message": "晚餐尚未安排有已核实地点依据的餐馆。",
+          "evidence_refs": [
+            "slot-2026-10-11-dinner"
+          ],
+          "triggers_repair": true,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-54224ac0540e379e71aa5f9c",
+          "code": "cost_unavailable",
+          "category": "unknown_info",
+          "severity": "warning",
+          "scope": "activity",
+          "day_id": "day-2026-10-11",
+          "target_id": "activity_a8e4688bd6db5ad3b704365c52644ade",
+          "message": "该地点没有可用的人均消费数据；不会据此估算价格或触发补查修正。",
+          "evidence_refs": [
+            "activity_a8e4688bd6db5ad3b704365c52644ade",
+            "fact-bund"
+          ],
+          "triggers_repair": false,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-8557bf69d2efbe32e38ae45c",
+          "code": "cost_unavailable",
+          "category": "unknown_info",
+          "severity": "warning",
+          "scope": "activity",
+          "day_id": "day-2026-10-11",
+          "target_id": "activity_3688f89225c954fbb714654fb7f7c0b2",
+          "message": "该地点没有可用的人均消费数据；不会据此估算价格或触发补查修正。",
+          "evidence_refs": [
+            "activity_3688f89225c954fbb714654fb7f7c0b2",
+            "fact-bund"
+          ],
+          "triggers_repair": false,
+          "based_on_revision": 1
+        },
+        {
+          "issue_id": "issue-1e5818d11d7cb91181355f4b",
+          "code": "weather_unavailable",
+          "category": "unknown_info",
+          "severity": "warning",
+          "scope": "day",
+          "day_id": "day-2026-10-11",
+          "target_id": null,
+          "message": "该日没有绑定天气事实。",
+          "evidence_refs": [],
+          "triggers_repair": false,
+          "based_on_revision": 1
+        }
+      ],
+      "days": [
+        {
+          "day_id": "day-2026-10-10",
+          "completeness": "incomplete",
+          "feasibility": "unverified",
+          "issue_ids": [
+            "issue-4b54bc127ae230c14efaea84",
+            "issue-142c00059f1e95d9201cc33c",
+            "issue-d922fcf22829e2f4cae80679",
+            "issue-18cacbbc021ace8576e266b4"
+          ]
+        },
+        {
+          "day_id": "day-2026-10-11",
+          "completeness": "incomplete",
+          "feasibility": "unverified",
+          "issue_ids": [
+            "issue-df54535639db958800d6d006",
+            "issue-b61de4d0639e51f079e6c922",
+            "issue-defd9d5e4eb12981bf06cd87",
+            "issue-54224ac0540e379e71aa5f9c",
+            "issue-8557bf69d2efbe32e38ae45c",
+            "issue-1e5818d11d7cb91181355f4b"
+          ]
+        }
+      ],
+      "requirements": [],
+      "repair_states": []
+    }
+  }
+}

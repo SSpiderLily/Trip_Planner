@@ -1,7 +1,11 @@
 import type { SpanDetail } from '@/types'
 
 export const nativeStepNames: Record<string, string> = {
+  'planning.modular': '独立分层规划', 'planning.modular.requirements': '需求整理阶段',
+  'planning.modular.collection': '资料采集阶段', 'planning.modular.generation': '初版生成阶段',
+  'planning.modular.validation': '行程提交校验', 'planning.modular.evaluation': '独立评估阶段',
   'llm.native_tool_loop': '原生模型调用', 'tool.native_call': '原生工具调用',
+  'native.tool.arguments_rejected': '工具参数未通过',
   'native.agent.attractions': '景点子智能体执行', 'native.agent.dining': '餐饮子智能体执行',
   'native.agent.lodging': '住宿子智能体执行',
   'native.requirements.start': '主智能体开始整理需求', 'native.requirements.accepted': '完整需求与原文依据',
@@ -27,9 +31,10 @@ export function nativeObservationSummary(detail: SpanDetail | null): string[] {
   if (!detail || !(detail.name in nativeStepNames)) return []
   const input = object(detail.input_data), output = object(detail.output_data)
   const result: string[] = []
-  if (typeof input.role === 'string' && roles[input.role]) result.push(roles[input.role])
+  const role = input.role ?? output.role, stage = input.stage ?? output.stage
+  if (typeof role === 'string' && roles[role]) result.push(roles[role])
   if (typeof input.target_role === 'string' && roles[input.target_role]) result.push(`派发对象：${roles[input.target_role]}`)
-  if (typeof input.stage === 'string' && stages[input.stage]) result.push(`阶段：${stages[input.stage]}`)
+  if (typeof stage === 'string' && stages[stage]) result.push(`阶段：${stages[stage]}`)
   if (typeof input.sequence === 'number') result.push(`业务记录序号：${input.sequence}`)
   const round = input.round ?? output.round
   if (typeof round === 'number') result.push(`派发或修订轮次：${round}`)

@@ -157,15 +157,27 @@ class NativeAttractionCollectionTests(unittest.TestCase):
         answer = {"selections": [{"poi_id": "p1", "recommendation_reason": "符合城市漫步偏好"}],
                   "unmet_needs": ["价格和营业时间未知"]}
         child = FakeModel(call("maps_text_search", {"keywords": "外滩", "city": "上海"}),
-                          call("submit_attractions", answer, "submit-1"), final("候选已提交。"))
+                          call("submit_attractions", answer, "submit-1"))
         chain, master, maps = self.setup_chain(child)
         result = chain.run(request())
         self.assertEqual(result.children[0].task_result.status, "complete")
         self.assertEqual(len(result.candidates), 1)
-        self.assertEqual(json.loads(child.requests[2]["messages"][-1]["content"])["data"]["status"], "accepted")
+        self.assertEqual(len(child.requests), 2)
+        self.assertEqual(result.children[0].protocol.termination_reason, "submission_accepted")
+        self.assertEqual(json.loads(result.children[0].protocol.messages[-1]["content"])["data"]["status"], "accepted")
         self.assertEqual(json.loads(master.requests[1]["messages"][-1]["content"])["data"]["unmet_needs"],
                          ["价格和营业时间未知"])
         maps.assert_called_once()
+
+    def test_accepted_empty_selection_preserves_missing_without_confirmation(self):
+        child = FakeModel(call("submit_attractions", {"selections": [], "unmet_needs": ["没有合法候选"]}))
+        chain, master, maps = self.setup_chain(child)
+        result = chain.run(request())
+        self.assertFalse(result.candidates)
+        self.assertEqual(result.children[0].unmet_needs, ("没有合法候选",))
+        self.assertEqual(result.children[0].protocol.termination_reason, "submission_accepted")
+        self.assertEqual((len(child.requests), len(master.requests)), (1, 2))
+        maps.assert_not_called()
 
     def test_native_submit_rejects_invented_poi_and_allows_corrected_submission(self):
         def submission(poi, identity):
@@ -180,10 +192,9 @@ class NativeAttractionCollectionTests(unittest.TestCase):
                          "CHILD_SELECTION_INVALID")
 
     def test_queries_after_accepted_submission_do_not_access_mcp_again(self):
-        child = FakeModel(call("maps_text_search", {"keywords": "外滩", "city": "上海"}),
-            call("submit_attractions", {"selections": [{"poi_id":"p1","recommendation_reason":"符合偏好"}]},
-                 "submit-1"),
-            call("maps_text_search", {"keywords":"公园","city":"上海"}, "call-2"), final("已提交"))
+        submitted = call("submit_attractions", {"selections": [{"poi_id":"p1","recommendation_reason":"符合偏好"}]}, "submit-1")
+        submitted.message["tool_calls"].extend(call("maps_text_search", {"keywords":"公园","city":"上海"}, "call-2").message["tool_calls"])
+        child = FakeModel(call("maps_text_search", {"keywords": "外滩", "city": "上海"}), submitted)
         chain, _, maps = self.setup_chain(child)
         result = chain.run(request())
         self.assertEqual(len(result.candidates), 1)

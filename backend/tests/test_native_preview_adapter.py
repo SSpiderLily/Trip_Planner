@@ -1,6 +1,6 @@
 """预览适配独立模拟测试：不导入其他测试文件；真实服务、正式工厂保持不变。"""
 import asyncio
-from dataclasses import replace
+from dataclasses import replace, dataclass
 from datetime import datetime
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock
 
 from app.agents.native_multiagent_collection import NativeMultiagentCollectionResult
-from app.agents.native_trip_planner import NativeTripPlanResult, NativeTripPlanner
+from app.agents.native_trip_planner import NativeTripPlanner
 from app.models.planning_v4 import (TripRequest, RequirementSummary, FactSource, FactStore, PlaceFact, CandidateRef,
     DraftActivity, DraftDay, PlanDraft, LodgingRef, RepairState, EditCommand, AreaHint)
 from app.models.planning_v4_preview import PreviewSnapshot
@@ -30,6 +30,42 @@ from app.services.preview_repository import PreviewRepository
 from app.services.preview_task_service import PreviewTaskService
 from app.services.task_repository import TaskRepository
 from app.services.task_service import TaskService
+
+
+@dataclass(frozen=True)
+class NativeTripPlanFixture:
+    """旧测试构造辅助；生产端只接收公开PlanningOutcome。"""
+    planning_input: object
+    initial_draft: object
+    repair: object
+    collection: object
+    master_history: object
+    @property
+    def draft(self): return self.repair.draft
+    @property
+    def fact_store(self): return self.repair.facts
+    @property
+    def report(self): return self.repair.report
+
+
+def public_outcome(value):
+    from app.models.planning_outcome import PlanningOutcome
+    from app.models.planning_execution import PlanningSnapshot, DraftResult
+    from app.models.planning_evidence import EndpointEvidence, WeatherEvidence
+    from app.models.planning_runtime import PlanningRunIdentity
+    identity=PlanningRunIdentity(task_id=value.collection.run_id,plan_id=value.initial_draft.plan_id)
+    def evidence(item, cls):
+        return None if item is None else cls.model_validate({key:getattr(item,key) for key in cls.model_fields if key!='schema_version'})
+    snapshot=PlanningSnapshot.model_construct(identity=identity,planning_input=value.planning_input,
+        facts=value.fact_store,candidates=value.repair.candidates,area_hints=value.repair.area_hints,
+        task_results=value.repair.task_results,
+        endpoint_evidence=evidence(value.collection.endpoints,EndpointEvidence),
+        weather_evidence=evidence(value.collection.weather,WeatherEvidence))
+    initial=DraftResult.model_construct(identity=identity,planning_input=value.planning_input,draft=value.initial_draft,
+        report=validate_daily_plan(value.collection.planning_input,value.initial_draft,value.collection.fact_store,value.collection.candidates),
+        facts=value.collection.fact_store,candidates=value.collection.candidates,area_hints=())
+    return PlanningOutcome.model_construct(status=value.repair.status,error_code=None,initial_result=initial,
+        snapshot=snapshot,repair=value.repair)
 
 
 def request():
@@ -96,7 +132,7 @@ def native_result(req=None, *, task_id="task", plan_id="plan", partial=False, em
     report = validate_daily_plan(planning, draft, final_facts, final_candidates, repair_states=states)
     repair = DayRepairResult(status="partial" if partial or empty else "complete", draft=draft, facts=final_facts,
         candidates=final_candidates, report=report, repair_states=states, stop_reason="round_limit" if partial or empty else "complete")
-    return NativeTripPlanResult(planning, initial, repair, collection, ({"provider_reasoning": "private-model-history"},))
+    return NativeTripPlanFixture(planning, initial, repair, collection, ({"provider_reasoning": "private-model-history"},))
 
 
 class FixturePlanner:
@@ -105,13 +141,13 @@ class FixturePlanner:
 
     async def run_async(self, req, **kwargs):
         self.calls.append(kwargs)
-        return native_result(req, task_id=kwargs["task_id"], plan_id=kwargs["plan_id"], partial=self.partial, endpoints=self.endpoints)
+        return public_outcome(native_result(req, task_id=kwargs["task_id"], plan_id=kwargs["plan_id"], partial=self.partial, endpoints=self.endpoints))
 
 
 class NativePreviewAdapterTests(unittest.TestCase):
     def convert(self, result=None, req=None):
         req = req or request()
-        return NativePreviewAdapter().convert(result or native_result(req), request=req, task_id="task", plan_id="plan")
+        return NativePreviewAdapter().convert(public_outcome(result or native_result(req)), request=req, task_id="task", plan_id="plan")
 
     def test_final_revision_facts_candidates_order_and_costs_match_existing_contract(self):
         native = native_result(); result = self.convert(native); preview = result.snapshot.preview
@@ -231,10 +267,11 @@ class NativePreviewAdapterTests(unittest.TestCase):
 
 class NativePreviewPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_native_planner_mock_tool_response_converts_to_preview(self):
-        seed = native_result().collection
+        from planning_collection_fixtures import normalized_collection
+        seed = normalized_collection(native_result().collection)
         interpreter = Mock(); interpreter.run.return_value = SimpleNamespace(summary=seed.planning_input.requirements,
             protocol=NativeToolLoopResult("", (), (), 0))
-        collector = Mock(); collector.run.side_effect = lambda req, **kw: replace(seed, run_id=kw["run_id"], protocol=NativeToolLoopResult("", (), (), 0))
+        collector = Mock(); collector.run.side_effect = lambda req, **kw: normalized_collection(replace(seed, protocol=NativeToolLoopResult("", (), (), 0)), kw["run_id"])
         class Master:
             def __init__(self): self.called = False
             def invoke_native(self, messages, *, tools, **kwargs):
@@ -521,7 +558,7 @@ class OptionalEndpointNoticeTests(unittest.TestCase):
                     native = native_result(req)
                     maps = Mock(return_value=payload)
                     endpoints = NativeEndpointService(adapter=AmapContractAdapter(maps)).run(native.planning_input, run_id="task")
-                    report = _endpoint_notices(native.repair.report, SimpleNamespace(collection=SimpleNamespace(endpoints=endpoints)))
+                    report = _endpoint_notices(native.repair.report, SimpleNamespace(snapshot=SimpleNamespace(endpoint_evidence=endpoints)))
                     notices = [i for i in report.issues if i.code.startswith("ENDPOINT_")]
                     if expected:
                         self.assertEqual(len(notices), 1)

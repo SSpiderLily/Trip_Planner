@@ -329,7 +329,7 @@ class NativeWeatherIntegrationTests(unittest.TestCase):
                             "weather_advice": "有雨，请带雨具"})
                     return tool_call("submit_daily_plan", {"days": output}, "daily")
                 empty = {key: [] for key in ("core_goals", "preferences", "hard_requirements", "lodging_changes", "unknowns", "assumptions")}
-                master = Model(tool_call("submit_requirements", empty, "requirements"), final(), batch(
+                master = Model(tool_call("submit_requirements", empty, "requirements"), batch(
                     tool_call("query_weather", {}, "weather"), tool_call("find_attractions", {
                         "city": "上海", "dates": ["2026-10-20", "2026-10-21", "2026-10-22"],
                         "objective": "测试公园", "candidate_target": 1}, "sight")), dining_task, final(), daily, final())

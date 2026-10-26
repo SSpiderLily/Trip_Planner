@@ -89,7 +89,7 @@ maps_text_search 在任务城市内搜索，maps_search_detail 只核实本任�
 地图工具返回的places带eligible标记；只有eligible=true或已有available_candidates中的地点可提交。
 选好后必须调用submit_attractions，用工具参数提交selections和unmet_needs；不要在普通文本里写JSON。
 推荐理由只写偏好匹配或供应商类别，不计算距离/交通耗时，不编造等级、免费、位置或可用日期。
-submit_attractions校验通过后停止查询，最后仅简短确认。此步不安排每日时段、不调用路线、不生成完整行程。
+submit_attractions校验通过后停止查询，由后端结束当前阶段。此步不安排每日时段、不调用路线、不生成完整行程。
 """
 
 
@@ -275,7 +275,8 @@ class NativeCandidateAgent:
             protocol = NativeToolLoop(self.llm or get_agent_llm(self.role), tools,
                                       observation_role=self.role, observation_stage="collection",
                                       max_model_calls=self.max_model_calls,
-                                      max_tool_calls=self.max_tool_calls).run([
+                                      max_tool_calls=self.max_tool_calls,
+                                      accepted_submission_tools=frozenset({self.submit_name})).run([
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ], cancel_event=cancel_event)

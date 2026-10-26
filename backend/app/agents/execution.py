@@ -1,16 +1,12 @@
 """项目内的执行适配：业务成功证据独立于观测存储。"""
+
+from app.models.planning_errors import PlanningError
 import ast
 import json
 from datetime import date
 
 from hello_agents import SimpleAgent
 from ..services.observation_service import span
-
-
-class PlanningError(RuntimeError):
-    def __init__(self, code, message, step=None):
-        super().__init__(message)
-        self.code, self.step = code, step
 
 
 def decode_result(value):

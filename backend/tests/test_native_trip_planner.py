@@ -106,27 +106,29 @@ class NativeTripPlannerTests(unittest.TestCase):
     def planner(self, model, state=None, emit=None):
         state = state or collection()
         collector = Mock()
-        collector.run.return_value = state
+        from planning_collection_fixtures import normalized_collection
+        collector.run.side_effect = lambda req, **kw: normalized_collection(state, kw.get("run_id"))
         return NativeTripPlanner(master_llm=model, collector=collector, emit=emit,
             requirement_interpreter=fixed_requirements(state.planning_input.requirements)), collector
 
     def test_native_initial_plan_grounded_days_lodging_unknowns_without_business_repairs(self):
         trace = NativeChainTrace()
-        model = FakeModel(initial, final("初版已提交"))
+        model = FakeModel(initial)
         planner, collector = self.planner(model, emit=trace.emit)
         result = planner.run(request())
         self.assertEqual(result.repair.status, "complete")
         self.assertEqual(len(result.draft.days), 2)
         self.assertEqual(result.draft.revision, 1)
         self.assertEqual(result.repair.attempts, ())
+        self.assertEqual(len(model.requests), 1)
         self.assertTrue(all(state.completed_rounds == 0 for state in result.repair.repair_states))
         self.assertTrue(result.report.issues)  # 价格/天气/营业未知不触发业务补查。
         self.assertFalse(any(is_required_place_gap(result.planning_input, issue) for issue in result.report.issues))
         self.assertEqual(collector.run.call_count, 1)
         self.assertEqual(result.draft.legs, ())
         self.assertEqual(result.draft.days[0].lodging.poi_id, result.draft.days[1].lodging.poi_id)
-        self.assertTrue(any(message.get("tool_calls", [{}])[0].get("function", {}).get("name") == "find_attractions"
-                            for message in model.requests[0]["messages"] if message["role"] == "assistant"))
+        self.assertEqual([m['role'] for m in model.requests[0]['messages']], ['system', 'user'])
+        self.assertNotIn('messages', collector.run.call_args.kwargs)
         self.assertEqual(model.requests[0]["tools"][0]["function"]["name"], "submit_daily_plan")
 
     def test_invalid_candidate_and_wrong_date_rejected_then_corrected_without_map_calls(self):
@@ -144,18 +146,19 @@ class NativeTripPlannerTests(unittest.TestCase):
             self.assertEqual(result.repair.attempts, ())
 
     def test_missing_day2_slot_uses_existing_candidates_and_preserves_day1_ids_and_order(self):
-        model = FakeModel(omit_one, final("初版缺项"), revision, final("修订提交"))
+        model = FakeModel(omit_one, revision)
         planner, collector = self.planner(model)
         result = planner.run(request())
         self.assertEqual(result.repair.status, "complete")
         self.assertEqual(result.draft.revision, 2)
+        self.assertEqual(len(model.requests), 2)
         self.assertEqual(result.draft.days[0], result.initial_draft.days[0])
         preserved = [activity.activity_id for activity in result.initial_draft.days[1].activities]
         self.assertEqual([activity.activity_id for activity in result.draft.days[1].activities
                           if activity.activity_id in preserved], preserved)
         self.assertEqual(result.repair.repair_states[1].completed_rounds, 1)
         self.assertEqual(collector.run.call_count, 1)
-        self.assertEqual(payload(model.requests[2]["messages"])["target_date_only"]["day_id"], result.draft.days[1].day_id)
+        self.assertEqual(payload(model.requests[1]["messages"])["target_date_only"]["day_id"], result.draft.days[1].day_id)
 
     def test_revision_cannot_modify_other_day_or_drop_preserved_activity(self):
         for change in [lambda output: output["replacement_day"].update(day_id="day-2026-10-20"),
@@ -163,19 +166,19 @@ class NativeTripPlannerTests(unittest.TestCase):
             def bad(messages):
                 output = replacement(messages); change(output)
                 return call("submit_day_revision", output, "bad-revision")
-            model = FakeModel(omit_one, final("缺项"), bad, revision, final("纠正"))
+            model = FakeModel(omit_one, bad, revision)
             planner, _ = self.planner(model)
             result = planner.run(request())
             self.assertEqual(result.repair.status, "complete")
             self.assertEqual(result.draft.days[0], result.initial_draft.days[0])
-            self.assertEqual(json.loads(model.requests[3]["messages"][-1]["content"])["data"]["status"], "rejected")
+            self.assertEqual(json.loads(model.requests[2]["messages"][-1]["content"])["data"]["status"], "rejected")
             self.assertEqual(result.repair.repair_states[1].completed_rounds, 1)
 
     def test_no_progress_stops_after_three_business_rounds_with_editable_draft(self):
         def unchanged(messages):
             data = payload(messages)
             return call("submit_day_revision", replacement(messages, fill=False), "unchanged-"+str(data["repair_round"]["round_number"]))
-        model = FakeModel(omit_one, final("缺项"), unchanged, final("无进展"), unchanged, final("无进展"), unchanged, final("无进展"))
+        model = FakeModel(omit_one, unchanged, unchanged, unchanged)
         planner, collector = self.planner(model)
         result = planner.run(request())
         self.assertEqual(result.repair.status, "partial")
@@ -185,7 +188,7 @@ class NativeTripPlannerTests(unittest.TestCase):
         self.assertEqual(collector.run.call_count, 1)
 
     def test_provider_failure_does_not_consume_business_round_and_can_retry(self):
-        model = FakeModel(omit_one, final("缺项"), lambda _: (_ for _ in ()).throw(RuntimeError("private-secret")), revision, final("已修复"))
+        model = FakeModel(omit_one, lambda _: (_ for _ in ()).throw(RuntimeError("private-secret")), revision)
         planner, _ = self.planner(model)
         result = planner.run(request())
         self.assertEqual(result.repair.status, "complete")
@@ -216,12 +219,12 @@ class NativeTripPlannerTests(unittest.TestCase):
         master = FakeModel(call("find_attractions", task_args(dates=["2026-10-20", "2026-10-21"]), "initial-sights"),
             spatial.batch(call("find_restaurants", spatial.dining_args(dates=["2026-10-20", "2026-10-21"], meals=meal_scopes), "initial-food"),
                 call("recommend_lodging", spatial.lodging_args(dates=["2026-10-20", "2026-10-21"]), "initial-hotel")),
-            final("采集完成"), initial, final("初版缺早餐"),
+            final("采集完成"), initial,
             call("find_restaurants", spatial.dining_args(dates=["2026-10-21"], meals=[{
                 "date": "2026-10-21", "period": "breakfast", "anchor_poi_id": "p1"}]), "repair-food"),
-            final("已补查"), revision, final("已修订"))
-        dining = FakeModel(spatial.spatial_query, all_submit, final("提交"),
-                           spatial.spatial_query, all_submit, final("补查提交"))
+            final("已补查"), revision)
+        dining = FakeModel(spatial.spatial_query, all_submit,
+                           spatial.spatial_query, all_submit)
         maps = Mock(side_effect=spatial.map_data)
         trace = NativeChainTrace()
         collector = NativeMultiagentCollection(master_llm=master, weather_service=spatial.weather_fixture(),
@@ -259,19 +262,21 @@ class NativeTripPlannerTests(unittest.TestCase):
         state = replace(state, candidates=candidates, children=children)
         calls = []
         def collect(*args, **kwargs):
-            if kwargs.get("initial_state") is None: return state
+            if kwargs.get("initial_state") is None:
+                from planning_collection_fixtures import normalized_collection
+                return normalized_collection(state, kwargs["run_id"])
             seed = kwargs["initial_state"]
             calls.append(kwargs["repair_request"])
             tool = AmapContractAdapter(lambda *a: {"result_status": "error", "result_error": {"category": "rate_limit"}}).search_text(keywords="早餐", city="上海")
             facts = FactStore(sources=(*seed.fact_store.sources, tool.source), places=seed.fact_store.places)
-            child = NativeCandidateExecution(TaskResult(task_id="error-"+str(len(calls)), run_id=state.run_id,
+            child = NativeCandidateExecution(TaskResult(task_id="error-"+str(len(calls)), run_id=seed.run_id,
                 context_revision=3, request_id=request().request_id, status="partial", stop_reason="no_match"), facts,
                 protocol=NativeToolLoopResult("", ({"role": "tool", "content": json.dumps({"ok": True,
                     "data": {"result_status": "error", "error": {"category": "rate_limit"}}})},), (), 1))
-            protocol = NativeToolLoopResult("查询故障", tuple(kwargs["messages"]), (), 0)
+            protocol = NativeToolLoopResult("查询故障", tuple(kwargs.get("messages", ())), (), 0)
             return replace(seed, children=(*seed.children, child), fact_store=facts, protocol=protocol)
         collector = Mock(); collector.run.side_effect = collect
-        model = FakeModel(initial, final("初版缺早餐"))
+        model = FakeModel(initial)
         result = NativeTripPlanner(master_llm=model, collector=collector,
             requirement_interpreter=fixed_requirements(state.planning_input.requirements)).run(request())
         self.assertEqual(len(calls), 3)
@@ -279,7 +284,7 @@ class NativeTripPlannerTests(unittest.TestCase):
         self.assertEqual(result.repair.repair_states[1].stop_reason, "technical_error")
         self.assertEqual(result.draft, result.initial_draft)
         self.assertTrue(all(attempt.error_code == "REPAIR_MAP_FAILED" for attempt in result.repair.attempts))
-        self.assertEqual(len(model.requests), 2)
+        self.assertEqual(len(model.requests), 1)
 
     def test_repair_collection_rejects_wrong_day_role_and_unrelated_meal_before_child(self):
         from app.agents.native_multiagent_collection import NativeMultiagentCollection
@@ -318,9 +323,10 @@ class NativeTripPlannerTests(unittest.TestCase):
 
     def test_cancellation_after_initial_submission_never_returns_plan(self):
         event = Event()
-        def cancel(messages):
-            event.set(); return final("取消")
-        planner, _ = self.planner(FakeModel(initial, cancel))
+        def cancel(event_name, data):
+            if event_name == "planning.initial":
+                event.set()
+        planner, _ = self.planner(FakeModel(initial), emit=cancel)
         with self.assertRaises(NativeToolLoopError) as raised: planner.run(request(), cancel_event=event)
         self.assertEqual(raised.exception.code, "CANCELLED")
 
@@ -328,3 +334,16 @@ class NativeTripPlannerTests(unittest.TestCase):
         planner, _ = self.planner(FakeModel(final("我已经安排了虚构行程")))
         with self.assertRaises(NativeToolLoopError) as raised: planner.run(request())
         self.assertEqual(raised.exception.code, "MASTER_DID_NOT_SUBMIT_PLAN")
+
+    def test_independent_adapters_preserve_phase_and_rejection_events(self):
+        def bad_initial(messages):
+            output=plan(messages);output['days'][0]['activities'][0]['candidate_ref']='invented'
+            return call('submit_daily_plan',output,'invalid')
+        def bad_revision(messages):
+            output=replacement(messages);output['replacement_day']['activities'].pop(-1)
+            return call('submit_day_revision',output,'invalid-revision')
+        trace=NativeChainTrace();planner,_=self.planner(FakeModel(bad_initial,omit_one,bad_revision,revision),emit=trace.emit)
+        result=planner.run(request())
+        self.assertEqual(result.repair.status,'complete')
+        events={row['event'] for row in trace.events}
+        self.assertLessEqual({'planning.phase','planning.submission_rejected','repair.submission_rejected'},events)

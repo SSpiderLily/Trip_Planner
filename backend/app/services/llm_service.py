@@ -9,7 +9,7 @@ from typing import Any, Literal
 from hello_agents import HelloAgentsLLM
 from hello_agents.core.exceptions import HelloAgentsException
 from ..config import Settings, get_settings
-from .observation_service import record_model_diagnostics
+from .observation_service import record_model_diagnostics, record_model_configuration
 from .model_diagnostics import completion_diagnostics, provider_error_diagnostics
 
 
@@ -40,10 +40,14 @@ class AgentModelConfig:
     model: str
     api_key: str = field(repr=False)
     base_url: str = field(repr=False)
+    reasoning_effort: str | None = None
+    temperature: float = 0.01
+    output_token_limit: int | None = None
+    output_token_parameter: str = "max_tokens"
 
 
 def resolve_agent_model_config(role: AgentRole, settings: Settings | None = None) -> AgentModelConfig:
-    """所有角色共用网关配置，模型ID按主/子角色区分；OPENAI 配置兜底。"""
+    """所有角色共用网关；调用参数从Settings读取；OPENAI配置兜底。"""
     if role not in _AGENT_ROLES:
         raise ValueError("未知智能体角色")
     config = settings if settings is not None else get_settings()
@@ -52,6 +56,10 @@ def resolve_agent_model_config(role: AgentRole, settings: Settings | None = None
         model=getattr(config, f"{prefix}_llm_model_id"),
         api_key=config.llm_api_key or config.openai_api_key,
         base_url=config.llm_base_url or config.openai_base_url,
+        reasoning_effort=getattr(config, f"{prefix}_llm_reasoning_effort"),
+        temperature=config.llm_temperature,
+        output_token_limit=getattr(config, f"{prefix}_llm_max_output_tokens"),
+        output_token_parameter=config.llm_output_token_parameter,
     )
 
 # 全局LLM实例
@@ -62,6 +70,13 @@ _agent_llm_lock = RLock()
 
 class UsageAwareLLM(HelloAgentsLLM):
     """保留 HelloAgents 非流式调用行为，同时向观测层返回原响应的用量。"""
+
+    def __init__(self, *args, reasoning_effort=None, output_token_limit=None,
+                 output_token_parameter="max_tokens", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reasoning_effort = reasoning_effort
+        self.output_token_limit = output_token_limit
+        self.output_token_parameter = output_token_parameter
 
     def _request_completion(self, messages, *, request_timeout=None, max_retries=None, **kwargs):
         try:
@@ -76,7 +91,24 @@ class UsageAwareLLM(HelloAgentsLLM):
             if client_options:
                 client = client.with_options(**client_options)
 
-            # 不注入项目或 SDK 默认输出上限；未指定的参数直接省略。
+            # 角色推理强度来自集中配置；未配置时省略。
+            effort = getattr(self, "reasoning_effort", None)
+            if effort is not None:
+                kwargs.setdefault("reasoning_effort", effort)
+
+            # 仅发送配置的数值；不把“未设置”或字符串max冒充服务端最大值。
+            limit = getattr(self, "output_token_limit", None)
+            if limit is not None and not any(key in kwargs for key in ("max_tokens", "max_completion_tokens")):
+                kwargs[self.output_token_parameter] = limit
+
+            record_model_configuration({
+                "model": self.model,
+                "temperature": kwargs.get('temperature', self.temperature),
+                "reasoning_effort": kwargs.get('reasoning_effort'),
+                # 用参数名/数值对表示，避免通用凭据脱敏把max_tokens数值遮掉。
+                "output_limits": [{"parameter": key, "value": kwargs[key]}
+                    for key in ("max_tokens", "max_completion_tokens") if kwargs.get(key) is not None],
+            })
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -153,7 +185,7 @@ def get_llm() -> HelloAgentsLLM:
         
         # HelloAgentsLLM会自动从环境变量读取配置
         # 包括OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL等
-        _llm_instance = UsageAwareLLM()
+        _llm_instance = UsageAwareLLM(temperature=settings.llm_temperature)
         
         print(f"✅ LLM服务初始化成功")
         print(f"   提供商: {_llm_instance.provider}")
@@ -181,5 +213,8 @@ def get_agent_llm(role: AgentRole) -> UsageAwareLLM:
             _agent_llm_instances[role] = UsageAwareLLM(
                 model=profile.model, api_key=profile.api_key,
                 base_url=profile.base_url, provider="custom",
+                temperature=profile.temperature, output_token_limit=profile.output_token_limit,
+                output_token_parameter=profile.output_token_parameter,
+                **({"reasoning_effort": profile.reasoning_effort} if profile.reasoning_effort is not None else {}),
             )
         return _agent_llm_instances[role]

@@ -167,12 +167,12 @@ class RequirementInterpreter:
 
                 # 指定酒店已有结构化输入，不再转换成通用must_include交给派发。
                 hotel_requirements = tuple(item for item in draft.hard_requirements
-                                           if item.source.field == "lodging_query")
+                                           if item.source is not None and item.source.field == "lodging_query")
                 if hotel_requirements:
                     with span("requirements.structured_lodging", "validation", {}) as record:
                         record.output = {"outcome": "use_structured_hotel", "removed_duplicate_count": len(hotel_requirements)}
                 draft = draft.model_copy(update={"hard_requirements": tuple(
-                    item for item in draft.hard_requirements if item.source.field != "lodging_query"
+                    item for item in draft.hard_requirements if item.source is None or item.source.field != "lodging_query"
                 )})
                 summary = RequirementSummary(
                     requirements_id=f"requirements_{uuid4().hex}",

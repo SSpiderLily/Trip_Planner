@@ -63,12 +63,24 @@ class NativeMultiagentTests(unittest.TestCase):
         master = master or FakeModel(call("find_attractions", task_args(), "sights"), batch(
             call("find_restaurants", dining_args(), "food-task"),
             call("recommend_lodging", lodging_args(), "hotel-task")), final("三个角色返回；价格未知"))
-        dining = dining or FakeModel(spatial_query, spatial_submit, final("提交"))
-        lodging = lodging or FakeModel(spatial_query, spatial_submit, final("提交"))
+        dining = dining or FakeModel(spatial_query, spatial_submit)
+        lodging = lodging or FakeModel(spatial_query, spatial_submit)
         attraction = FakeModel(call("maps_text_search", {"city":"上海", "keywords":"外滩"}), choice())
         maps = Mock(side_effect=mapper or map_data)
         return NativeMultiagentCollection(weather_service=weather_fixture(), master_llm=master, attraction_llm=attraction, dining_llm=dining,
             lodging_llm=lodging, adapter=AmapContractAdapter(maps), emit=emit), master, maps
+
+    def test_accepted_empty_dining_and_lodging_keep_gaps_and_return_to_master(self):
+        dining = FakeModel(call("submit_restaurants", {"selections": [], "unmet_needs": ["未找到餐馆"]}, "empty-food"))
+        lodging = FakeModel(call("submit_lodging", {"selections": [], "unmet_needs": ["未找到酒店"]}, "empty-hotel"))
+        chain, master, _ = self.chain(dining=dining, lodging=lodging)
+        result = chain.run(request())
+        self.assertEqual(len(master.requests), 3)  # 主模型收到缺项后仍执行最后决策。
+        for child in result.children[1:]:
+            self.assertEqual(child.protocol.termination_reason, "submission_accepted")
+            self.assertFalse(child.task_result.candidates)
+            self.assertTrue(child.unmet_needs)
+        self.assertEqual((len(dining.requests), len(lodging.requests)), (1, 1))
 
     def test_rounds_concurrent_overlap_ordered_results_fact_source_closure(self):
         barrier = Barrier(2)
